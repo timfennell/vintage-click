@@ -1,0 +1,5 @@
+module CSpirula [system] {
+    header "spirula_render.h"
+    link "spirula_render"
+    export *
+}
