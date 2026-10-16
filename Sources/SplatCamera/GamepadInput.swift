@@ -2,37 +2,42 @@ import Foundation
 import GameController
 import simd
 
-/// Polls the first game controller (Xbox / PlayStation / MFi) each frame, with
-/// the keyboard as a fallback for when no pad is connected.
+/// The camera in your hands, on a game controller (Xbox / PlayStation / MFi),
+/// with the keyboard as a fallback.
 ///
-///   left stick   walk / strafe        right stick  look
-///   R2 / L2      rise / sink          d-pad up/dn  zoom (focal length)
-///   R1 / L1      walk faster / slower A / cross    reset view
-///   Y / triangle cycle the up axis    B / circle   SH bands: full / base colour
-///   X / square   save a full-quality still
+///   left stick     walk / strafe          right stick    look
+///   L1 / R1        sink / rise            L2 / R2        focus ring near / far
+///   d-pad < >      aperture open / close  d-pad ^ v      shutter faster / slower
+///   A / cross      shutter release        B / circle     hold: depth-of-field preview
+///   X / square     next lens from the bag Y / triangle   load a new roll (next stock)
+///   Menu           reset the view         View / Share   film-look preview in the finder
+///   L-stick click  walk faster / slower
 ///
-/// Keyboard: WASD walk, arrows look, E/Q rise/sink, =/- zoom, ]/[ speed,
-/// R reset, U up axis, H SH bands, Space still.
+/// Keyboard: WASD walk, arrows look, Q/E sink/rise, Z/C focus near/far,
+/// 1/2 aperture, 3/4 shutter, Space shutter, Tab DOF preview, L lens,
+/// R new roll, 0 reset, P film preview, G walk speed, U up axis.
 final class GamepadInput {
-    struct Buttons: OptionSet {
-        let rawValue: Int
-        static let reset = Buttons(rawValue: 1)
-        static let cycleUp = Buttons(rawValue: 2)
-        static let toggleSH = Buttons(rawValue: 4)
-        static let still = Buttons(rawValue: 8)
-        static let faster = Buttons(rawValue: 16)
-        static let slower = Buttons(rawValue: 32)
+    struct State {
+        var move = SIMD2<Float>(0, 0)
+        var look = SIMD2<Float>(0, 0)
+        var rise: Float = 0
+        var focus: Float = 0           // + far, - near
+        var dofPreview = false         // held
+        var pressed: Set<Control> = [] // pressed since the last poll
+    }
+    enum Control: Hashable {
+        case shutter, apertureOpen, apertureClose, shutterFaster, shutterSlower
+        case nextLens, newRoll, reset, filmPreview, walkSpeed, cycleUp
     }
 
-    private var held: Buttons = []
+    private var held: Set<Control> = []
     private(set) var controllerName: String?
 
     init() {
         GCController.shouldMonitorBackgroundEvents = true
         NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil,
                                                queue: .main) { [weak self] n in
-            let c = n.object as? GCController
-            self?.controllerName = c?.vendorName ?? "controller"
+            self?.controllerName = (n.object as? GCController)?.vendorName ?? "controller"
             print("Controller connected: \(self?.controllerName ?? "?")")
         }
         NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil,
@@ -52,41 +57,48 @@ final class GamepadInput {
         return (v < 0 ? -1 : 1) * t * t
     }
 
-    /// The fly input for this frame plus buttons newly pressed since the last call.
-    func poll() -> (FlyInput, Buttons) {
-        var input = FlyInput()
-        var now: Buttons = []
+    func poll() -> State {
+        var s = State()
+        var now: Set<Control> = []
         if let pad = GCController.controllers().first(where: { $0.extendedGamepad != nil })?
             .extendedGamepad {
-            input.move = SIMD2(Self.shape(pad.leftThumbstick.xAxis.value),
-                               Self.shape(pad.leftThumbstick.yAxis.value))
-            input.look = SIMD2(Self.shape(pad.rightThumbstick.xAxis.value),
-                               Self.shape(pad.rightThumbstick.yAxis.value))
-            input.rise = pad.rightTrigger.value - pad.leftTrigger.value
-            input.zoom = (pad.dpad.up.isPressed ? 1 : 0) - (pad.dpad.down.isPressed ? 1 : 0)
-            if pad.buttonA.isPressed { now.insert(.reset) }
-            if pad.buttonY.isPressed { now.insert(.cycleUp) }
-            if pad.buttonB.isPressed { now.insert(.toggleSH) }
-            if pad.buttonX.isPressed { now.insert(.still) }
-            if pad.rightShoulder.isPressed { now.insert(.faster) }
-            if pad.leftShoulder.isPressed { now.insert(.slower) }
+            s.move = SIMD2(Self.shape(pad.leftThumbstick.xAxis.value),
+                           Self.shape(pad.leftThumbstick.yAxis.value))
+            s.look = SIMD2(Self.shape(pad.rightThumbstick.xAxis.value),
+                           Self.shape(pad.rightThumbstick.yAxis.value))
+            s.rise = (pad.rightShoulder.isPressed ? 1 : 0) - (pad.leftShoulder.isPressed ? 1 : 0)
+            s.focus = pad.rightTrigger.value * pad.rightTrigger.value
+                - pad.leftTrigger.value * pad.leftTrigger.value
+            s.dofPreview = pad.buttonB.isPressed
+            if pad.buttonA.isPressed { now.insert(.shutter) }
+            if pad.buttonX.isPressed { now.insert(.nextLens) }
+            if pad.buttonY.isPressed { now.insert(.newRoll) }
+            if pad.dpad.left.isPressed { now.insert(.apertureOpen) }
+            if pad.dpad.right.isPressed { now.insert(.apertureClose) }
+            if pad.dpad.up.isPressed { now.insert(.shutterFaster) }
+            if pad.dpad.down.isPressed { now.insert(.shutterSlower) }
+            if pad.buttonMenu.isPressed { now.insert(.reset) }
+            if pad.buttonOptions?.isPressed == true { now.insert(.filmPreview) }
+            if pad.leftThumbstickButton?.isPressed == true { now.insert(.walkSpeed) }
         }
         if let kb = GCKeyboard.coalesced?.keyboardInput {
             func k(_ c: GCKeyCode) -> Float { kb.button(forKeyCode: c)?.isPressed == true ? 1 : 0 }
-            input.move += SIMD2(k(.keyD) - k(.keyA), k(.keyW) - k(.keyS))
-            input.look += SIMD2(k(.rightArrow) - k(.leftArrow), k(.upArrow) - k(.downArrow)) * 0.6
-            input.rise += k(.keyE) - k(.keyQ)
-            input.zoom += k(.equalSign) - k(.hyphen)
-            if k(.keyR) > 0 { now.insert(.reset) }
-            if k(.keyU) > 0 { now.insert(.cycleUp) }
-            if k(.keyH) > 0 { now.insert(.toggleSH) }
-            if k(.spacebar) > 0 { now.insert(.still) }
-            if k(.closeBracket) > 0 { now.insert(.faster) }
-            if k(.openBracket) > 0 { now.insert(.slower) }
+            s.move += SIMD2(k(.keyD) - k(.keyA), k(.keyW) - k(.keyS))
+            s.look += SIMD2(k(.rightArrow) - k(.leftArrow), k(.upArrow) - k(.downArrow)) * 0.6
+            s.rise += k(.keyE) - k(.keyQ)
+            s.focus += (k(.keyC) - k(.keyZ)) * 0.6
+            if k(.tab) > 0 { s.dofPreview = true }
+            let keys: [(GCKeyCode, Control)] = [
+                (.spacebar, .shutter), (.one, .apertureOpen), (.two, .apertureClose),
+                (.three, .shutterSlower), (.four, .shutterFaster), (.keyL, .nextLens),
+                (.keyR, .newRoll), (.zero, .reset), (.keyP, .filmPreview), (.keyG, .walkSpeed),
+                (.keyU, .cycleUp),
+            ]
+            for (code, control) in keys where k(code) > 0 { now.insert(control) }
         }
-        input.move = simd.simd_clamp(input.move, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
-        let pressed = now.subtracting(held)
+        s.move = simd_clamp(s.move, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
+        s.pressed = now.subtracting(held)
         held = now
-        return (input, pressed)
+        return s
     }
 }

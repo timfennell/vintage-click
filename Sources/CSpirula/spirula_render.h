@@ -26,3 +26,6 @@ int sr_shared_frames(int width, int height, int count, void** out_buffers,
 // Render into shared frame `frame` and wait for the GPU to finish.
 int sr_render_to_frame(int frame, const float* viewmat, float fx, float fy, float cx,
                        float cy, const char* primitive);
+// Depth of field inside the render: `count` float4 lens parameters (layout in
+// the spirula fork's docs/notes/lens-defocus.md), or NULL for a pinhole.
+int sr_set_lens(const float* params, int count);
