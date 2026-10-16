@@ -6,7 +6,7 @@ import MetalKit
 // Stage 1 spike: fly through a 3DGS scan with a game controller.
 //   SplatCamera [model.ply] [--res 1620x1080] [--fps 24] [--scale M_PER_UNIT] [--ev 12]
 //               [--cells 32] [--lens I] [--aperture F] [--film I]
-//               [--bench FRAMES] [--pinhole] [--shoot out.png]
+//               [--photo-res WxH] [--bench FRAMES] [--pinhole] [--shoot out.png]
 
 var args = Array(CommandLine.arguments.dropFirst())
 func option(_ name: String) -> String? {
@@ -19,6 +19,9 @@ let res = (option("--res") ?? "1620x1080").split(separator: "x").compactMap { In
 let bench = Int(option("--bench") ?? "0") ?? 0
 let shOverride = option("--sh").flatMap { Int32($0) }
 let shootPath = option("--shoot")
+// --burst N: fire N frames a second apart while the finder keeps running.
+let burst = Int(option("--burst") ?? "1") ?? 1
+let photoRes = option("--photo-res").map { $0.split(separator: "x").compactMap { Int($0) } }
 let sceneScale = option("--scale").flatMap { Float($0) }
 let sceneEV = option("--ev").flatMap { Float($0) }
 let cells = option("--cells").flatMap { Int($0) }
@@ -45,7 +48,9 @@ print(String(format: "%d splats, SH degree %d, read in %.1f s", model.count, mod
              CACurrentMediaTime() - t0))
 
 let viewer: Viewer
-do { viewer = try Viewer(model: model, width: res[0], height: res[1], metresPerUnit: sceneScale) } catch {
+// Exposures develop at their own (higher) resolution: twice the finder by default.
+let photo = photoRes.map { ($0[0], $0[1]) } ?? (res[0] * 2, res[1] * 2)
+do { viewer = try Viewer(model: model, width: res[0], height: res[1], photo: photo, metresPerUnit: sceneScale) } catch {
     print("\(error)")
     exit(1)
 }
@@ -97,23 +102,30 @@ if bench > 0 {
     viewer.benchFrames = bench
     viewer.onBenchDone = { report in
         print(report)
-        sr_shutdown()
         exit(0)
     }
 }
 
 if let p = shootPath {
-    viewer.scriptedPath = URL(fileURLWithPath: p)
-    viewer.onDeveloped = { _ in
-        sr_shutdown()
-        exit(0)
+    var saved = 0
+    viewer.onSaved = { path in
+        print("Saved \(path)")
+        saved += 1
+        if saved == burst { exit(0) }
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { viewer.shoot() }
+    for k in 0..<burst {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5 + Double(k)) {
+            let url = URL(fileURLWithPath: p)
+            viewer.scriptedPath = burst == 1 ? url
+                : url.deletingPathExtension().appendingPathExtension("\(k + 1).png")
+            viewer.releaseShutter()
+            viewer.scriptedPath = nil
+        }
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-    func applicationWillTerminate(_ notification: Notification) { sr_shutdown() }
 }
 let delegate = AppDelegate()
 app.delegate = delegate

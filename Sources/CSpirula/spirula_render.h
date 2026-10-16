@@ -29,3 +29,7 @@ int sr_render_to_frame(int frame, const float* viewmat, float fx, float fy, floa
 // Depth of field inside the render: `count` float4 lens parameters (layout in
 // the spirula fork's docs/notes/lens-defocus.md), or NULL for a pinhole.
 int sr_set_lens(const float* params, int count);
+// Adds `count` shared frames of this size (numbered from *first_index), next
+// to any others; each renders at its own size.
+int sr_add_shared_frames(int width, int height, int count, void** out_buffers,
+                         size_t* out_offsets, int* first_index);

@@ -15,9 +15,27 @@ final class ViewfinderHUD: NSView {
         var meterStops: Float = 0      // + over, - under
         var mode = ""                  // DOF preview, exposing, etc.
         var stats = ""
-        var reviewing = false
+        var mirrorUp = false
     }
     var info = Info() { didSet { needsDisplay = true } }
+
+    private var message: (text: String, until: Double)?
+    private var print: (image: NSImage, caption: String, until: Double)?
+
+    /// A short message in the finder (end of roll, buffer full).
+    func flash(_ text: String) {
+        message = (text, CACurrentMediaTime() + 2)
+        needsDisplay = true
+    }
+
+    /// A contact print of a frame that just came out of the darkroom.
+    func showPrint(_ image: CGImage, caption: String) {
+        let h: CGFloat = 220
+        let w = h * CGFloat(image.width) / CGFloat(image.height)
+        print = (NSImage(cgImage: image, size: NSSize(width: w, height: h)), caption,
+                 CACurrentMediaTime() + 4)
+        needsDisplay = true
+    }
 
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -42,10 +60,22 @@ final class ViewfinderHUD: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let b = bounds
         let u = b.height / 60   // layout unit
-        if info.reviewing {
-            text(info.mode, at: NSPoint(x: b.midX, y: b.maxY - 3 * u), size: 1.3 * u,
-                 color: .white, align: .center, width: b.width)
-            return
+        // Mirror up: nothing reaches the finder, not even the readouts.
+        if info.mirrorUp { return }
+        let now = CACurrentMediaTime()
+        if let m = message, now < m.until {
+            text(m.text, at: NSPoint(x: b.midX, y: b.midY + 9 * u), size: 1.4 * u, color: led,
+                 align: .center, width: b.width)
+        }
+        if let p = print, now < p.until {
+            let ph = 14 * u, pw = ph * p.image.size.width / p.image.size.height
+            let r = NSRect(x: 2 * u, y: b.maxY - 5 * u - ph, width: pw, height: ph)
+            NSColor(white: 0.95, alpha: 1).setFill()
+            NSBezierPath(rect: r.insetBy(dx: -0.5 * u, dy: -0.5 * u)).fill()
+            p.image.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1,
+                         respectFlipped: true, hints: nil)
+            text(p.caption, at: NSPoint(x: r.minX, y: r.minY - 1.8 * u), size: 0.95 * u,
+                 color: .white, width: pw + 10 * u)
         }
         // Bottom strip: like the LED / window readouts of a 70s SLR.
         let y = b.maxY - 3.2 * u

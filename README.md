@@ -39,9 +39,15 @@ Depth of field is made by the render, not painted on: Spirula's projection
 gives every splat the blur and shift its depth and the lens pupil imply
 (`sr_set_lens`), so occlusion and edges stay correct. The finder shows that
 render at the lens's widest aperture (hold DOF preview to stop down) on a
-focusing screen with a split-prism and microprism collar. The shutter
-exposes the film by adding up renders from sub-pupils of the taking aperture
-(`--cells`, default 32), each sheared so the focus plane stays put. Each
+focusing screen with a split-prism and microprism collar. Firing the
+shutter swings the mirror up (the finder goes black for the mirror travel
+plus the shutter time) and advances the film; the frame is then exposed and
+developed in the background at photo resolution (`--photo-res`, default
+twice the finder), so you keep shooting: one render thread alternates live
+finder frames with the next sub-pupil of the oldest frame in the darkroom,
+and a contact print pops up when it is done. An exposure adds up renders
+from sub-pupils of the taking aperture (`--cells`, default 32), each
+sheared so the focus plane stays put. Each
 lens's pupil sets the bokeh: blade count, cat's-eye clipping by the barrel
 (strong on the swirly Volna), and rim-bright soap bubbles. Then the stock
 develops it: exposure from aperture, shutter and ISO against the scene's EV
