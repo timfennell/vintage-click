@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import GameController
 import simd
@@ -74,7 +75,8 @@ final class GamepadInput {
             ]
             for (down, b) in map where down { now.insert(b) }
         }
-        if let kb = GCKeyboard.coalesced?.keyboardInput {
+        // The keyboard only counts while this app is in front (typing elsewhere is not for us).
+        if NSApplication.shared.isActive, let kb = GCKeyboard.coalesced?.keyboardInput {
             func k(_ c: GCKeyCode) -> Float { kb.button(forKeyCode: c)?.isPressed == true ? 1 : 0 }
             s.move += SIMD2(k(.keyD) - k(.keyA), k(.keyW) - k(.keyS))
             s.look += SIMD2(k(.rightArrow) - k(.leftArrow), k(.upArrow) - k(.downArrow)) * 0.6

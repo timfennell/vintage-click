@@ -38,7 +38,6 @@ final class Viewer: NSObject, MTKViewDelegate {
     enum Mode { case camera, lighting, sheet }
     private(set) var mode = Mode.camera
     var lighting = LightingPlot()
-    private var stickLatch = SIMD2<Float>(0, 0)
 
     /// Sub-pupils per exposure: more = truer bokeh, longer to develop.
     var cellsPerExposure = 32
@@ -311,7 +310,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         if p.contains(.cycleUp) { cycleUp() }
         switch mode {
         case .sheet:
-            sheetInput(s)
+            sheetInput(s, dt: dt)
             return
         case .camera:
             if p.contains(.left) { body.changeAperture(-1) }
@@ -407,7 +406,7 @@ final class Viewer: NSObject, MTKViewDelegate {
 
     // MARK: contact sheet
 
-    private func openSheet() {
+    func openSheet() {
         guard let sheet else { return }
         mode = .sheet
         sheet.reload(showRoll: body.rollNumber)
@@ -418,31 +417,28 @@ final class Viewer: NSObject, MTKViewDelegate {
 
     private func closeSheet() {
         mode = .camera
-        sheet?.loupe = false
         sheet?.isHidden = true
         hud?.isHidden = false
     }
 
-    private func sheetInput(_ s: GamepadInput.State) {
+    private func sheetInput(_ s: GamepadInput.State, dt: Float) {
         guard let sheet else { return }
         let p = s.pressed
-        // Sticks step like the d-pad, once per push.
-        let stick = s.move + s.look
-        var dx = (p.contains(.right) ? 1 : 0) - (p.contains(.left) ? 1 : 0)
-        var dy = (p.contains(.down) ? 1 : 0) - (p.contains(.up) ? 1 : 0)
-        if abs(stick.x) > 0.5 && abs(stickLatch.x) <= 0.5 { dx += stick.x > 0 ? 1 : -1 }
-        if abs(stick.y) > 0.5 && abs(stickLatch.y) <= 0.5 { dy += stick.y > 0 ? -1 : 1 }
-        stickLatch = stick
-        if !sheet.loupe && (dx != 0 || dy != 0) { sheet.move(dx: dx, dy: dy) }
+        // Either stick slides the loupe over the table; the triggers turn its power.
+        let v = s.move + s.look
+        let speed = CGFloat(sheet.bounds.height) * 0.9
+        sheet.handleLoupe(move: CGVector(dx: CGFloat(v.x) * speed, dy: CGFloat(-v.y) * speed),
+                          power: CGFloat(s.triggers) * 1.2, dt: CGFloat(dt))
+        let dx = (p.contains(.right) ? 1 : 0) - (p.contains(.left) ? 1 : 0)
+        let dy = (p.contains(.down) ? 1 : 0) - (p.contains(.up) ? 1 : 0)
+        if dx != 0 || dy != 0 { sheet.move(dx: dx, dy: dy) }
         if p.contains(.l1) { sheet.changeRoll(-1) }
         if p.contains(.r1) { sheet.changeRoll(1) }
-        if p.contains(.a) { sheet.loupe = true }
-        if p.contains(.b) {
-            if sheet.loupe { sheet.loupe = false } else { closeSheet() }
-        }
-        if p.contains(.view) { closeSheet() }
+        if p.contains(.a) { sheet.toggleMark() }
+        if p.contains(.b) || p.contains(.view) { closeSheet() }
         if loop.pendingFrames(roll: body.rollNumber) != sheet.pending.frames { sheet.reload(showRoll: nil) }
     }
+
 
     // MARK: shutter
 
@@ -474,8 +470,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         if let p = job.outputPath {
             url = p
         } else {
-            let dir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Pictures/Splat Camera")
+            let dir = ContactSheetView.root
                 .appendingPathComponent(String(format: "Roll %02d - %@", b.rollNumber, b.stock.name))
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             url = dir.appendingPathComponent(String(format: "frame-%02d.png", job.frameNumber))

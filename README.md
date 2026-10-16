@@ -75,9 +75,12 @@ them). Heads show as wireframes in the finder only. No shadows yet.
 
 ## Seeing the pictures
 
-Only on the contact sheet (View / K): each roll printed on 8x10 paper in
-strips of six, edge print and all; A opens a loupe on a frame. Frames still
-in the darkroom show as blanks. Nothing pops up when the shutter fires.
+Only on the light table (View / K): each roll laid out in strips of six,
+edge print and sprocket holes, unexposed frames black, frames still in the
+darkroom blank. Slide the loupe over it with either stick (L2/R2 for its
+power, 2-10x); it magnifies from the full-size frames. The d-pad chooses a
+frame (the loupe glides to it) and A marks it as a keeper in red grease
+pencil (kept in the roll's marks.json). Nothing pops up when the shutter fires.
 
 ## Controls
 
@@ -106,7 +109,8 @@ out in front and aimed where you focus), A takes / places the chosen light,
 B removes it, Y changes its head, d-pad left/right chooses, up/down dims in
 half stops, L2/R2 flood / spot, L3 house lights, R3 back to the camera.
 
-Contact sheet: d-pad or sticks choose a frame, A loupe, L1/R1 roll, B back.
+Light table: sticks slide the loupe, L2/R2 its power, d-pad chooses a frame,
+A marks it, L1/R1 change roll, B back to the camera.
 
 ## Where it is going
 

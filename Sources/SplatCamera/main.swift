@@ -27,6 +27,8 @@ let cells = option("--cells").flatMap { Int($0) }
 let lensChoice = option("--lens").flatMap { Int($0) }
 let apertureChoice = option("--aperture").flatMap { Float($0) }
 let filmChoice = option("--film").flatMap { Int($0) }
+let openSheet = args.contains("--sheet")
+args.removeAll { $0 == "--sheet" }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -71,6 +73,7 @@ if let i = filmChoice { viewer.body.stockIndex = i % filmStocks.count }
 if pinhole { viewer.setBenchLens(false) }
 if demoLights { viewer.demoLights() }
 if lightingMode { viewer.startLighting() }
+if openSheet { DispatchQueue.main.async { viewer.openSheet() } }
 // Start with the shutter matched to the scene, as a photographer would.
 viewer.body.meterShutter(sceneLuminance: 0.18)
 print(String(format: "Uploaded to the GPU in %.1f s total", CACurrentMediaTime() - t0))
