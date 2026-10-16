@@ -28,7 +28,8 @@ SPIRULA_BUILD=~/Documents/spirula-studio-capture/build ./build.sh
 open "build/Splat Camera.app" --args ~/Desktop/bee/bee-final.ply
 ```
 
-Options: `--res 1620x1080` (3:2, like 35 mm), `--fps 24`, `--sh 0..3`, `--scale`,
+Options: `--res 1620x1080` (3:2, like 35 mm), `--fps 24`, `--scale`, `--demo-lights`,
+`--lighting-mode`,
 `--ev`, `--cells`, `--lens I`, `--aperture F`, `--film I`, `--bench FRAMES`
 (scripted orbit, uncapped, prints render timings and quits; `--pinhole` for
 no lens), `--shoot out.png` (take one frame and quit).
@@ -44,8 +45,11 @@ shutter swings the mirror up (the finder goes black for the mirror travel
 plus the shutter time) and advances the film; the frame is then exposed and
 developed in the background at photo resolution (`--photo-res`, default
 twice the finder), so you keep shooting: one render thread alternates live
-finder frames with the next sub-pupil of the oldest frame in the darkroom,
-and a contact print pops up when it is done. An exposure adds up renders
+finder frames with the next sub-pupil of the oldest frame in the darkroom.
+The finder is always the ground glass: the lens's image with its light
+fall-off and lateral colour fringes, fine matte tooth and fresnel rings.
+Exposures add axial colour too: sub-pupils carry one colour each, focused
+where that colour focuses, so bokeh edges fringe magenta and green. An exposure adds up renders
 from sub-pupils of the taking aperture (`--cells`, default 32), each
 sheared so the focus plane stays put. Each
 lens's pupil sets the bokeh: blade count, cat's-eye clipping by the barrel
@@ -58,7 +62,26 @@ JSON of how each was taken.
 Scans carry no scale: `--scale` sets metres per scene unit (by default the
 subject is treated as a 60 cm still life).
 
+## Lighting
+
+Lights relight the scan on the GPU (gs_render's model, made for scans lit
+from the camera): each light reads the scan's broad colour in its own
+direction for the diffuse and its higher SH bands at the half vector for the
+shine; the house lights give back a share of the scan as captured. The kit is
+1970s tungsten at 3200 K: Fresnel 650, 1K and 2K (flood to spot) and a 2K
+quartz softlight, photometrically sized, so the meter and the film react to
+them as they would (daylight stocks go warm; Tungsten 800T is balanced for
+them). Heads show as wireframes in the finder only. No shadows yet.
+
+## Seeing the pictures
+
+Only on the contact sheet (View / K): each roll printed on 8x10 paper in
+strips of six, edge print and all; A opens a loupe on a frame. Frames still
+in the darkroom show as blanks. Nothing pops up when the shutter fires.
+
 ## Controls
+
+Camera mode:
 
 | Pad (Xbox / PlayStation) | Keyboard | |
 |---|---|---|
@@ -72,10 +95,18 @@ subject is treated as a 60 cm still life).
 | B / circle (hold) | Tab (hold) | depth-of-field preview |
 | X / square | L | next lens from the bag |
 | Y / triangle | R | load a new roll (next stock) |
+| R3 | M | lighting mode |
+| View / Share | K | contact sheet |
 | Menu | 0 | reset the view |
-| View / Share | P | film-look preview in the finder |
-| Left stick click | G | walk faster / slower |
+| L3 | G | walk faster / slower |
 | | U | cycle the up axis |
+
+Lighting mode (walking and looking as above): X adds a light (in hand, held
+out in front and aimed where you focus), A takes / places the chosen light,
+B removes it, Y changes its head, d-pad left/right chooses, up/down dims in
+half stops, L2/R2 flood / spot, L3 house lights, R3 back to the camera.
+
+Contact sheet: d-pad or sticks choose a frame, A loupe, L1/R1 roll, B back.
 
 ## Where it is going
 

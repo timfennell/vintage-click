@@ -12,9 +12,11 @@ struct SpirulaError: Error, CustomStringConvertible {
 /// A finder frame to render: the camera at this moment through the lens wide open.
 struct FinderJob {
     var view: [Float]
+    var position: SIMD3<Float>
     var fx: Float
     var lens: [SIMD4<Float>]?
     var body: CameraBody
+    var lighting: LightingPlot
 }
 
 /// One exposure on its way through the camera: the scene as it was when the
@@ -22,6 +24,7 @@ struct FinderJob {
 final class ExposureJob {
     let camera: FlyCamera
     let body: CameraBody          // settings at the moment of release
+    let lighting: LightingPlot
     let frameNumber: Int
     let cells: [SIMD2<Float>]
     var next = 0
@@ -29,9 +32,11 @@ final class ExposureJob {
     let started = CACurrentMediaTime()
     var outputPath: URL?
 
-    init(camera: FlyCamera, body: CameraBody, frameNumber: Int, cells: [SIMD2<Float>], accum: MTLBuffer) {
+    init(camera: FlyCamera, body: CameraBody, lighting: LightingPlot, frameNumber: Int,
+         cells: [SIMD2<Float>], accum: MTLBuffer) {
         self.camera = camera
         self.body = body
+        self.lighting = lighting
         self.frameNumber = frameNumber
         self.cells = cells
         self.accum = accum
@@ -50,6 +55,12 @@ final class RenderLoop {
     private let queue: MTLCommandQueue
     private let accumulatePSO: MTLComputePipelineState
     private let developPSO: MTLComputePipelineState
+    private let relightPSO: MTLComputePipelineState
+    // The scan's own colours (relighting reads them; Spirula's are overwritten).
+    private let means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
+    private let colours: (buf: MTLBuffer, off: Int)
+    private let count: Int, higherCoeffs: Int
+    private var lastRelight: [SIMD4<Float>] = []
     private var finderSlots: [(buf: MTLBuffer, off: Int, index: Int32)] = []
     private let photoSlot: (buf: MTLBuffer, off: Int, index: Int32)
 
@@ -97,11 +108,27 @@ final class RenderLoop {
         let p = try frames(photo.0, photo.1, 1)[0]
         photoSlot = (p.0, p.1, p.2)
         // Draw on the GPU Spirula renders on, so the buffers are directly usable.
-        device = p.0.device
+        let device = p.0.device
+        self.device = device
         queue = device.makeCommandQueue()!
         let lib = try device.makeLibrary(source: shaderSource, options: nil)
         accumulatePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "accumulate")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
+        relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
+        count = model.count
+        higherCoeffs = (model.shDegree + 1) * (model.shDegree + 1) - 1
+        func upload(_ a: [Float]) -> MTLBuffer {
+            a.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: max($0.count, 16), options: .storageModeShared)! }
+        }
+        means = upload(model.means)
+        dc0 = upload(model.dc)
+        sh0 = upload(model.sh.isEmpty ? [0] : model.sh)
+        var cb: UnsafeMutableRawPointer?
+        var co = 0
+        if sr_color_buffer(&cb, &co) != 0 { throw SpirulaError("sharing colours with Metal") }
+        colours = (Unmanaged<MTLBuffer>.fromOpaque(cb!).takeUnretainedValue(), co)
+        // Relit colours are view-dependent already: the renderer evaluates base colour only.
+        sr_set_render_degree(0)
 
         let t = Thread { [weak self] in self?.run() }
         t.name = "Spirula render"
@@ -139,6 +166,13 @@ final class RenderLoop {
         cond.lock()
         defer { cond.unlock() }
         return exposures.count
+    }
+
+    /// Frame numbers of this roll still being exposed or developed.
+    func pendingFrames(roll: Int) -> [Int] {
+        cond.lock()
+        defer { cond.unlock() }
+        return exposures.filter { $0.body.rollNumber == roll }.map(\.frameNumber)
     }
 
     func makeAccumulator() -> MTLBuffer? {
@@ -185,11 +219,40 @@ final class RenderLoop {
         return rc == 0
     }
 
+    /// Writes the relit colours for this lighting, seen from `eye`, into
+    /// Spirula's colour buffer (skipped when nothing changed).
+    private func relight(_ plot: LightingPlot, eye: SIMD3<Float>, body: CameraBody) {
+        var g: [SIMD4<Float>] = [
+            SIMD4(eye, plot.ambient),
+            SIMD4(Float(plot.lights.count), Float(count), Float(higherCoeffs), 0.25),
+        ]
+        var lt: [SIMD4<Float>] = plot.lights.flatMap {
+            $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV)
+        }
+        if g + lt == lastRelight { return }
+        lastRelight = g + lt
+        if lt.isEmpty { lt = [SIMD4<Float>](repeating: .zero, count: 4) }
+        guard let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return }
+        ce.setComputePipelineState(relightPSO)
+        ce.setBuffer(means, offset: 0, index: 0)
+        ce.setBuffer(dc0, offset: 0, index: 1)
+        ce.setBuffer(sh0, offset: 0, index: 2)
+        ce.setBuffer(colours.buf, offset: colours.off, index: 3)
+        ce.setBytes(&g, length: g.count * 16, index: 4)
+        ce.setBytes(&lt, length: lt.count * 16, index: 5)
+        ce.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                           threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        ce.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+    }
+
     private func renderFinder(_ job: FinderJob) {
         cond.lock()
         let slot = (0..<finderSlots.count).first { $0 != latest?.slot && displaying[$0] == 0 }
         cond.unlock()
         guard let slot else { return }
+        relight(job.lighting, eye: job.position, body: job.body)
         setLens(job.lens)
         let t0 = CACurrentMediaTime()
         let ok = render(finderSlots[slot].index, view: job.view, fx: job.fx,
@@ -212,7 +275,8 @@ final class RenderLoop {
             SIMD4(l.focalMM / 1000, n, l.maxAperture, Float(l.blades)),
             SIMD4(l.catsEye, l.soapBubble, l.bladeRotation, l.vignette),
             background,
-            SIMD4(0, 0, Float(b.rollNumber * 100 + e.frameNumber), b.exposureStops),
+            SIMD4(0, 1, Float(b.rollNumber * 100 + e.frameNumber), b.exposureStops),
+            SIMD4(l.lateralCA, l.axialCA, 0, 0),
         ]
     }
 
@@ -224,8 +288,16 @@ final class RenderLoop {
         let n = b.takingAperture
         let fx = e.camera.focalPixels(width: w)
         let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
-        let invFocus = b.metresPerUnit / b.focusM
-        setLens(b.lensParams(fNumber: n, focalPx: fx, cells: e.cells.count, table: nil))
+        relight(e.lighting, eye: e.camera.position, body: b)
+        // Axial colour: with it, each sub-pupil carries one channel, focused
+        // where that colour focuses (red a little beyond green, blue short).
+        let channel = b.lens.axialCA > 0 ? e.next % 3 : -1
+        var body = b
+        if channel >= 0 {
+            body.focusM = 1 / (1 / b.focusM + b.lens.axialCA * Float(1 - channel))
+        }
+        let invFocus = body.metresPerUnit / body.focusM
+        setLens(body.lensParams(fNumber: n, focalPx: fx, cells: e.cells.count, table: nil))
 
         let c = e.cells[e.next]
         let d = c * radiusUnits
@@ -239,7 +311,9 @@ final class RenderLoop {
             return
         }
         var o = photoOptics(e, fx: fx)
-        var l = SIMD4<Float>(c.x, c.y, 1, e.next == 0 ? 1 : 0)
+        let mask: SIMD4<Float> = channel < 0 ? [1, 1, 1, 0]
+            : (channel == 0 ? [1, 0, 0, 0] : (channel == 1 ? [0, 1, 0, 0] : [0, 0, 1, 0]))
+        var l = [SIMD4<Float>(c.x, c.y, 1, e.next == 0 ? 1 : 0), mask]
         let grid = MTLSize(width: w, height: h, depth: 1)
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         let ce = cb.makeComputeCommandEncoder()!
@@ -247,16 +321,20 @@ final class RenderLoop {
         ce.setBuffer(photoSlot.buf, offset: photoSlot.off, index: 0)
         ce.setBytes(&o, length: o.count * 16, index: 1)
         ce.setBuffer(e.accum, offset: 0, index: 2)
-        ce.setBytes(&l, length: 16, index: 3)
+        ce.setBytes(&l, length: 32, index: 3)
         ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
         e.next += 1
         let done = e.next == e.cells.count
         var print: MTLBuffer?
         if done, let out = device.makeBuffer(length: w * h * 4, options: .storageModeShared) {
             print = out
-            // Light through the unclipped centre of the frame sets the scale.
-            let full = e.cells.reduce(Float(0)) { $0 + pupilWeight($1, q: .zero, lens: b.lens, fNumber: n) }
-            var dv = SIMD4<Float>(1 / max(full, 1e-6), 0, 0, 0)
+            // Light through the unclipped centre of the frame sets the scale, per channel.
+            var full = SIMD3<Float>(repeating: 0)
+            for (k, cell) in e.cells.enumerated() {
+                let w = pupilWeight(cell, q: .zero, lens: b.lens, fNumber: n)
+                if channel < 0 { full += SIMD3(repeating: w) } else { full[k % 3] += w }
+            }
+            var dv = SIMD4<Float>(1 / simd_max(full, SIMD3(repeating: 1e-6)), 0)
             var f = b.stock.packed
             ce.setComputePipelineState(developPSO)
             ce.setBuffer(e.accum, offset: 0, index: 0)

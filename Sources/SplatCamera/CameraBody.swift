@@ -38,7 +38,6 @@ struct CameraBody {
     var framesShot = 0
     var rollNumber = 1
     var dofPreview = false
-    var filmPreview = false
 
     var metresPerUnit: Float = 1
     var sceneEV: Float = 12             // brightness the scan was captured at (EV at ISO 100)

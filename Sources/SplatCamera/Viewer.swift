@@ -15,6 +15,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private let queue: MTLCommandQueue
     private let finderPSO: MTLRenderPipelineState
     private let meterPSO: MTLComputePipelineState
+    private let wirePSO: MTLRenderPipelineState
     private let meterBuf: MTLBuffer
     private static let meterGrid = (48, 32)
     private static let maxPending = 4
@@ -31,6 +32,13 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var displayFrame = 0
     private var mirrorUpUntil = 0.0
     var hud: ViewfinderHUD?
+    var sheet: ContactSheetView?
+
+    /// What the controls are doing: the camera, placing lights, or the contact sheet.
+    enum Mode { case camera, lighting, sheet }
+    private(set) var mode = Mode.camera
+    var lighting = LightingPlot()
+    private var stickLatch = SIMD2<Float>(0, 0)
 
     /// Sub-pupils per exposure: more = truer bokeh, longer to develop.
     var cellsPerExposure = 32
@@ -71,6 +79,14 @@ final class Viewer: NSObject, MTKViewDelegate {
         pd.fragmentFunction = lib.makeFunction(name: "viewfinder")
         pd.colorAttachments[0].pixelFormat = .bgra8Unorm
         finderPSO = try device.makeRenderPipelineState(descriptor: pd)
+        let wd = MTLRenderPipelineDescriptor()
+        wd.vertexFunction = lib.makeFunction(name: "wire_vertex")
+        wd.fragmentFunction = lib.makeFunction(name: "wire_fragment")
+        wd.colorAttachments[0].pixelFormat = .bgra8Unorm
+        wd.colorAttachments[0].isBlendingEnabled = true
+        wd.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        wd.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        wirePSO = try device.makeRenderPipelineState(descriptor: wd)
         meterPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "meter")!)
         super.init()
 
@@ -78,6 +94,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         body.metresPerUnit = metresPerUnit ?? 0.3 / radius
         print(String(format: "Scene scale: %.4g m per unit (subject radius %.2f m); photos %dx%d",
                      body.metresPerUnit, radius * body.metresPerUnit, photo.0, photo.1))
+        // A new session loads a new roll after the ones already in the darkroom.
+        body.rollNumber = (ContactSheetView.scanRolls().map(\.number).max() ?? 0) + 1
         loop.onFinderRendered = { [weak self] ms in self?.record(renderMs: ms) }
         loop.onDeveloped = { [weak self] job, image, seconds in self?.developed(job, image, seconds) }
         resetView()
@@ -129,13 +147,27 @@ final class Viewer: NSObject, MTKViewDelegate {
         lastTime = now
         if benchFrames > 0 { benchOrbit() } else { handleInput(dt: dt) }
 
+        // Looking at prints: the finder rests and the darkroom gets the GPU.
+        if mode == .sheet {
+            if let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
+               let cb = queue.makeCommandBuffer() {
+                rpd.colorAttachments[0].loadAction = .clear
+                rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+                cb.makeRenderCommandEncoder(descriptor: rpd)?.endEncoding()
+                present(cb, drawable)
+                cb.commit()
+            }
+            sheet?.pending = (body.rollNumber, loop.pendingFrames(roll: body.rollNumber))
+            return
+        }
+
         // Ask for the next finder frame of where the camera is now.
         let n = body.viewingAperture
         let fx = camera.focalPixels(width: width)
         loop.requestFinder(FinderJob(
-            view: camera.viewMatrix, fx: fx,
+            view: camera.viewMatrix, position: camera.position, fx: fx,
             lens: lensOn ? body.lensParams(fNumber: n, focalPx: fx, cells: 1, table: table(body, n)) : nil,
-            body: body))
+            body: body, lighting: lighting))
 
         guard let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let cb = queue.makeCommandBuffer() else { return }
@@ -174,6 +206,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         enc.setFragmentBytes(&o, length: o.count * 16, index: 1)
         enc.setFragmentBytes(&f, length: f.count * 16, index: 2)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        drawWireframes(enc, frame: frame, optics: &o)
         enc.endEncoding()
         present(cb, drawable)
         let loop = self.loop, slot = frame.slot, meter = meterBuf
@@ -195,8 +228,56 @@ final class Viewer: NSObject, MTKViewDelegate {
             SIMD4(l.focalMM / 1000, b.viewingAperture, l.maxAperture, Float(l.blades)),
             SIMD4(l.catsEye, l.soapBubble, l.bladeRotation, l.vignette),
             loop.background,
-            SIMD4(Float(height) * 0.065, b.filmPreview ? 1 : 0, Float(seed), b.exposureStops),
+            // Stopping down for the depth-of-field preview darkens the screen.
+            SIMD4(Float(height) * 0.065, pow(l.maxAperture / b.viewingAperture, 2), Float(seed),
+                  b.exposureStops),
+            SIMD4(l.lateralCA, l.axialCA, 0, 0),
         ]
+    }
+
+    /// The light heads as wireframes on the screen, over the frame they belong to.
+    private func drawWireframes(_ enc: MTLRenderCommandEncoder,
+                                frame: (buf: MTLBuffer, off: Int, slot: Int, job: FinderJob),
+                                optics o: inout [SIMD4<Float>]) {
+        let plot = frame.job.lighting
+        guard !plot.lights.isEmpty else { return }
+        let V = frame.job.view, fx = frame.job.fx
+        let scale = frame.job.body.metresPerUnit
+        let focusUnits = frame.job.body.focusM / scale
+        func cam(_ p: SIMD3<Float>) -> SIMD3<Float> {
+            SIMD3(V[0] * p.x + V[1] * p.y + V[2] * p.z + V[3],
+                  V[4] * p.x + V[5] * p.y + V[6] * p.z + V[7],
+                  V[8] * p.x + V[9] * p.y + V[10] * p.z + V[11])
+        }
+        let near = 0.02 / scale
+        for (i, light) in plot.lights.enumerated() {
+            let chosen = mode == .lighting && i == plot.selected
+            let target = simd_distance(light.position, camera.position + camera.forward * focusUnits)
+            let segs = light.wireframe(up: camera.up, metresPerUnit: scale, beamTo: chosen ? target : nil)
+            var verts: [SIMD4<Float>] = []
+            for (a, b) in segs {
+                var pa = cam(a), pb = cam(b)
+                if pa.z < near && pb.z < near { continue }
+                // Clip to just in front of the lens.
+                if pa.z < near { pa = pb + (pa - pb) * ((pb.z - near) / (pb.z - pa.z)) }
+                if pb.z < near { pb = pa + (pb - pa) * ((pa.z - near) / (pa.z - pb.z)) }
+                for q in [pa, pb] {
+                    verts.append(SIMD4(fx * q.x / q.z + Float(width) / 2, fx * q.y / q.z + Float(height) / 2,
+                                       q.z * scale, 1))
+                }
+            }
+            guard !verts.isEmpty,
+                  let vb = device.makeBuffer(bytes: verts, length: verts.count * 16, options: .storageModeShared)
+            else { continue }
+            var colour: SIMD4<Float> = chosen ? [1.0, 0.72, 0.25, 0.95] : [0.85, 0.88, 0.9, 0.55]
+            enc.setRenderPipelineState(wirePSO)
+            enc.setVertexBuffer(vb, offset: 0, index: 0)
+            enc.setVertexBytes(&o, length: o.count * 16, index: 1)
+            enc.setFragmentBuffer(frame.buf, offset: frame.off, index: 0)
+            enc.setFragmentBytes(&o, length: o.count * 16, index: 1)
+            enc.setFragmentBytes(&colour, length: 16, index: 2)
+            enc.drawPrimitives(type: .line, vertexStart: 0, vertexCount: verts.count)
+        }
     }
 
     private func present(_ cb: MTLCommandBuffer, _ drawable: MTLDrawable) {
@@ -227,23 +308,140 @@ final class Viewer: NSObject, MTKViewDelegate {
     private func handleInput(dt: Float) {
         let s = input.poll()
         let p = s.pressed
-        if p.contains(.reset) { camera = home }
         if p.contains(.cycleUp) { cycleUp() }
-        if p.contains(.apertureOpen) { body.changeAperture(-1) }
-        if p.contains(.apertureClose) { body.changeAperture(1) }
-        if p.contains(.shutterFaster) { body.changeShutter(1) }
-        if p.contains(.shutterSlower) { body.changeShutter(-1) }
-        if p.contains(.filmPreview) { body.filmPreview.toggle() }
-        if p.contains(.walkSpeed) {
-            camera.moveSpeed = camera.moveSpeed > radius ? radius * 0.6 : radius * 2.4
+        switch mode {
+        case .sheet:
+            sheetInput(s)
+            return
+        case .camera:
+            if p.contains(.left) { body.changeAperture(-1) }
+            if p.contains(.right) { body.changeAperture(1) }
+            if p.contains(.up) { body.changeShutter(1) }
+            if p.contains(.down) { body.changeShutter(-1) }
+            if p.contains(.x) { body.nextLens() }
+            if p.contains(.y) { body.loadNextRoll() }
+            if p.contains(.l3) {
+                camera.moveSpeed = camera.moveSpeed > radius ? radius * 0.6 : radius * 2.4
+            }
+            body.dofPreview = s.bHeld
+            body.turnFocus(s.triggers, dt: dt)
+        case .lighting:
+            lightingInput(s, dt: dt)
+            body.dofPreview = false
         }
-        if p.contains(.nextLens) { body.nextLens() }
-        if p.contains(.newRoll) { body.loadNextRoll() }
-        body.dofPreview = s.dofPreview
-        body.turnFocus(s.focus, dt: dt)
-        camera.update(FlyInput(move: s.move, look: s.look, rise: s.rise, zoom: 0), dt: dt)
+        if p.contains(.menu) { camera = home }
+        if p.contains(.view) { openSheet() }
+        if p.contains(.r3) {
+            mode = mode == .lighting ? .camera : .lighting
+            lighting.carrying = false
+        }
+        camera.update(FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0), dt: dt)
         camera.focalMM = body.lens.focalMM
-        if p.contains(.shutter) { releaseShutter() }
+        if lighting.carrying, lighting.lights.indices.contains(lighting.selected) {
+            carry(&lighting.lights[lighting.selected])
+        }
+        if mode == .camera && p.contains(.a) { releaseShutter() }
+    }
+
+    /// Placing lights: walk them into position, aim them where you look.
+    private func lightingInput(_ s: GamepadInput.State, dt: Float) {
+        let p = s.pressed
+        var plot = lighting
+        if p.contains(.x) {
+            plot.lights.append(PlacedLight(head: plot.kitChoice, position: camera.position, aim: camera.forward))
+            plot.selected = plot.lights.count - 1
+            plot.carrying = true
+        }
+        if p.contains(.y) {
+            plot.kitChoice = (plot.kitChoice + 1) % lightKit.count
+            if plot.lights.indices.contains(plot.selected) { plot.lights[plot.selected].head = plot.kitChoice }
+        }
+        if !plot.lights.isEmpty {
+            if p.contains(.left) { plot.selected = (plot.selected + plot.lights.count - 1) % plot.lights.count; plot.carrying = false }
+            if p.contains(.right) { plot.selected = (plot.selected + 1) % plot.lights.count; plot.carrying = false }
+            plot.selected = min(plot.selected, plot.lights.count - 1)
+            if p.contains(.a) { plot.carrying.toggle() }
+            if p.contains(.b) {
+                plot.lights.remove(at: plot.selected)
+                plot.selected = max(0, plot.selected - 1)
+                plot.carrying = false
+            }
+            if !plot.lights.isEmpty {
+                var l = plot.lights[plot.selected]
+                if p.contains(.up) { l.dimmerStops = min(0, l.dimmerStops + 0.5) }
+                if p.contains(.down) { l.dimmerStops = max(-4, l.dimmerStops - 0.5) }
+                l.spot = max(0, min(1, l.spot + s.triggers * dt * 0.8))
+                plot.lights[plot.selected] = l
+            }
+        }
+        if p.contains(.l3) { plot.cycleHouseLights() }
+        lighting = plot
+    }
+
+    /// A light in hand: held out in front, aimed at the point you are focused on.
+    private func carry(_ l: inout PlacedLight) {
+        let focusUnits = body.focusM / body.metresPerUnit
+        let target = camera.position + camera.forward * focusUnits
+        l.position = camera.position + camera.forward * focusUnits * 0.35
+        l.aim = simd_normalize(target - l.position)
+    }
+
+    /// A classic setup for scripted runs: a hard Fresnel key high at 45 degrees,
+    /// a broad softlight fill from the other side, house lights down.
+    func startLighting() { mode = .lighting }
+
+    func demoLights() {
+        let subject = camera.position + camera.forward * (body.focusM / body.metresPerUnit)
+        func place(_ head: Int, side: Float, up: Float, metres: Float, spot: Float) -> PlacedLight {
+            let toCam = simd_normalize(camera.position - subject)
+            let dir = simd_normalize(toCam * cos(side) + camera.right * sin(side) + camera.up * up)
+            let pos = subject + dir * (metres / body.metresPerUnit)
+            var l = PlacedLight(head: head, position: pos, aim: simd_normalize(subject - pos))
+            l.spot = spot
+            return l
+        }
+        lighting.lights = [place(2, side: -0.8, up: 0.7, metres: 2.0, spot: 0.6),
+                           place(3, side: 0.9, up: 0.2, metres: 2.2, spot: 0)]
+        lighting.ambient = 0.1
+    }
+
+    // MARK: contact sheet
+
+    private func openSheet() {
+        guard let sheet else { return }
+        mode = .sheet
+        sheet.reload(showRoll: body.rollNumber)
+        sheet.pending = (body.rollNumber, loop.pendingFrames(roll: body.rollNumber))
+        sheet.isHidden = false
+        hud?.isHidden = true
+    }
+
+    private func closeSheet() {
+        mode = .camera
+        sheet?.loupe = false
+        sheet?.isHidden = true
+        hud?.isHidden = false
+    }
+
+    private func sheetInput(_ s: GamepadInput.State) {
+        guard let sheet else { return }
+        let p = s.pressed
+        // Sticks step like the d-pad, once per push.
+        let stick = s.move + s.look
+        var dx = (p.contains(.right) ? 1 : 0) - (p.contains(.left) ? 1 : 0)
+        var dy = (p.contains(.down) ? 1 : 0) - (p.contains(.up) ? 1 : 0)
+        if abs(stick.x) > 0.5 && abs(stickLatch.x) <= 0.5 { dx += stick.x > 0 ? 1 : -1 }
+        if abs(stick.y) > 0.5 && abs(stickLatch.y) <= 0.5 { dy += stick.y > 0 ? -1 : 1 }
+        stickLatch = stick
+        if !sheet.loupe && (dx != 0 || dy != 0) { sheet.move(dx: dx, dy: dy) }
+        if p.contains(.l1) { sheet.changeRoll(-1) }
+        if p.contains(.r1) { sheet.changeRoll(1) }
+        if p.contains(.a) { sheet.loupe = true }
+        if p.contains(.b) {
+            if sheet.loupe { sheet.loupe = false } else { closeSheet() }
+        }
+        if p.contains(.view) { closeSheet() }
+        if loop.pendingFrames(roll: body.rollNumber) != sheet.pending.frames { sheet.reload(showRoll: nil) }
     }
 
     // MARK: shutter
@@ -259,7 +457,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             hud?.flash("BUFFER FULL")
             return
         }
-        let job = ExposureJob(camera: camera, body: body, frameNumber: body.framesShot + 1,
+        let job = ExposureJob(camera: camera, body: body, lighting: lighting, frameNumber: body.framesShot + 1,
                               cells: body.cellCentres(cellsPerExposure), accum: accum)
         job.outputPath = scriptedPath
         loop.expose(job)
@@ -282,7 +480,6 @@ final class Viewer: NSObject, MTKViewDelegate {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             url = dir.appendingPathComponent(String(format: "frame-%02d.png", job.frameNumber))
         }
-        hud?.showPrint(image, caption: String(format: "Frame %d · %@", job.frameNumber, b.stock.name))
         print(String(format: "Developed frame %d in %.1f s", job.frameNumber, seconds))
         let meta: [String: Any] = [
             "lens": b.lens.name, "lens_inspired_by": b.lens.inspiredBy,
@@ -298,7 +495,10 @@ final class Viewer: NSObject, MTKViewDelegate {
             if let json = try? JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]) {
                 try? json.write(to: url.deletingPathExtension().appendingPathExtension("json"))
             }
-            DispatchQueue.main.async { self?.onSaved?(url.path) }
+            DispatchQueue.main.async {
+                self?.onSaved?(url.path)
+                if self?.mode == .sheet { self?.sheet?.reload(showRoll: nil) }
+            }
         }
     }
 
@@ -318,12 +518,23 @@ final class Viewer: NSObject, MTKViewDelegate {
         i.meterStops = b.exposureStops + log2(max(meterLum, 1e-4) / 0.18)
         var modes: [String] = []
         if b.dofPreview { modes.append("DOF PREVIEW") }
-        if b.filmPreview { modes.append("FILM PREVIEW") }
+        if mode == .lighting { modes.append("LIGHTING") }
         let pending = loop.pendingExposures
         if pending > 0 { modes.append("DEVELOPING \(pending)") }
         i.mode = modes.joined(separator: "  ")
         i.stats = statsLine
         i.mirrorUp = mirrorUp
+        if mode == .lighting {
+            var lines = lighting.lights.enumerated().map { k, l -> String in
+                let mark = k == lighting.selected ? (lighting.carrying ? "▶ in hand" : "▶") : " "
+                return String(format: "%@ %d %@  beam %.0f°  %@", mark, k + 1, l.kit.name, l.beamAngle,
+                              l.dimmerStops == 0 ? "full" : String(format: "%+.1f stop", l.dimmerStops))
+            }
+            lines.append(String(format: "House lights %.0f%%   ·   X adds a %@", lighting.ambient * 100,
+                                lightKit[lighting.kitChoice].name))
+            lines.append("A take/place · B remove · Y change head · ◀▶ choose · ▲▼ dimmer · L2/R2 flood/spot · L3 house lights · R3 done")
+            i.lines = lines
+        }
         hud.info = i
     }
 

@@ -33,3 +33,6 @@ int sr_set_lens(const float* params, int count);
 // to any others; each renders at its own size.
 int sr_add_shared_frames(int width, int height, int count, void** out_buffers,
                          size_t* out_offsets, int* first_index);
+// The splats' SH DC colours [N,3] fp32 on the GPU, to relight in place
+// (render with sr_set_render_degree(0)): unretained id<MTLBuffer> + offset.
+int sr_color_buffer(void** out_buffer, size_t* out_offset);

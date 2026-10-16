@@ -67,7 +67,7 @@ let filmStocks: [FilmStock] = [
     FilmStock(name: "Tungsten 800T", inspiredBy: "cinema film without the anti-halation layer",
               iso: 800, exposures: 36,
               crosstalk: mix([1.0, 0.03, -0.03], [0.0, 1.0, 0.0], [-0.02, 0.02, 1.0]),
-              balance: [0.82, 0.95, 1.22], saturation: 1.0, contrast: 0.95, toe: 1.05,
+              balance: [0.80, 1.0, 1.40], saturation: 1.0, contrast: 0.95, toe: 1.05,
               shoulder: 0.7, blackLift: 0.03, grain: 0.17, grainSize: 1.3,
               halation: 0.9, halationTint: [1.0, 0.18, 0.04]),
     FilmStock(name: "Pan-X 400", inspiredBy: "the gritty reportage black-and-white",

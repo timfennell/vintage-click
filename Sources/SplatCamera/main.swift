@@ -17,7 +17,6 @@ func option(_ name: String) -> String? {
 }
 let res = (option("--res") ?? "1620x1080").split(separator: "x").compactMap { Int($0) }
 let bench = Int(option("--bench") ?? "0") ?? 0
-let shOverride = option("--sh").flatMap { Int32($0) }
 let shootPath = option("--shoot")
 // --burst N: fire N frames a second apart while the finder keeps running.
 let burst = Int(option("--burst") ?? "1") ?? 1
@@ -28,6 +27,10 @@ let cells = option("--cells").flatMap { Int($0) }
 let lensChoice = option("--lens").flatMap { Int($0) }
 let apertureChoice = option("--aperture").flatMap { Float($0) }
 let filmChoice = option("--film").flatMap { Int($0) }
+let lightingMode = args.contains("--lighting-mode")
+args.removeAll { $0 == "--lighting-mode" }
+let demoLights = args.contains("--demo-lights")
+args.removeAll { $0 == "--demo-lights" }
 let pinhole = args.contains("--pinhole")
 args.removeAll { $0 == "--pinhole" }
 // Play at a film cadence (18-24 fps feels like film); the bench runs uncapped.
@@ -54,7 +57,6 @@ do { viewer = try Viewer(model: model, width: res[0], height: res[1], photo: pho
     print("\(error)")
     exit(1)
 }
-if let d = shOverride { sr_set_render_degree(d) }
 if let ev = sceneEV { viewer.body.sceneEV = ev }
 if let c = cells { viewer.cellsPerExposure = c }
 if let i = lensChoice {
@@ -67,6 +69,8 @@ if let n = apertureChoice {
 }
 if let i = filmChoice { viewer.body.stockIndex = i % filmStocks.count }
 if pinhole { viewer.setBenchLens(false) }
+if demoLights { viewer.demoLights() }
+if lightingMode { viewer.startLighting() }
 // Start with the shutter matched to the scene, as a photographer would.
 viewer.body.meterShutter(sceneLuminance: 0.18)
 print(String(format: "Uploaded to the GPU in %.1f s total", CACurrentMediaTime() - t0))
@@ -92,6 +96,11 @@ let hud = ViewfinderHUD(frame: view.bounds)
 hud.autoresizingMask = [.width, .height]
 view.addSubview(hud)
 viewer.hud = hud
+let sheet = ContactSheetView(frame: view.bounds)
+sheet.autoresizingMask = [.width, .height]
+sheet.isHidden = true
+view.addSubview(sheet)
+viewer.sheet = sheet
 window.center()
 window.makeKeyAndOrderFront(nil)
 
