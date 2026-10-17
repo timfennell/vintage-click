@@ -60,7 +60,11 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var benchStart = 0.0
     var onBenchDone: ((String) -> Void)?
 
-    init(model: SplatModel, width: Int, height: Int, photo: (Int, Int), metresPerUnit: Float?) throws {
+    private let inside: Bool
+
+    init(model: SplatModel, width: Int, height: Int, photo: (Int, Int), metresPerUnit: Float,
+         inside: Bool = false) throws {
+        self.inside = inside
         self.width = width
         self.height = height
         let b = model.bounds()
@@ -89,8 +93,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         meterPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "meter")!)
         super.init()
 
-        // Scans have no scale: unless told, call the subject a 60 cm still life.
-        body.metresPerUnit = metresPerUnit ?? 0.3 / radius
+        body.metresPerUnit = metresPerUnit
         print(String(format: "Scene scale: %.4g m per unit (subject radius %.2f m); photos %dx%d",
                      body.metresPerUnit, radius * body.metresPerUnit, photo.0, photo.1))
         // A new session loads a new roll after the ones already in the darkroom.
@@ -113,6 +116,14 @@ final class Viewer: NSObject, MTKViewDelegate {
                        body.lens.minFocusM * 1.15 / body.metresPerUnit)
         var c = FlyCamera()   // yaw 0, pitch 0: looking along the horizon
         c.up = keepUp
+        if inside {
+            // Standing in the middle of the place at eye height, looking level.
+            camera.position = center + keepUp * (1.6 / body.metresPerUnit)
+            camera.moveSpeed = 1.4 / body.metresPerUnit      // walking pace
+            home = camera
+            body.focusM = max(body.lens.minFocusM, 5)
+            return
+        }
         let eye = center - c.forward * dist + keepUp * radius * 0.35
         camera.lookAt(center, from: eye)
         home = camera
@@ -320,7 +331,8 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.x) { body.nextLens() }
             if p.contains(.y) { body.loadNextRoll() }
             if p.contains(.l3) {
-                camera.moveSpeed = camera.moveSpeed > radius ? radius * 0.6 : radius * 2.4
+                let walk = inside ? 1.4 / body.metresPerUnit : radius * 0.6
+            camera.moveSpeed = camera.moveSpeed > walk * 1.5 ? walk : walk * 4
             }
             body.dofPreview = s.bHeld
             body.turnFocus(s.triggers, dt: dt)

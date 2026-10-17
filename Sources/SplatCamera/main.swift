@@ -18,6 +18,10 @@ func option(_ name: String) -> String? {
 let res = (option("--res") ?? "1620x1080").split(separator: "x").compactMap { Int($0) }
 let bench = Int(option("--bench") ?? "0") ?? 0
 let shootPath = option("--shoot")
+let sceneRadius = option("--scene-radius").flatMap { Float($0) }
+// --inside: the scan is a place to stand in (start in the middle, eye height).
+let inside = args.contains("--inside")
+args.removeAll { $0 == "--inside" }
 // --burst N: fire N frames a second apart while the finder keeps running.
 let burst = Int(option("--burst") ?? "1") ?? 1
 let photoRes = option("--photo-res").map { $0.split(separator: "x").compactMap { Int($0) } }
@@ -42,23 +46,34 @@ let plyPath = args.first ?? NSString(string: "~/Desktop/bee/bee-final.ply").expa
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
-print("Loading \(plyPath)")
-let t0 = CACurrentMediaTime()
-let model: SplatModel
-do { model = try loadPLY(URL(fileURLWithPath: plyPath)) } catch {
-    print("Cannot load the model: \(error)")
-    exit(1)
-}
-print(String(format: "%d splats, SH degree %d, read in %.1f s", model.count, model.shDegree,
-             CACurrentMediaTime() - t0))
-
-let viewer: Viewer
 // Exposures develop at their own (higher) resolution: twice the finder by default.
 let photo = photoRes.map { ($0[0], $0[1]) } ?? (res[0] * 2, res[1] * 2)
-do { viewer = try Viewer(model: model, width: res[0], height: res[1], photo: photo, metresPerUnit: sceneScale) } catch {
-    print("\(error)")
-    exit(1)
+
+/// Loads the scan and hands it to the renderer. The CPU copy lives only in
+/// here, so its gigabytes are freed once the GPU has it.
+func makeViewer() -> Viewer {
+    print("Loading \(plyPath)")
+    let t0 = CACurrentMediaTime()
+    let model: SplatModel
+    do { model = try loadPLY(URL(fileURLWithPath: plyPath)) } catch {
+        print("Cannot load the model: \(error)")
+        exit(1)
+    }
+    print(String(format: "%d splats, SH degree %d, read in %.1f s", model.count, model.shDegree,
+                 CACurrentMediaTime() - t0))
+    // Scans have no scale: --scale (metres per unit) or --scene-radius (metres)
+    // says how big it is; an object is a 60 cm still life, a place 30 m across.
+    let radius = model.bounds().radius
+    let scale = sceneScale ?? (sceneRadius ?? (inside ? 15 : 0.3)) / radius
+    do {
+        return try Viewer(model: model, width: res[0], height: res[1], photo: photo,
+                          metresPerUnit: scale, inside: inside)
+    } catch {
+        print("\(error)")
+        exit(1)
+    }
 }
+let viewer = makeViewer()
 if let ev = sceneEV { viewer.body.sceneEV = ev }
 if let c = cells { viewer.cellsPerExposure = c }
 if let i = lensChoice {
@@ -76,7 +91,7 @@ if lightingMode { viewer.startLighting() }
 if openSheet { DispatchQueue.main.async { viewer.openSheet() } }
 // Start with the shutter matched to the scene, as a photographer would.
 viewer.body.meterShutter(sceneLuminance: 0.18)
-print(String(format: "Uploaded to the GPU in %.1f s total", CACurrentMediaTime() - t0))
+print("Uploaded to the GPU")
 
 // The window shows the fixed-size render scaled to fit.
 let screen = NSScreen.main!.visibleFrame
