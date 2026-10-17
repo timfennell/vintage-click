@@ -196,18 +196,26 @@ final class MenuOverlay: NSView {
         // The shelves.
         shelfRects = []
         var x = panel.minX + 17 * u
+        // As many shelves as there are: the tabs shrink to fit the panel.
+        func tabWidth(_ name: String, _ size: CGFloat) -> CGFloat {
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: size, weight: .semibold)]
+            return NSAttributedString(string: name, attributes: attrs).size().width + 2 * size / 1.05
+        }
+        let room = panel.maxX - 1.5 * u - x
+        let natural = lensCollections.reduce(0) { $0 + tabWidth($1.name, 1.05 * u) + 0.6 * u }
+        let fit = min(1, room / natural)
+        let ts = 1.05 * u * fit
         for (i, c) in lensCollections.enumerated() {
-            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 1.05 * u, weight: .semibold)]
-            let tw = NSAttributedString(string: c.name, attributes: attrs).size().width + 2 * u
+            let tw = tabWidth(c.name, ts)
             let r = NSRect(x: x, y: panel.minY + 1.2 * u, width: tw, height: 2.2 * u)
             shelfRects.append(r)
             if i == lensShelf {
                 amber.withAlphaComponent(0.25).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 0.4 * u, yRadius: 0.4 * u).fill()
             }
-            text(c.name, NSPoint(x: r.minX + u, y: r.minY + 0.35 * u), size: 1.05 * u,
+            text(c.name, NSPoint(x: r.minX + ts / 1.05, y: r.minY + 0.35 * u + (1.05 * u - ts) / 2), size: ts,
                  color: i == lensShelf ? amber : NSColor(white: 0.7, alpha: 1), weight: .semibold)
-            x += tw + 0.6 * u
+            x += tw + 0.6 * u * fit
         }
         text(shelf.about, NSPoint(x: panel.minX + 2 * u, y: panel.minY + 4.0 * u), size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
         lensRects = []

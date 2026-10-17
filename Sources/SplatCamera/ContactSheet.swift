@@ -191,7 +191,6 @@ final class ContactSheetView: NSView {
     private struct Layout {
         var strips: [NSRect] = []
         var frames: [NSRect] = []
-        var hole: CGFloat = 0
     }
 
     private func tableLayout() -> Layout {
@@ -199,10 +198,9 @@ final class ContactSheetView: NSView {
         let areaH = b.height * 0.9, areaW = min(b.width * 0.9, areaH * 0.95)
         let x0 = b.midX - areaW / 2, y0 = b.height * 0.04
         let frameW = areaW / 6.25, frameH = frameW / 1.5
-        let stripH = frameH * 1.55
+        let stripH = frameH * 35 / 24          // 35 mm film, 24 mm frames
         let gap = (areaH - stripH * 6) / 5
         var L = Layout()
-        L.hole = stripH * 0.06
         for strip in 0..<6 {
             let y = y0 + CGFloat(strip) * (stripH + gap)
             L.strips.append(NSRect(x: x0, y: y, width: areaW, height: stripH))
@@ -216,34 +214,60 @@ final class ContactSheetView: NSView {
 
     /// The strips on the glass. `fine`: under the loupe, from the full-size frames.
     private func drawStrips(_ L: Layout, roll: Roll, fine: Bool, near: CGPoint?) {
-        let edge = NSColor(calibratedRed: 1.0, green: 0.62, blue: 0.2, alpha: 0.9)
         let stockName = roll.stock.uppercased()
+        let bw = filmStocks.first { roll.stock.hasPrefix($0.name) }?.blackAndWhite ?? false
+        // Edge print is exposed into the film at the factory and developed with
+        // it: on the print it glows out of the black rebate, warm through a
+        // colour film's mask, grey on black-and-white.
+        let edge = bw ? NSColor(white: 0.80, alpha: 0.85)
+            : NSColor(calibratedRed: 1.0, green: 0.70, blue: 0.30, alpha: 0.85)
         let pend = pending.roll?.standardizedFileURL == roll.dir.standardizedFileURL ? pending.frames : []
+        // Real 35 mm in film millimetres: perforations 1.98 x 2.79 at 4.75 pitch,
+        // 2 mm in from the edge; the frame from 5.5 to 29.5 across.
+        let mm = L.frames[0].height / 24
         for (s, strip) in L.strips.enumerated() {
             NSColor(white: 0.05, alpha: 1).setFill()
             strip.fill()
             // Sprocket holes: the light table shows through them.
             NSColor(calibratedRed: 0.93, green: 0.95, blue: 0.98, alpha: 1).setFill()
-            let hole = L.hole
-            var hx = strip.minX + hole
-            while hx < strip.maxX - hole {
-                for hy in [strip.minY + hole * 0.6, strip.maxY - hole * 2] {
-                    NSBezierPath(roundedRect: NSRect(x: hx, y: hy, width: hole * 1.1, height: hole * 1.4),
-                                 xRadius: hole * 0.2, yRadius: hole * 0.2).fill()
+            var hx = strip.minX + 1.2 * mm
+            while hx < strip.maxX - 2 * mm {
+                for hy in [strip.minY + 2.0 * mm, strip.maxY - 4.8 * mm] {
+                    NSBezierPath(roundedRect: NSRect(x: hx, y: hy, width: 1.98 * mm, height: 2.79 * mm),
+                                 xRadius: 0.5 * mm, yRadius: 0.5 * mm).fill()
                 }
-                hx += hole * 2.6
+                hx += 4.75 * mm
             }
-            let frameTop = L.frames[s * 6].minY
-            label("\(stockName)   SAFETY FILM", at: NSPoint(x: strip.minX + L.frames[0].width * 0.6, y: frameTop - hole * 2.1),
-                  size: hole * 1.2, color: edge)
+            // Outer margins (2 mm): the stock name along the top, frame numbers,
+            // half-frame marks and a DX-style bar code along the bottom.
+            let top = strip.minY + 0.35 * mm, bottom = strip.maxY - 1.75 * mm
+            var nx = strip.minX + 3 * mm
+            while nx < strip.maxX - 60 * mm {
+                filmPrint("\(stockName)  SAFETY FILM", at: NSPoint(x: nx, y: top), mm: mm, color: edge)
+                nx += 115 * mm
+            }
             for k in 0..<6 {
                 let i = s * 6 + k
                 let fr = L.frames[i]
-                label("\(i + 1)", at: NSPoint(x: fr.minX + fr.width * 0.45, y: fr.maxY + hole * 0.15),
-                      size: hole * 1.2, color: edge)
+                filmPrint("\(i + 1)", at: NSPoint(x: fr.minX + 2 * mm, y: bottom), mm: mm, color: edge)
+                filmPrint("▸ \(i + 1)A", at: NSPoint(x: fr.midX + 1 * mm, y: bottom), mm: mm, color: edge)
+                if !bw {
+                    // The bar code: thin and thick dashes, the same for the whole roll.
+                    edge.withAlphaComponent(0.6).setFill()
+                    var bx = fr.minX + 8 * mm
+                    for b in 0..<12 {
+                        let w = (stockName.unicodeScalars.reduce(b) { $0 &+ Int($1.value) } % 3 == 0 ? 0.7 : 0.35) * mm
+                        NSRect(x: bx, y: bottom + 0.25 * mm, width: w, height: 1.1 * mm).fill()
+                        bx += 0.9 * mm
+                    }
+                }
+            }
+            for k in 0..<6 {
+                let i = s * 6 + k
+                let fr = L.frames[i]
                 guard i < roll.frames.count else {
                     if pend.contains(i + 1) {
-                        label("in the darkroom", at: NSPoint(x: fr.minX + 4, y: fr.midY - 5), size: hole * 1.1,
+                        label("in the darkroom", at: NSPoint(x: fr.minX + 4, y: fr.midY - 5), size: 1.6 * mm,
                               color: NSColor(white: 0.45, alpha: 1))
                     }
                     continue
@@ -319,6 +343,21 @@ final class ContactSheetView: NSView {
         let hint = String(format: "%@Roll %d (%d of %d) · %@ · loupe %.0f×      sticks: loupe   L2/R2: power   d-pad: frame   A: mark   L1/R1: roll   B: back",
                           where_, roll.number, rollIndex + 1, rolls.count, roll.stock, loupePower)
         label(hint, at: NSPoint(x: b.midX - 330, y: b.height - 20), size: 11.5, color: NSColor(white: 0.15, alpha: 1))
+    }
+
+    /// Edge print: small, a little soft (a latent image, not ink), in the margin.
+    private func filmPrint(_ s: String, at p: NSPoint, mm: CGFloat, color: NSColor) {
+        let glow = NSShadow()
+        glow.shadowColor = color.withAlphaComponent(0.6)
+        glow.shadowBlurRadius = 0.35 * mm
+        glow.shadowOffset = .zero
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont(name: "Menlo-Bold", size: 1.45 * mm) ?? NSFont.monospacedSystemFont(ofSize: 1.45 * mm, weight: .bold),
+            .foregroundColor: color,
+            .shadow: glow,
+            .kern: 0.12 * mm,
+        ]
+        NSAttributedString(string: s, attributes: attrs).draw(at: p)
     }
 
     private func label(_ s: String, at p: NSPoint, size: CGFloat, color: NSColor) {

@@ -260,22 +260,38 @@ final class ViewfinderHUD: NSView {
         // Fastest at the top. Position for a (fractional) speed index.
         func y(_ index: CGFloat) -> CGFloat { scaleTop + (CGFloat(n - 1) - index + 0.5) * step }
 
-        // The card: cream, red caps, printed speeds (slow ones in red: hold steady).
-        NSColor(calibratedRed: 0.93, green: 0.90, blue: 0.82, alpha: 1).setFill()
-        NSBezierPath(roundedRect: card, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
-        let red = NSColor(calibratedRed: 0.86, green: 0.27, blue: 0.18, alpha: 1)
-        red.setFill()
-        NSBezierPath(roundedRect: NSRect(x: card.minX, y: card.minY, width: cardW, height: cap), xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
-        NSBezierPath(roundedRect: NSRect(x: card.minX, y: card.maxY - cap, width: cardW, height: cap), xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
+        // The scale is printed on a clear plate at the screen's edge: milky
+        // where it is frosted so the print reads, the scene faint through it,
+        // the ends tinted red, its edge catching the light.
+        let plate = NSBezierPath(roundedRect: card, xRadius: 0.5 * u, yRadius: 0.5 * u)
+        NSGraphicsContext.saveGraphicsState()
+        plate.addClip()
+        NSGradient(colors: [NSColor(white: 0.97, alpha: 0.62), NSColor(white: 0.90, alpha: 0.50),
+                            NSColor(white: 0.96, alpha: 0.60)])?.draw(in: card, angle: 90)
+        let red = NSColor(calibratedRed: 0.86, green: 0.22, blue: 0.14, alpha: 1)
+        red.withAlphaComponent(0.55).setFill()
+        NSRect(x: card.minX, y: card.minY, width: cardW, height: cap).fill()
+        NSRect(x: card.minX, y: card.maxY - cap, width: cardW, height: cap).fill()
+        // A sheen along the plate, as glass has.
+        NSGradient(colors: [NSColor(white: 1, alpha: 0.0), NSColor(white: 1, alpha: 0.22), NSColor(white: 1, alpha: 0.0)])?
+            .draw(in: NSRect(x: card.minX, y: card.minY, width: cardW * 0.45, height: cardH), angle: 0)
+        NSGraphicsContext.restoreGraphicsState()
+        plate.lineWidth = max(1, 0.12 * u)
+        NSColor(white: 1, alpha: 0.45).setStroke()
+        plate.stroke()
+        let inner = NSBezierPath(roundedRect: card.insetBy(dx: 0.12 * u, dy: 0.12 * u), xRadius: 0.4 * u, yRadius: 0.4 * u)
+        inner.lineWidth = max(1, 0.08 * u)
+        NSColor(white: 0, alpha: 0.25).setStroke()
+        inner.stroke()
         let capAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 1.1 * u, weight: .bold),
-                                                       .foregroundColor: NSColor.white]
+                                                       .foregroundColor: NSColor(white: 1, alpha: 0.9)]
         let m = NSAttributedString(string: "M", attributes: capAttrs)
         m.draw(at: NSPoint(x: card.midX - m.size().width / 2, y: card.maxY - cap + (cap - m.size().height) / 2))
         for (i, s) in speeds.enumerated() {
             let slow = s.seconds >= 1.0 / 30
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: min(step * 0.6, cardW * 0.3), weight: .medium),
-                .foregroundColor: slow ? red : NSColor(white: 0.12, alpha: 1),
+                .foregroundColor: slow ? red.withAlphaComponent(0.9) : NSColor(white: 0.08, alpha: 0.85),
             ]
             let str = NSAttributedString(string: s.label, attributes: attrs)
             let sz = str.size()
