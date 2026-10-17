@@ -106,7 +106,8 @@ final class RenderLoop {
         }
         // Four finder frames: the newest, up to two being displayed, one being rendered.
         finderSlots = try frames(finder.0, finder.1, 4).map { ($0.0, $0.1, $0.2) }
-        let p = try frames(photo.0, photo.1, 1)[0]
+        // Exposures render in tiles of the finder's size (memory stays the finder's).
+        let p = try frames(finder.0, finder.1, 1)[0]
         photoSlot = (p.0, p.1, p.2)
         // Draw on the GPU Spirula renders on, so the buffers are directly usable.
         let device = p.0.device
@@ -310,25 +311,43 @@ final class RenderLoop {
         var vm = e.camera.viewMatrix
         vm[3] -= d.x
         vm[7] -= d.y
-        guard render(photoSlot.index, view: vm, fx: fx, cx: Float(w) / 2 + fx * d.x * invFocus,
-                     cy: Float(h) / 2 + fx * d.y * invFocus),
-              let cb = queue.makeCommandBuffer() else {
-            finish(e)
-            return
-        }
         var o = photoOptics(e, fx: fx)
         let mask: SIMD4<Float> = channel < 0 ? [1, 1, 1, 0]
             : (channel == 0 ? [1, 0, 0, 0] : (channel == 1 ? [0, 1, 0, 0] : [0, 0, 1, 0]))
-        var l = [SIMD4<Float>(c.x, c.y, 1, e.next == 0 ? 1 : 0), mask]
-        let grid = MTLSize(width: w, height: h, depth: 1)
         let tg = MTLSize(width: 16, height: 16, depth: 1)
+        let (tw, th) = finderSize
+        // The photo in finder-sized tiles: each a render with the principal
+        // point moved so it sees its part of the frame.
+        for y0 in stride(from: 0, to: h, by: th) {
+            for x0 in stride(from: 0, to: w, by: tw) {
+                guard render(photoSlot.index, view: vm, fx: fx,
+                             cx: Float(w) / 2 + fx * d.x * invFocus - Float(x0),
+                             cy: Float(h) / 2 + fx * d.y * invFocus - Float(y0)),
+                      let tcb = queue.makeCommandBuffer(), let te = tcb.makeComputeCommandEncoder() else {
+                    finish(e)
+                    return
+                }
+                let first = e.next == 0 ? Float(1) : 0
+                var l = [SIMD4<Float>(c.x, c.y, 1, first), mask,
+                         SIMD4<Float>(Float(x0), Float(y0), Float(tw), Float(th))]
+                te.setComputePipelineState(accumulatePSO)
+                te.setBuffer(photoSlot.buf, offset: photoSlot.off, index: 0)
+                te.setBytes(&o, length: o.count * 16, index: 1)
+                te.setBuffer(e.accum, offset: 0, index: 2)
+                te.setBytes(&l, length: 48, index: 3)
+                te.dispatchThreads(MTLSize(width: tw, height: th, depth: 1), threadsPerThreadgroup: tg)
+                te.endEncoding()
+                tcb.commit()
+                // The tile frame is rendered into again next: let this read finish.
+                tcb.waitUntilCompleted()
+            }
+        }
+        guard let cb = queue.makeCommandBuffer() else {
+            finish(e)
+            return
+        }
+        let grid = MTLSize(width: w, height: h, depth: 1)
         let ce = cb.makeComputeCommandEncoder()!
-        ce.setComputePipelineState(accumulatePSO)
-        ce.setBuffer(photoSlot.buf, offset: photoSlot.off, index: 0)
-        ce.setBytes(&o, length: o.count * 16, index: 1)
-        ce.setBuffer(e.accum, offset: 0, index: 2)
-        ce.setBytes(&l, length: 32, index: 3)
-        ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
         e.next += 1
         let done = e.next == e.cells.count
         var print: MTLBuffer?

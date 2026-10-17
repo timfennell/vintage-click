@@ -225,16 +225,22 @@ kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buff
 
 // ---- shutter --------------------------------------------------------------
 
-// Adds one sub-pupil's render to the exposure. L[0] = (lens point, weight,
-// reset), L[1] = (colour mask: which of r g b this sub-pupil carries, -).
+// Adds one tile of one sub-pupil's render to the exposure (exposures render
+// in finder-sized tiles, so a big scene's photo needs no more memory than the
+// finder). L[0] = (lens point, weight, reset), L[1] = (colour mask: which of
+// r g b this sub-pupil carries, -), L[2] = (tile origin, tile size) in the photo.
 kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
                        device float4* acc [[buffer(2)]], constant float4* L [[buffer(3)]],
-                       uint2 p [[thread_position_in_grid]]) {
-    if (p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+                       uint2 g [[thread_position_in_grid]]) {
+    uint tw = uint(L[2].z), th = uint(L[2].w);
+    uint2 p = g + uint2(L[2].xy);
+    if (g.x >= tw || g.y >= th || p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    uint n = tw * th, j = g.y * tw + g.x;
+    float3 c = float3(f[3 * j], f[3 * j + 1], f[3 * j + 2]) + f[3 * n + j] * O[4].rgb;
     uint i = idx(p, O);
     float w = pupil(L[0].xy, field(float2(p) + 0.5, O), O) * L[0].z;
     float4 prev = L[0].w > 0.5 ? float4(0) : acc[i];
-    acc[i] = prev + float4(to_lin(frame_rgb(f, p, O)) * L[1].rgb * w, w);
+    acc[i] = prev + float4(to_lin(c) * L[1].rgb * w, w);
 }
 
 float3 acc_at(device const float4* acc, float2 p, constant float4* O) {
@@ -361,7 +367,7 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
     for (uint l = 0; l < nl; l++) {
         constant float4* L = LT + 4 * l;
         float3 d = L[0].xyz - mean;
-        float dist_m = max(length(d) * L[3].z, 1e-3);
+        float dist_m = max(length(d) * L[3].w, 1e-3);
         float3 ldir = d / max(length(d), 1e-9);
         // The head's traced beam, by angle off its axis and around it.
         float3 w = -ldir, aim = L[1].xyz, right = L[3].xyz, upl = cross(right, aim);
