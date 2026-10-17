@@ -39,6 +39,9 @@ final class Viewer: NSObject, MTKViewDelegate {
     var menu: MenuOverlay?
     /// The app's own jobs, wired by main: another scene, where rolls go, quit.
     var appActions: (openScene: () -> Void, chooseRolls: () -> Void, quit: () -> Void)?
+    /// The scan's kind, and switching it (reopens the scene the other way).
+    var sceneIsPlace = false
+    var onSwitchKind: (() -> Void)?
     private var menuOpen = false
     private var menuStick: Float = 0
     private var filmStickX: Float = 0
@@ -671,6 +674,10 @@ final class Viewer: NSObject, MTKViewDelegate {
             },
             .init(title: "Controls", detail: "every button, pad and keyboard") { [weak self] in
                 self?.menu?.showingHelp = true },
+            .init(title: sceneIsPlace ? "Treat this scan as an object" : "Treat this scan as a place",
+                  detail: sceneIsPlace ? "now: a place to stand in, about 30 m across — wrong size? switch"
+                                       : "now: an object about 60 cm across — wrong size? switch") { [weak self] in
+                self?.onSwitchKind?() },
             .init(title: "Open another scene…", detail: "a .ply scan") { [weak self] in self?.appActions?.openScene() },
             .init(title: "Where rolls are kept…", detail: ContactSheetView.root.path) { [weak self] in
                 self?.appActions?.chooseRolls()

@@ -2,6 +2,7 @@ import AppKit
 import CSpirula
 import Foundation
 import UniformTypeIdentifiers
+import simd
 import MetalKit
 
 // Splat Camera: a 1970s 35 mm SLR in a 3DGS scan.
@@ -60,6 +61,13 @@ args.removeAll { $0 == "--pinhole" }
 let filmFPS = bench > 0 ? 0 : Double(option("--fps") ?? "24") ?? 24
 // macOS adds -psn_... when launched from Finder; only real paths count.
 let cliPath = args.first(where: { !$0.hasPrefix("-") })
+
+// --guess FILE: print what the chooser would guess for a scan, quit.
+if let i = args.firstIndex(of: "--guess"), i + 1 < args.count {
+    let k = SceneKind.guess(args[i + 1])
+    print("\(args[i + 1]): \(k.place ? "a place" : "an object"), EV \(Int(k.ev))")
+    exit(0)
+}
 
 // --photometry OUT.csv: trace every head, print its beams, write the curves, quit.
 if let i = args.firstIndex(of: "--photometry"), i + 1 < args.count {
@@ -235,6 +243,17 @@ func configureSession() {
     menu.isHidden = true
     view.addSubview(menu)
     viewer.menu = menu
+    viewer.sceneIsPlace = inside
+    viewer.onSwitchKind = {
+        // Remember the other answer for this file and reopen it that way.
+        let path = currentScene?.path ?? cliPath
+        guard let path else { return }
+        var k = SceneKind.remembered(path) ?? SceneKind(place: inside, ev: sceneEV ?? 12)
+        k.place.toggle()
+        k.ev = k.place ? max(k.ev, 15) : 12
+        k.remember(path)
+        delegate.relaunch(with: path)
+    }
     viewer.appActions = (openScene: { delegate.relaunch(with: nil) },
                          chooseRolls: { delegate.chooseRollsFolder(nil) },
                          quit: { quit() })
@@ -286,6 +305,69 @@ struct SceneKind {
         guard let d = UserDefaults.standard.dictionary(forKey: "scene:" + path) else { return nil }
         return SceneKind(place: d["place"] as? Bool ?? false, ev: Float(d["ev"] as? Double ?? 12))
     }
+    /// A guess from the scan's shape, from a quick sample of the file: a place
+    /// is dominated by its ground (flat: its thinnest spread a small share of
+    /// its widest; the skate park 0.06), an object on the rig is a rounder blob
+    /// (the bee 0.26). Places get bright sun, objects shade.
+    static func guess(_ path: String) -> SceneKind {
+        guard let flat = flatness(path) else { return SceneKind(place: false, ev: 12) }
+        return flat < 0.15 ? SceneKind(place: true, ev: 15) : SceneKind(place: false, ev: 12)
+    }
+
+    private static func flatness(_ path: String) -> Float? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped),
+              let end = data.range(of: Data("end_header\n".utf8)) else { return nil }
+        let header = String(decoding: data[..<end.lowerBound], as: UTF8.self)
+        var n = 0, props: [String] = [], inVertex = false
+        for line in header.split(separator: "\n") {
+            let w = line.split(separator: " ")
+            if w.first == "element" { inVertex = w.count > 2 && w[1] == "vertex"; if inVertex { n = Int(w[2]) ?? 0 } }
+            else if w.first == "property", inVertex, w.count == 3 { props.append(String(w[2])) }
+        }
+        guard n > 100, let ix = props.firstIndex(of: "x"), let iy = props.firstIndex(of: "y"),
+              let iz = props.firstIndex(of: "z") else { return nil }
+        let stride = props.count * 4, body = end.upperBound
+        var pts: [SIMD3<Float>] = []
+        data.withUnsafeBytes { raw in
+            let base = raw.baseAddress!.advanced(by: body)
+            let step = max(1, n / 20000)
+            for i in Swift.stride(from: 0, to: n, by: step) {
+                let v = base.advanced(by: i * stride)
+                pts.append(SIMD3(v.loadUnaligned(fromByteOffset: ix * 4, as: Float.self),
+                                 v.loadUnaligned(fromByteOffset: iy * 4, as: Float.self),
+                                 v.loadUnaligned(fromByteOffset: iz * 4, as: Float.self)))
+            }
+        }
+        // Trim the far tail (floaters), then the spread along the principal axes.
+        let c = pts.reduce(SIMD3<Float>(repeating: 0), +) / Float(pts.count)
+        let d = pts.map { simd_distance($0, c) }.sorted()
+        let cut = d[Int(Float(d.count - 1) * 0.9)]
+        var cov = simd_float3x3(0)
+        var m = 0
+        for p in pts where simd_distance(p, c) <= cut {
+            let q = p - c
+            cov += simd_float3x3(columns: (q * q.x, q * q.y, q * q.z))
+            m += 1
+        }
+        cov = cov * (1 / Float(max(m, 1)))
+        // Eigenvalues of a symmetric 3x3 (Jacobi sweeps).
+        var a = cov
+        for _ in 0..<12 {
+            for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+                let apq = a[q][p]
+                if abs(apq) < 1e-12 { continue }
+                let theta = (a[q][q] - a[p][p]) / (2 * apq)
+                let t = (theta >= 0 ? 1 : -1) / (abs(theta) + sqrt(theta * theta + 1))
+                let cs = 1 / sqrt(t * t + 1), sn = t * cs
+                var r = matrix_identity_float3x3
+                r[p][p] = cs; r[q][q] = cs; r[q][p] = sn; r[p][q] = -sn
+                a = r.transpose * a * r
+            }
+        }
+        let ev = [a[0][0], a[1][1], a[2][2]].sorted()
+        return ev[2] > 0 ? ev[0] / ev[2] : nil
+    }
+
     func remember(_ path: String) {
         UserDefaults.standard.set(["place": place, "ev": Double(ev)], forKey: "scene:" + path)
         UserDefaults.standard.set(path, forKey: "lastScene")
@@ -296,7 +378,8 @@ private let evChoices: [(String, Float)] = [("Indoors / room light (EV 9)", 9), 
                                             ("Bright sun (EV 15)", 15)]
 
 /// The two questions, as popups for a panel or an alert.
-func kindAccessory(_ k: SceneKind) -> (NSView, () -> SceneKind) {
+/// The popups, how to read them, and how to set them (for a newly chosen file).
+func kindAccessory(_ k: SceneKind) -> (NSView, () -> SceneKind, (SceneKind) -> Void) {
     let kind = NSPopUpButton()
     kind.addItems(withTitles: ["An object (scanned on the rig, lit from the camera)", "A place to stand in"])
     kind.selectItem(at: k.place ? 1 : 0)
@@ -307,11 +390,27 @@ func kindAccessory(_ k: SceneKind) -> (NSView, () -> SceneKind) {
                                   [NSTextField(labelWithString: "Its light was:"), light]])
     grid.rowSpacing = 8
     grid.frame = NSRect(x: 0, y: 0, width: 520, height: 64)
-    return (grid, { SceneKind(place: kind.indexOfSelectedItem == 1, ev: evChoices[light.indexOfSelectedItem].1) })
+    return (grid, { SceneKind(place: kind.indexOfSelectedItem == 1, ev: evChoices[light.indexOfSelectedItem].1) },
+            { k in
+                kind.selectItem(at: k.place ? 1 : 0)
+                light.selectItem(at: evChoices.firstIndex(where: { $0.1 == k.ev }) ?? 1)
+            })
 }
+
+final class PanelWatcher: NSObject, NSOpenSavePanelDelegate {
+    let changed: (URL) -> Void
+    init(_ changed: @escaping (URL) -> Void) { self.changed = changed }
+    func panelSelectionDidChange(_ sender: Any?) {
+        if let url = (sender as? NSOpenPanel)?.url, url.pathExtension.lowercased() == "ply" { changed(url) }
+    }
+}
+
+/// The scene being shown and how it was taken (for switching it from the menu).
+var currentScene: (path: String, kind: SceneKind)?
 
 func begin(_ path: String, _ k: SceneKind) {
     k.remember(path)
+    currentScene = (path, k)
     inside = k.place
     sceneEV = sceneEV ?? k.ev
     startSession(path)
@@ -326,14 +425,14 @@ func chooseScene() {
     if let last = UserDefaults.standard.string(forKey: "lastScene") {
         panel.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent()
     }
-    let (view, read) = kindAccessory(SceneKind(place: false, ev: 12))
+    let (view, read, set) = kindAccessory(SceneKind(place: false, ev: 12))
     panel.accessoryView = view
     panel.isAccessoryViewDisclosed = true
+    // Choosing a file fills in its answers: as last time, or a guess from its shape.
+    let watcher = PanelWatcher { url in set(SceneKind.remembered(url.path) ?? SceneKind.guess(url.path)) }
+    panel.delegate = watcher
     guard panel.runModal() == .OK, let url = panel.url else { exit(0) }
-    var k = read()
-    // A file chosen before keeps its answers unless they were changed just now.
-    if let old = SceneKind.remembered(url.path), !k.place && k.ev == 12 { k = old }
-    begin(url.path, k)
+    begin(url.path, read())
 }
 
 /// A .ply dropped on the app or double-clicked: ask only if it is new.
@@ -341,7 +440,7 @@ func open(_ path: String) {
     if let k = SceneKind.remembered(path) { begin(path, k); return }
     let alert = NSAlert()
     alert.messageText = "What is \((path as NSString).lastPathComponent)?"
-    let (view, read) = kindAccessory(SceneKind(place: false, ev: 12))
+    let (view, read, _) = kindAccessory(SceneKind.guess(path))
     alert.accessoryView = view
     alert.addButton(withTitle: "Open")
     alert.addButton(withTitle: "Cancel")
@@ -381,7 +480,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func relaunch(with path: String?) {
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
-        if let path { config.arguments = [path] + (SceneKind.remembered(path)?.place == true ? ["--inside"] : []) }
+        if let path, let k = SceneKind.remembered(path) {
+            config.arguments = [path, "--ev", String(k.ev)] + (k.place ? ["--inside"] : [])
+        } else if let path {
+            config.arguments = [path]
+        }
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, _ in
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
