@@ -31,7 +31,7 @@ func vogel(_ k: Int, _ n: Int) -> SIMD2<Float> {
 
 /// What the photographer has set, and the optics that follow from it.
 struct CameraBody {
-    var lensIndex = lensBag.firstIndex { $0.name == "Kestrel 50mm f/1.4" } ?? 0
+    var lensIndex = lensBag.firstIndex { $0.name == "Ohi Kor 50mm f/1.4" } ?? 0
     var apertureIndex = 0
     var shutterIndex = 7                // 1/125
     var focusM: Float = 1               // focus distance, metres

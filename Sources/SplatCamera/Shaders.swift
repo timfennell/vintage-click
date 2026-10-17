@@ -20,7 +20,7 @@
 //   O[7] = finder only: where the image sits in the window (origin px, scale, corner radius px)
 // Film (FilmStock.packed): F[0..2] crosstalk rows, F[3] = (balance, b&w),
 //   F[4] = (b&w mix, saturation), F[5] = (contrast, black lift, shoulder, grain),
-//   F[6] = (halation, tint), F[7] = (iso, grain size, toe, -)
+//   F[6] = (halation, tint), F[7] = (iso, grain size, toe, colour infrared)
 
 let shaderSource = """
 #include <metal_stdlib>
@@ -141,6 +141,24 @@ float value_noise(float2 p, uint s) {
 // Scene-linear exposure (already scaled by the exposure) to a print.
 float3 film_look(float3 lin, float3 halo, float2 px, uint seed, float lines, constant float4* F) {
     lin += F[6].x * F[6].yzw * halo;
+    if (F[7].w > 0.5) {
+        // Colour infrared. A scan has no infrared, so estimate it: leaves (greener
+        // than both red and blue) glow, blue sky is dark, neutrals stay as they are.
+        // The layers see infrared, red and green, and print red, green and blue.
+        float lum = dot(lin, float3(0.2126, 0.7152, 0.0722));
+        // Even faintly green leaves are alive: they glow in infrared.
+        float leaf = saturate(3.0 * (lin.g - max(lin.r, lin.b)) / max(lin.g, 1e-4));
+        float sky = saturate((lin.b - max(lin.r, lin.g)) / max(lin.b, 1e-4));
+        float reds = saturate((lin.r - max(lin.g, lin.b)) / max(lin.r, 1e-4));    // many reds reflect infrared too
+        float ir = lum * (1 + 3.0 * leaf) * (1 - 0.75 * sky) + 0.9 * reds * lin.r;
+        // Swap the colour, not the faint tints: whites and greys stay as they are
+        // (a warm-grey wall would otherwise go green).
+        float3 c = lin - lum;
+        float strength = smoothstep(0.06, 0.3, length(c) / max(lum, 1e-4));
+        float3 swapped = float3(ir - lum, c.r * strength,
+                                c.g * strength - 0.45 * leaf * lin.g + 0.35 * sky * lin.b);
+        lin = max(lum + swapped, 0.0) * (1 - 0.3 * sky);
+    }
     float3 c = float3(dot(F[0].xyz, lin), dot(F[1].xyz, lin), dot(F[2].xyz, lin)) * F[3].xyz;
     bool bw = F[3].w > 0.5;
     if (bw) c = float3(dot(F[4].xyz, c));
