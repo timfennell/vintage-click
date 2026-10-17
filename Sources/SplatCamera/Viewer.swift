@@ -25,7 +25,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var home = FlyCamera()
     private let center: SIMD3<Float>
     private let radius: Float
-    private let input = GamepadInput()
+    private lazy var input = GamepadInput()   // made on the main thread, at the first frame
     private var meterLum: Float = 0.18
     /// The eye's adaptation to a dark finder: gain that eases toward the
     /// metered level over a second or two (film sees the true exposure).
@@ -565,7 +565,12 @@ final class Viewer: NSObject, MTKViewDelegate {
     func startLighting() { mode = .lighting }
 
     func demoLights() {
-        let subject = camera.position + camera.forward * (body.focusM / body.metresPerUnit)
+        var subject = camera.position + camera.forward * (body.focusM / body.metresPerUnit)
+        if inside {
+            // In a place, light the ground where the camera looks, not the air.
+            let flat = simd_normalize(camera.forward - simd_dot(camera.forward, camera.up) * camera.up)
+            subject = camera.position + flat * (5 / body.metresPerUnit) - camera.up * (1.6 / body.metresPerUnit)
+        }
         func place(_ head: Int, side: Float, up: Float, metres: Float, spot: Float) -> PlacedLight {
             let toCam = simd_normalize(camera.position - subject)
             let dir = simd_normalize(toCam * cos(side) + camera.right * sin(side) + camera.up * up)
@@ -576,9 +581,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         }
         if inside {
             // A night set in a place: two hard Fresnels crossing, a softlight fill.
-            lighting.lights = [place(2, side: -0.9, up: 0.25, metres: 6, spot: 0.4),
-                               place(2, side: 2.4, up: 0.35, metres: 7, spot: 0.7),
-                               place(3, side: 0.6, up: 0.1, metres: 4, spot: 0)]
+            // On stands about 3 m up: a hard key and a back-cross, a softlight fill.
+            lighting.lights = [place(2, side: -0.9, up: 0.55, metres: 6, spot: 0.5),
+                               place(2, side: 2.4, up: 0.5, metres: 6, spot: 0.7),
+                               place(3, side: 0.6, up: 0.6, metres: 4, spot: 0)]
             lighting.setHouseLights("city night")
             return
         }

@@ -30,9 +30,13 @@ final class ContactSheetView: NSView {
 
     override var isFlipped: Bool { true }
 
-    /// Where rolls are kept (SPLAT_CAMERA_ROLLS overrides, for tests).
-    static let root = ProcessInfo.processInfo.environment["SPLAT_CAMERA_ROLLS"].map { URL(fileURLWithPath: $0) }
-        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Splat Camera")
+    /// Where rolls are kept: chosen in File > Choose Where Rolls Are Kept
+    /// (remembered), else ~/Pictures/Splat Camera. SPLAT_CAMERA_ROLLS overrides, for tests.
+    static var root: URL {
+        if let env = ProcessInfo.processInfo.environment["SPLAT_CAMERA_ROLLS"] { return URL(fileURLWithPath: env) }
+        if let chosen = UserDefaults.standard.string(forKey: "rollsFolder") { return URL(fileURLWithPath: chosen) }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Splat Camera")
+    }
 
     /// Rolls on disk, oldest first ("Roll 03 - Portrait 400/frame-07.png").
     static func scanRolls() -> [Roll] {

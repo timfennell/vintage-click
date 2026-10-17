@@ -74,6 +74,8 @@ final class RenderLoop {
     }
     static let maxLights = 8
     var shadowsOn = true
+    /// The scan was lit by the sun or a room, not from the camera: relight from base colour.
+    var daylightScan = false
     private let shadowPSO: MTLComputePipelineState
     private var shadowMaps: [ShadowQuality: [(buf: MTLBuffer, off: Int, index: Int32)]] = [:]
     private var shadowKeys: [ShadowQuality: [[SIMD4<Float>]]] = [:]
@@ -88,6 +90,8 @@ final class RenderLoop {
     private var exposures: [ExposureJob] = []
     private var latest: (slot: Int, job: FinderJob)?
     private var displaying = [Int](repeating: 0, count: 4)
+    private var stopping = false
+    private let stopped = DispatchSemaphore(value: 0)
 
     /// Called on the main thread.
     var onFinderRendered: ((Double) -> Void)?
@@ -158,6 +162,17 @@ final class RenderLoop {
 
     // MARK: main-thread side
 
+    /// Lets the render in progress finish and stops the thread: the GPU device
+    /// must not be torn down (at exit) under a render.
+    func shutdown() {
+        cond.lock()
+        guard !stopping else { cond.unlock(); return }
+        stopping = true
+        cond.signal()
+        cond.unlock()
+        _ = stopped.wait(timeout: .now() + 10)
+    }
+
     /// Asks for a finder frame of this view (replacing any not yet started).
     func requestFinder(_ job: FinderJob) {
         cond.lock()
@@ -211,7 +226,12 @@ final class RenderLoop {
     private func run() {
         while true {
             cond.lock()
-            while finderRequest == nil && exposures.isEmpty { cond.wait() }
+            while finderRequest == nil && exposures.isEmpty && !stopping { cond.wait() }
+            if stopping {
+                cond.unlock()
+                stopped.signal()
+                return
+            }
             let finder = finderRequest
             finderRequest = nil
             let exposure = exposures.first
@@ -311,7 +331,7 @@ final class RenderLoop {
             SIMD4(eye, plot.ambient),
             SIMD4(Float(min(plot.lights.count, Self.maxLights)), Float(count), Float(higherCoeffs), 0.25),
             SIMD4(plot.ambientTint, vis == nil ? 0 : 1),
-            SIMD4(Float(quality.rawValue), Float(shadowVersion), 0, 0),
+            SIMD4(Float(quality.rawValue), Float(shadowVersion), daylightScan ? 1 : 0, 0),
         ]
         let packs = plot.lights.prefix(Self.maxLights).map { $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV, up: plot.up) }
         var lt: [SIMD4<Float>] = packs.flatMap(\.head)

@@ -314,7 +314,7 @@ fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[b
 // lights give back a share of the scan as captured. Writes new SH DC colours
 // straight into the renderer's buffer (render with the higher bands off).
 //   G[0] = (camera position, house lights)   G[1] = (lights, N, K higher coeffs, shine colour)
-//   G[2] = (house lights' colour, shadows on)   VIS = per splat, per light, the light let through (0-255)
+//   G[2] = (house lights' colour, shadows on)   G[3] = (shadow quality, version, daylight scan, -)   VIS = per splat, per light, the light let through (0-255)
 //   per light, 4 float4s (PlacedLight.packed): (pos, -), (aim, dimmer / E_ref),
 //   (colour, shine), (right, metres per unit); and its beam table B (candela per
 //   colour; 32 bins off axis with edges at 90 (t/32)^1.3 degrees, x 8 around it).
@@ -375,7 +375,8 @@ kernel void shadow_vis(device const float* means [[buffer(0)]], device const flo
     if (any(uv < 0) || any(uv >= res)) { vis[i * 8 + slot] = 255; return; }
     float dr = length(pc);
     // Self-shadowing guard: a little in front of the receiver, more far off.
-    float bias = 0.012 * dr + 0.004 / S[3].z;
+    // ... and a few texels' depth, for surfaces the light grazes.
+    float bias = 0.012 * dr + 0.004 / S[3].z + 3 * dr / fx;
     float ramp = 0.03 * dr;
     uint nb = uint(S[4].x), nf = uint(S[4].y);
     // Blockers: occluders in front, near this texel.
@@ -443,9 +444,12 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         if (e <= 0) continue;
         float3 col = L[2].rgb * (e3 / e);
         // Diffuse: the broad colour seen from the light's side.
-        float3 diff = max(base + (K >= 3 ? sh_sum(-ldir, sh, K, 0, 3) : 0.0), 0.0);
+        // (A daylight scan's band 1 is the sun's doing: read from a new direction
+        // it gives false colour, so those relight from the base colour alone.)
+        bool camera_lit = G[3].z < 0.5;
+        float3 diff = max(base + (K >= 3 && camera_lit ? sh_sum(-ldir, sh, K, 0, 3) : 0.0), 0.0);
         lin += srgb_to_lin3(diff) * e * col;
-        if (has_sh) {
+        if (has_sh && camera_lit) {
             float3 h = normalize(v - ldir);
             float3 S = sh_sum(h, sh, K, 3, K);
             float3 full = max(base + sh_sum(h, sh, K, 0, 3) + S, 0.0);

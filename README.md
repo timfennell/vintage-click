@@ -13,6 +13,20 @@ a Metal pass composites them on screen.
 Play runs at a film cadence — 24 fps by default (`--fps 18` .. `--fps 24`),
 each frame held evenly for 1/fps.
 
+## Play
+
+`./build.sh`, then copy `build/Splat Camera.app` to /Applications. Open it from Finder and it asks for
+a scan (a 3DGS `.ply`) and two things about it: whether it's an object (scanned on a rig, lit from
+the camera) or a place to stand in, and how bright its light was. The answers are remembered per
+file. You can also drop a `.ply` on the app or use **Open With**. **File > Open Scene…** switches
+scans, **File > Choose Where Rolls Are Kept…** picks the folder for developed rolls (default
+`~/Pictures/Splat Camera`), and **Help > Controls** lists the keys and pad buttons.
+
+**Speed (M2 Pro, 3M-splat bee, nothing else on the GPU):** about 6 finder frames a second, ~150 ms
+each, nearly the same at 810x540 as at 1620x1080 and with shadows or the lens off. The cost is per
+splat (projecting, sorting, relighting 3M of them), not per pixel: level of detail and a faster
+renderer path are next.
+
 ## Build
 
 Needs the Command Line Tools (no Xcode) and a build of `libspirula_render.dylib`
@@ -71,7 +85,7 @@ shine; the house lights give back a share of the scan as captured. The kit is
 1970s tungsten at 3200 K: Fresnel 650, 1K and 2K (flood to spot) and a 2K
 quartz softlight, photometrically sized, so the meter and the film react to
 them as they would (daylight stocks go warm; Tungsten 800T is balanced for
-them). Heads show as wireframes in the finder only. No shadows yet.
+them). Heads show as wireframes in the finder only. Each light casts shadows.
 
 ## Seeing the pictures
 
