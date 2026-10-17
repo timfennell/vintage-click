@@ -77,10 +77,12 @@ struct CameraBody {
     mutating func turnFocus(_ rate: Float, dt: Float) {
         focusM = max(lens.minFocusM, min(200, focusM * exp(rate * dt * 1.1)))
     }
-    mutating func nextLens() {
+    mutating func nextLens() { chooseLens((lensIndex + 1) % lensBag.count) }
+
+    mutating func chooseLens(_ index: Int) {
         // Keep the same f-number where the new lens has it.
         let n = takingAperture
-        lensIndex = (lensIndex + 1) % lensBag.count
+        lensIndex = index % lensBag.count
         let stops = lens.apertureStops
         apertureIndex = stops.enumerated().min(by: { abs($0.1 - n) < abs($1.1 - n) })!.offset
         focusM = max(focusM, lens.minFocusM)

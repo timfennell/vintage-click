@@ -80,7 +80,7 @@ final class ViewfinderHUD: NSView {
         }
         for (k, line) in info.lines.enumerated() {
             text(line, at: NSPoint(x: 2 * u, y: 5 * u + CGFloat(k) * 1.5 * u), size: 1.0 * u,
-                 color: k < info.lines.count - 2 ? led : NSColor.white.withAlphaComponent(0.8),
+                 color: k < info.lines.count - 3 ? led : NSColor.white.withAlphaComponent(0.8),
                  width: b.width * 0.9)
         }
         drawMeter(in: NSRect(x: b.maxX - 4.5 * u, y: b.midY - 14 * u, width: 2.5 * u, height: 28 * u), u: u)

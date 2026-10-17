@@ -46,6 +46,13 @@ struct FlyCamera {
         yaw = atan2(simd_dot(d, b), simd_dot(d, a))
     }
 
+    /// Mouse look: turns straight away (no easing), slower on longer lenses.
+    mutating func turn(_ d: SIMD2<Float>) {
+        let k: Float = 0.0022 * min(1, 50 / focalMM)
+        yaw -= d.x * k
+        pitch = max(-1.5, min(1.5, pitch + d.y * k))
+    }
+
     mutating func update(_ input: FlyInput, dt: Float) {
         // Critically damped-ish easing toward the stick targets.
         let ease = 1 - exp(-dt / 0.12)

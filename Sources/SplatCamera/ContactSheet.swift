@@ -92,6 +92,19 @@ final class ContactSheetView: NSView {
         needsDisplay = true
     }
 
+    /// The loupe under the mouse; the frame under it becomes the chosen one.
+    func putLoupe(at p: CGPoint) {
+        loupeCentre = p
+        let L = tableLayout()
+        if let i = L.frames.firstIndex(where: { $0.contains(p) }) { selected = i }
+        needsDisplay = true
+    }
+
+    func turnLoupe(_ wheel: CGFloat) {
+        loupePower = max(2, min(10, loupePower * exp(wheel * 0.05)))
+        needsDisplay = true
+    }
+
     /// Slides the loupe (velocity in view points per second) and turns its power.
     func handleLoupe(move v: CGVector, power: CGFloat, dt: CGFloat) {
         var c = loupeCentre ?? CGPoint(x: bounds.midX, y: bounds.midY)

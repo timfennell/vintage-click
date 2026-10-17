@@ -308,6 +308,7 @@ fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[b
 // lights give back a share of the scan as captured. Writes new SH DC colours
 // straight into the renderer's buffer (render with the higher bands off).
 //   G[0] = (camera position, house lights)   G[1] = (lights, N, K higher coeffs, shine colour)
+//   G[2] = (house lights' colour, -)
 //   per light, 4 float4s (PlacedLight.packed): (pos, softlight), (aim, peak cd / E_ref),
 //   (colour, shine), (cos inner, cos outer, metres per unit, -)
 constant float C0 = 0.28209479177387814;
@@ -349,10 +350,11 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
     device const float* sh = sh0 + i * K * 3;
     float ambient = G[0].w;
     float3 v = normalize(mean - G[0].xyz);           // camera -> splat, as 3DGS reads SH
-    float3 lin = srgb_to_lin3(base) * ambient;
+    float3 tint = G[2].rgb;
+    float3 lin = srgb_to_lin3(base) * ambient * tint;
     float3 shine = 0;
     bool has_sh = K >= 8;
-    if (has_sh && ambient > 0) shine += pow(ambient, 1 / 2.2) * sh_sum(v, sh, K, 0, K);
+    if (has_sh && ambient > 0) shine += pow(ambient * tint, 1 / 2.2) * sh_sum(v, sh, K, 0, K);
     const float3 lum = float3(0.2126, 0.7152, 0.0722);
     for (uint l = 0; l < nl; l++) {
         constant float4* L = LT + 4 * l;

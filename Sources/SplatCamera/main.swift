@@ -33,6 +33,8 @@ let apertureChoice = option("--aperture").flatMap { Float($0) }
 let filmChoice = option("--film").flatMap { Int($0) }
 let openSheet = args.contains("--sheet")
 args.removeAll { $0 == "--sheet" }
+// --house night|dusk|...: the scan's own light to start with.
+let house = option("--house")
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -87,6 +89,7 @@ if let n = apertureChoice {
 if let i = filmChoice { viewer.body.stockIndex = i % filmStocks.count }
 if pinhole { viewer.setBenchLens(false) }
 if demoLights { viewer.demoLights() }
+if let h = house { viewer.lighting.setHouseLights(h) }
 if lightingMode { viewer.startLighting() }
 if openSheet { DispatchQueue.main.async { viewer.openSheet() } }
 // Start with the shutter matched to the scene, as a photographer would.
@@ -114,6 +117,8 @@ let hud = ViewfinderHUD(frame: view.bounds)
 hud.autoresizingMask = [.width, .height]
 view.addSubview(hud)
 viewer.hud = hud
+viewer.attachInput(to: view)
+window.acceptsMouseMovedEvents = true
 let sheet = ContactSheetView(frame: view.bounds)
 sheet.autoresizingMask = [.width, .height]
 sheet.isHidden = true

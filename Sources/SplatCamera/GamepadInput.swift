@@ -3,13 +3,19 @@ import Foundation
 import GameController
 import simd
 
-/// A game controller (Xbox / PlayStation / MFi), with the keyboard standing in
-/// for one. Buttons are reported by position; what they do depends on the mode
-/// (see Viewer: camera, lighting, contact sheet).
+/// A game controller (Xbox / PlayStation / MFi), or keyboard and mouse laid out
+/// like a first-person game. Buttons are reported by pad position; what they
+/// do depends on the mode (see Viewer: camera, lighting, light table).
 ///
-/// Keyboard: WASD = left stick, arrows = right stick, Q/E = L1/R1 (held and
-/// pressed), Z/C = L2/R2, Space = A, Tab = B, L = X, R = Y, 1/2/4/3 = d-pad
-/// left/right/up/down, 0 = Menu, K = View, G = L3, M = R3, U = cycle up axis.
+/// Keyboard and mouse (click in the window to take the mouse, Esc to let go):
+///   mouse look · WASD walk · Shift run · Space / Ctrl rise / sink (also E / Q)
+///   left click shutter · right button (hold) depth-of-field preview
+///   wheel focus ring · [ ] aperture · - = shutter speed · 1-8 lens from the bag
+///   R new roll (reload) · L lighting · Tab light table · H reset view · U up axis
+/// Lighting: F add a light · left click take / place · Backspace remove ·
+///   T change head · [ ] choose · - = dimmer · wheel flood / spot · G house lights
+/// Light table: the mouse is the loupe · wheel its power · click marks a keeper ·
+///   arrows choose · Q / E roll · Tab or Esc back
 final class GamepadInput {
     struct State {
         var move = SIMD2<Float>(0, 0)   // left stick
@@ -18,15 +24,38 @@ final class GamepadInput {
         var triggers: Float = 0         // R2 - L2
         var bHeld = false
         var pressed: Set<Button> = []   // pressed since the last poll
+        var mouseLook = SIMD2<Float>(0, 0)  // mouse travel since the last poll (points, + right / up)
+        var wheel: Float = 0                // wheel travel since the last poll (+ away from you)
+        var lensSlot: Int?                  // number key: that lens from the bag
+        var run = false                     // Shift held
+        var pointer: CGPoint?               // mouse in the window (light table), view points
     }
+    enum KeyMode { case camera, lighting, sheet }
+    /// Which layout the keyboard is in (set by the viewer).
+    var keyMode = KeyMode.camera
+    /// The view the mouse is taken by (mouse look) and reported over.
+    weak var view: NSView?
     enum Button: Hashable {
         case a, b, x, y, left, right, up, down, l1, r1, menu, view, l3, r3, cycleUp
     }
 
     private var held: Set<Button> = []
     private(set) var controllerName: String?
+    private var mouseDelta = SIMD2<Float>(0, 0)
+    private var heldSlots: Set<Int> = []
+    private var wheelDelta: Float = 0
+    private var leftClick = false, rightHeld = false
+    private(set) var mouseCaptured = false
 
     init() {
+        // Mouse and keys arrive as AppKit events; eat the keys so the window does not beep.
+        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { _ in nil }
+        NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
+                                                    .leftMouseDown, .leftMouseUp, .rightMouseDown,
+                                                    .rightMouseUp, .scrollWheel]) { [weak self] e in
+            self?.handle(e)
+            return e
+        }
         GCController.shouldMonitorBackgroundEvents = true
         NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil,
                                                queue: .main) { [weak self] n in
@@ -39,6 +68,29 @@ final class GamepadInput {
         }
         GCController.startWirelessControllerDiscovery {}
         controllerName = GCController.controllers().first?.vendorName
+    }
+
+    private func handle(_ e: NSEvent) {
+        switch e.type {
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged:
+            if mouseCaptured { mouseDelta += SIMD2(Float(e.deltaX), Float(-e.deltaY)) }
+        case .leftMouseDown:
+            // The first click only takes the mouse; after that it is the shutter.
+            if keyMode != .sheet && !mouseCaptured { capture(true) } else { leftClick = true }
+        case .rightMouseDown: rightHeld = true
+        case .rightMouseUp: rightHeld = false
+        case .scrollWheel:
+            wheelDelta += Float(e.hasPreciseScrollingDeltas ? e.scrollingDeltaY / 10 : e.scrollingDeltaY)
+        default: break
+        }
+    }
+
+    /// Mouse look: hide the pointer and keep it from wandering off the window.
+    func capture(_ on: Bool) {
+        guard on != mouseCaptured else { return }
+        mouseCaptured = on
+        CGAssociateMouseAndMouseCursorPosition(on ? 0 : 1)
+        if on { NSCursor.hide() } else { NSCursor.unhide() }
     }
 
     /// Dead zone then a squared response: small deflections for fine framing.
@@ -75,22 +127,48 @@ final class GamepadInput {
             ]
             for (down, b) in map where down { now.insert(b) }
         }
-        // The keyboard only counts while this app is in front (typing elsewhere is not for us).
-        if NSApplication.shared.isActive, let kb = GCKeyboard.coalesced?.keyboardInput {
+        // The keyboard and mouse only count while this app is in front.
+        if !NSApplication.shared.isActive {
+            capture(false)
+        } else if let kb = GCKeyboard.coalesced?.keyboardInput {
             func k(_ c: GCKeyCode) -> Float { kb.button(forKeyCode: c)?.isPressed == true ? 1 : 0 }
             s.move += SIMD2(k(.keyD) - k(.keyA), k(.keyW) - k(.keyS))
             s.look += SIMD2(k(.rightArrow) - k(.leftArrow), k(.upArrow) - k(.downArrow)) * 0.6
-            s.shoulders += k(.keyE) - k(.keyQ)
-            s.triggers += (k(.keyC) - k(.keyZ)) * 0.6
-            if k(.tab) > 0 { s.bHeld = true }
-            let keys: [(GCKeyCode, Button)] = [
-                (.spacebar, .a), (.tab, .b), (.keyL, .x), (.keyR, .y),
-                (.one, .left), (.two, .right), (.four, .up), (.three, .down),
-                (.keyQ, .l1), (.keyE, .r1), (.zero, .menu), (.keyK, .view),
-                (.keyG, .l3), (.keyM, .r3), (.keyU, .cycleUp),
+            s.shoulders += k(.spacebar) + k(.keyE) - k(.leftControl) - k(.keyQ)
+            s.run = k(.leftShift) + k(.rightShift) > 0
+            if rightHeld { s.bHeld = true }
+            var keys: [(GCKeyCode, Button)] = [
+                (.openBracket, .left), (.closeBracket, .right), (.equalSign, .up), (.hyphen, .down),
+                (.keyL, .r3), (.tab, .view), (.keyH, .menu), (.keyU, .cycleUp),
             ]
+            switch keyMode {
+            case .camera:
+                keys += [(.keyR, .y), (.keyG, .l3)]
+            case .lighting:
+                keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .b), (.keyG, .l3), (.keyE, .a)]
+            case .sheet:
+                keys += [(.leftArrow, .left), (.rightArrow, .right), (.upArrow, .up), (.downArrow, .down),
+                         (.keyQ, .l1), (.keyE, .r1), (.escape, .b), (.returnOrEnter, .a)]
+                s.look = .zero
+                s.shoulders = 0
+            }
             for (code, b) in keys where k(code) > 0 { now.insert(b) }
+            let slots: [GCKeyCode] = [.one, .two, .three, .four, .five, .six, .seven, .eight]
+            for (n, code) in slots.enumerated() where k(code) > 0 && !heldSlots.contains(n) { s.lensSlot = n }
+            heldSlots = Set(slots.enumerated().filter { k($0.1) > 0 }.map(\.0))
+            if k(.escape) > 0 { capture(false) }
+            if leftClick { now.insert(.a) }
+            leftClick = false
+            s.mouseLook = mouseDelta
+            s.wheel = wheelDelta
+            if keyMode == .sheet, let v = view, let w = v.window {
+                capture(false)
+                let p = v.convert(w.mouseLocationOutsideOfEventStream, from: nil)
+                if v.bounds.contains(p) { s.pointer = CGPoint(x: p.x, y: v.isFlipped ? p.y : v.bounds.height - p.y) }
+            }
         }
+        mouseDelta = .zero
+        wheelDelta = 0
         s.move = simd_clamp(s.move, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
         s.pressed = now.subtracting(held)
         held = now

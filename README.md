@@ -84,32 +84,51 @@ pencil (kept in the roll's marks.json). Nothing pops up when the shutter fires.
 
 ## Controls
 
-Camera mode:
+Keyboard and mouse, laid out like a first-person game (click in the window to
+take the mouse, Esc to let it go):
 
-| Pad (Xbox / PlayStation) | Keyboard | |
-|---|---|---|
-| Left stick | WASD | walk / strafe |
-| Right stick | arrows | look |
-| L1 / R1 | Q / E | sink / rise |
-| L2 / R2 | Z / C | focus ring near / far |
-| D-pad left / right | 1 / 2 | aperture open / close |
-| D-pad up / down | 4 / 3 | shutter faster / slower |
-| A / cross | Space | shutter release |
-| B / circle (hold) | Tab (hold) | depth-of-field preview |
-| X / square | L | next lens from the bag |
-| Y / triangle | R | load a new roll (next stock) |
-| R3 | M | lighting mode |
-| View / Share | K | contact sheet |
-| Menu | 0 | reset the view |
-| L3 | G | walk faster / slower |
-| | U | cycle the up axis |
+| | Camera | Lighting (L) | Light table (Tab) |
+|---|---|---|---|
+| Mouse | look | look | the loupe |
+| WASD / Shift | walk / run | walk / run | |
+| Space, Ctrl (or E, Q) | rise, sink | rise, sink | |
+| Left click | shutter | take / place the light | mark a keeper |
+| Right button (hold) | depth-of-field preview | | |
+| Wheel | focus ring | flood / spot | loupe power |
+| [ ] | aperture | choose a light | |
+| - = | shutter speed | dimmer | |
+| 1-8 | lens from the bag | | |
+| R | new roll (reload) | | |
+| F / T / Backspace | | add / change head / remove | |
+| G | | house lights (day ... night) | |
+| arrows / Q E / Esc | look | look | choose frame / roll / back |
+| H, U | reset view, up axis | | |
 
-Lighting mode (walking and looking as above): X adds a light (in hand, held
+Pad (Xbox / PlayStation / Switch Pro), camera mode:
+
+| Pad | |
+|---|---|
+| Left stick | walk / strafe |
+| Right stick | look |
+| L1 / R1 | sink / rise |
+| L2 / R2 | focus ring near / far |
+| D-pad left / right | aperture open / close |
+| D-pad up / down | shutter faster / slower |
+| A / cross | shutter release |
+| B / circle (hold) | depth-of-field preview |
+| X / square | next lens from the bag |
+| Y / triangle | load a new roll (next stock) |
+| R3 | lighting mode |
+| View / Share | contact sheet |
+| Menu | reset the view |
+| L3 | walk faster / slower |
+
+Pad, lighting mode (walking and looking as above): X adds a light (in hand, held
 out in front and aimed where you focus), A takes / places the chosen light,
 B removes it, Y changes its head, d-pad left/right chooses, up/down dims in
 half stops, L2/R2 flood / spot, L3 house lights, R3 back to the camera.
 
-Light table: sticks slide the loupe, L2/R2 its power, d-pad chooses a frame,
+Pad, light table: sticks slide the loupe, L2/R2 its power, d-pad chooses a frame,
 A marks it, L1/R1 change roll, B back to the camera.
 
 ## Where it is going

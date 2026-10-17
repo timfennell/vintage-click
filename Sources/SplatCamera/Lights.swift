@@ -141,14 +141,36 @@ struct PlacedLight {
 struct LightingPlot {
     var lights: [PlacedLight] = []
     var ambient: Float = 1          // the house lights: share of the scan as captured
+    var ambientTint = SIMD3<Float>(1, 1, 1)
+    var ambientName = "day"
     var selected = 0
     var carrying = false
     var kitChoice = 1               // what the next light added will be
 
-    static let houseLevels: [Float] = [1, 0.5, 0.25, 0.1, 0]
+    /// The scan's own light, from full day down to moonlight, as a share of
+    /// the light it was captured in (sun at EV 15 is ~80,000 lux): twilight
+    /// ~400 lux, a city night's glow ~40 lux, full moon ~0.25 lux. Cooler and
+    /// paler as it falls, the eye's (and film's) idea of night. Against these
+    /// a 2K Fresnel a few metres off (~1,000 lux) is the sun.
+    static let houseLevels: [(name: String, level: Float, tint: SIMD3<Float>)] = [
+        ("day", 1, [1, 1, 1]),
+        ("overcast", 0.5, [0.95, 0.98, 1.05]),
+        ("late afternoon", 0.25, [1.1, 0.95, 0.8]),
+        ("dusk", 0.005, [0.75, 0.85, 1.1]),
+        ("city night", 0.0005, [0.85, 0.8, 0.9]),
+        ("moonlight", 0.000003, [0.55, 0.72, 1.1]),
+        ("dark", 0, [1, 1, 1]),
+    ]
 
     mutating func cycleHouseLights() {
-        let i = Self.houseLevels.firstIndex(where: { abs($0 - ambient) < 1e-3 }) ?? 0
-        ambient = Self.houseLevels[(i + 1) % Self.houseLevels.count]
+        let i = Self.houseLevels.firstIndex(where: { $0.name == ambientName }) ?? 0
+        setHouseLights(Self.houseLevels[(i + 1) % Self.houseLevels.count].name)
+    }
+
+    mutating func setHouseLights(_ name: String) {
+        guard let h = Self.houseLevels.first(where: { $0.name == name }) else { return }
+        ambientName = h.name
+        ambient = h.level
+        ambientTint = h.tint
     }
 }

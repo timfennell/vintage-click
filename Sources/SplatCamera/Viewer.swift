@@ -27,6 +27,9 @@ final class Viewer: NSObject, MTKViewDelegate {
     private let radius: Float
     private let input = GamepadInput()
     private var meterLum: Float = 0.18
+    /// The eye's adaptation to a dark finder: gain that eases toward the
+    /// metered level over a second or two (film sees the true exposure).
+    private var finderGain: Float = 1
     private var tables: [String: [SIMD4<Float>]] = [:]
     private var lensOn = true
     private var displayFrame = 0
@@ -38,6 +41,9 @@ final class Viewer: NSObject, MTKViewDelegate {
     enum Mode { case camera, lighting, sheet }
     private(set) var mode = Mode.camera
     var lighting = LightingPlot()
+    private var lastPointer: CGPoint?
+    /// Keyboard and mouse share the pad's input (the view takes the mouse).
+    func attachInput(to view: NSView) { input.view = view }
 
     /// Sub-pupils per exposure: more = truer bokeh, longer to develop.
     var cellsPerExposure = 32
@@ -61,15 +67,21 @@ final class Viewer: NSObject, MTKViewDelegate {
     var onBenchDone: ((String) -> Void)?
 
     private let inside: Bool
+    private var standingSpot: (position: SIMD3<Float>, yaw: Float)?
 
     init(model: SplatModel, width: Int, height: Int, photo: (Int, Int), metresPerUnit: Float,
          inside: Bool = false) throws {
         self.inside = inside
+
         self.width = width
         self.height = height
         let b = model.bounds()
         center = b.center
         radius = b.radius
+        if inside {
+            standingSpot = Self.findOpenSpot(model, centre: b.center, radius: b.radius,
+                                             metresPerUnit: metresPerUnit, up: FlyCamera().up)
+        }
         loop = try RenderLoop(model: model, finder: (width, height), photo: photo,
                               background: [0.08, 0.08, 0.09, 1])
         device = loop.device
@@ -119,6 +131,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         if inside {
             // Standing in the middle of the place at eye height, looking level.
             camera.position = center + keepUp * (1.6 / body.metresPerUnit)
+            if let spot = standingSpot, keepUp == FlyCamera().up {
+                camera.position = spot.position
+                camera.yaw = spot.yaw
+            }
             camera.moveSpeed = 1.4 / body.metresPerUnit      // walking pace
             home = camera
             body.focusM = max(body.lens.minFocusM, 5)
@@ -128,6 +144,58 @@ final class Viewer: NSObject, MTKViewDelegate {
         camera.lookAt(center, from: eye)
         home = camera
         body.focusM = max(body.lens.minFocusM, simd_distance(eye, center) * body.metresPerUnit)
+    }
+
+    /// Somewhere to stand in a scanned place: near the middle, at eye height
+    /// above the ground there, nothing within arm's reach and a clear view of a
+    /// few metres ahead (scans have no record of where the photographer stood).
+    private static func findOpenSpot(_ m: SplatModel, centre: SIMD3<Float>, radius: Float,
+                                     metresPerUnit: Float, up: SIMD3<Float>) -> (position: SIMD3<Float>, yaw: Float)? {
+        let unit = 1 / metresPerUnit
+        let stride = max(1, m.count / 400_000)
+        var pts: [SIMD3<Float>] = []
+        for i in Swift.stride(from: 0, to: m.count, by: stride) {
+            pts.append(SIMD3(m.means[3 * i], m.means[3 * i + 1], m.means[3 * i + 2]))
+        }
+        var cam = FlyCamera()
+        cam.up = up
+        let a = cam.forward, b = simd_cross(up, a)
+        var best: (score: Float, pos: SIMD3<Float>, yaw: Float)?
+        for gx in -3...3 {
+            for gy in -3...3 {
+                let foot = centre + (a * Float(gx) + b * Float(gy)) * (radius * 0.12)
+                // The ground: the lowest well-populated level within a metre around the spot.
+                var heights: [Float] = []
+                for p in pts {
+                    let d = p - foot
+                    let h = simd_dot(d, up)
+                    let side = d - h * up
+                    if simd_length_squared(side) < unit * unit { heights.append(h) }
+                }
+                guard heights.count > 30 else { continue }
+                heights.sort()
+                let ground = heights[heights.count / 20]
+                let eye = foot + up * (ground + 1.6 * unit)
+                var near = 0
+                for p in pts where simd_distance_squared(p, eye) < 1.0 * unit * unit { near += 1 }
+                for k in 0..<8 {
+                    let yaw = Float(k) * .pi / 4
+                    let f = cos(yaw) * a + sin(yaw) * b
+                    var blocked = 0, seen = 0
+                    for p in pts {
+                        let d = p - eye
+                        let along = simd_dot(d, f)
+                        guard along > 0.3 * unit else { continue }
+                        let off = simd_length(d - along * f)
+                        if along < 4 * unit && off < 0.6 * unit { blocked += 1 }
+                        if along < 25 * unit && off < along * 0.4 { seen += 1 }
+                    }
+                    let score = Float(near * 20 + blocked * 5) - Float(min(seen, 5000)) * 0.05
+                    if best == nil || score < best!.score { best = (score, eye, yaw) }
+                }
+            }
+        }
+        return best.map { ($0.pos, $0.yaw) }
     }
 
     private func cycleUp() {
@@ -198,7 +266,11 @@ final class Viewer: NSObject, MTKViewDelegate {
             cb.commit()
             return
         }
+        // Eyes adapt, but not all the way: night stays night in the finder.
+        let want = max(1, min(24, 0.06 / max(meterLum, 1e-6)))
+        finderGain *= pow(want / finderGain, min(1, Float(dt) * 0.8))
         var o = finderOptics(frame.job, seed: UInt32(displayFrame))
+        o[5].y *= finderGain
         var f = frame.job.body.stock.packed
 
         let ce = cb.makeComputeCommandEncoder()!
@@ -316,6 +388,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
 
     private func handleInput(dt: Float) {
+        input.keyMode = mode == .sheet ? .sheet : (mode == .lighting ? .lighting : .camera)
         let s = input.poll()
         let p = s.pressed
         if p.contains(.cycleUp) { cycleUp() }
@@ -336,6 +409,9 @@ final class Viewer: NSObject, MTKViewDelegate {
             }
             body.dofPreview = s.bHeld
             body.turnFocus(s.triggers, dt: dt)
+            // The wheel is the focus ring: away from you focuses farther.
+            if s.wheel != 0 { body.focusM = max(body.lens.minFocusM, min(200, body.focusM * exp(s.wheel * 0.03))) }
+            if let slot = s.lensSlot, slot < lensBag.count { body.chooseLens(slot) }
         case .lighting:
             lightingInput(s, dt: dt)
             body.dofPreview = false
@@ -346,7 +422,11 @@ final class Viewer: NSObject, MTKViewDelegate {
             mode = mode == .lighting ? .camera : .lighting
             lighting.carrying = false
         }
+        camera.turn(s.mouseLook)
+        let pace = camera.moveSpeed
+        if s.run { camera.moveSpeed = pace * 3 }
         camera.update(FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0), dt: dt)
+        camera.moveSpeed = pace
         camera.focalMM = body.lens.focalMM
         if lighting.carrying, lighting.lights.indices.contains(lighting.selected) {
             carry(&lighting.lights[lighting.selected])
@@ -381,7 +461,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                 var l = plot.lights[plot.selected]
                 if p.contains(.up) { l.dimmerStops = min(0, l.dimmerStops + 0.5) }
                 if p.contains(.down) { l.dimmerStops = max(-4, l.dimmerStops - 0.5) }
-                l.spot = max(0, min(1, l.spot + s.triggers * dt * 0.8))
+                l.spot = max(0, min(1, l.spot + s.triggers * dt * 0.8 + s.wheel * 0.01))
                 plot.lights[plot.selected] = l
             }
         }
@@ -410,6 +490,14 @@ final class Viewer: NSObject, MTKViewDelegate {
             var l = PlacedLight(head: head, position: pos, aim: simd_normalize(subject - pos))
             l.spot = spot
             return l
+        }
+        if inside {
+            // A night set in a place: two hard Fresnels crossing, a softlight fill.
+            lighting.lights = [place(2, side: -0.9, up: 0.25, metres: 6, spot: 0.4),
+                               place(2, side: 2.4, up: 0.35, metres: 7, spot: 0.7),
+                               place(3, side: 0.6, up: 0.1, metres: 4, spot: 0)]
+            lighting.setHouseLights("city night")
+            return
         }
         lighting.lights = [place(2, side: -0.8, up: 0.7, metres: 2.0, spot: 0.6),
                            place(3, side: 0.9, up: 0.2, metres: 2.2, spot: 0)]
@@ -441,6 +529,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         let speed = CGFloat(sheet.bounds.height) * 0.9
         sheet.handleLoupe(move: CGVector(dx: CGFloat(v.x) * speed, dy: CGFloat(-v.y) * speed),
                           power: CGFloat(s.triggers) * 1.2, dt: CGFloat(dt))
+        // With a mouse, the loupe is wherever the pointer is.
+        if let ptr = s.pointer, ptr != lastPointer { sheet.putLoupe(at: ptr) }
+        lastPointer = s.pointer
+        if s.wheel != 0 { sheet.turnLoupe(CGFloat(s.wheel)) }
         let dx = (p.contains(.right) ? 1 : 0) - (p.contains(.left) ? 1 : 0)
         let dy = (p.contains(.down) ? 1 : 0) - (p.contains(.up) ? 1 : 0)
         if dx != 0 || dy != 0 { sheet.move(dx: dx, dy: dy) }
@@ -537,9 +629,10 @@ final class Viewer: NSObject, MTKViewDelegate {
                 return String(format: "%@ %d %@  beam %.0f°  %@", mark, k + 1, l.kit.name, l.beamAngle,
                               l.dimmerStops == 0 ? "full" : String(format: "%+.1f stop", l.dimmerStops))
             }
-            lines.append(String(format: "House lights %.0f%%   ·   X adds a %@", lighting.ambient * 100,
-                                lightKit[lighting.kitChoice].name))
-            lines.append("A take/place · B remove · Y change head · ◀▶ choose · ▲▼ dimmer · L2/R2 flood/spot · L3 house lights · R3 done")
+            lines.append(String(format: "House lights: %@ (%.1f%%)   ·   next light: %@", lighting.ambientName,
+                                lighting.ambient * 100, lightKit[lighting.kitChoice].name))
+            lines.append("Pad: X add · A take/place · B remove · Y head · ◀▶ choose · ▲▼ dimmer · L2/R2 flood/spot · L3 house lights · R3 done")
+            lines.append("Keys: F add · click / E take/place · Backspace remove · T head · [ ] choose · - = dimmer · wheel flood/spot · G house lights · L done")
             i.lines = lines
         }
         hud.info = i

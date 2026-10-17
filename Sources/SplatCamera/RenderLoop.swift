@@ -225,6 +225,7 @@ final class RenderLoop {
         var g: [SIMD4<Float>] = [
             SIMD4(eye, plot.ambient),
             SIMD4(Float(plot.lights.count), Float(count), Float(higherCoeffs), 0.25),
+            SIMD4(plot.ambientTint, 0),
         ]
         var lt: [SIMD4<Float>] = plot.lights.flatMap {
             $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV)
