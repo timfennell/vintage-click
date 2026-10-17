@@ -346,10 +346,46 @@ float3 acc_at(device const float4* acc, float2 p, constant float4* O) {
     return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
 }
 
+// A thin vertical wire across the stop (the Anamorfake's monofilament)
+// diffracts a share of all light sideways: a horizontal line whose tails fall
+// off with distance, a little longer in red than blue (the spread goes with
+// wavelength). Made per row as a sum of four exponentials, each a forward and
+// a backward running sum, so a one-pixel highlight streaks as well as a lamp.
+// Z = (shortest length px, share of light, -, -). Clipped highlights stand
+// for far brighter sources than the scan could record, so count them up.
+kernel void streak(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
+                   constant float4& D [[buffer(3)]], constant float4& Z [[buffer(4)]],
+                   device float4* out [[buffer(5)]], uint y [[thread_position_in_grid]]) {
+    uint W = uint(O[0].x), H = uint(O[0].y);
+    if (y >= H) return;
+    uint row = y * W;
+    for (uint i = 0; i < W; i++) out[row + i] = 0;
+    for (uint j = 0; j < 4; j++) {
+        float len = Z.x * pow(4.0, float(j));
+        float3 a = exp(-1.0 / (len * float3(1.15, 1.0, 0.85)));
+        float3 norm = (1 - a) / (1 + a) * (Z.y / 4);
+        float3 run = 0;
+        for (uint i = 0; i < W; i++) {
+            float3 v = acc[row + i].rgb * D.rgb;
+            v += max(v - 0.85, 0.0) * 12;
+            run = v + a * run;
+            out[row + i].rgb += norm * run;
+        }
+        run = 0;
+        for (int i = int(W) - 1; i >= 0; i--) {
+            float3 v = acc[row + uint(i)].rgb * D.rgb;
+            v += max(v - 0.85, 0.0) * 12;
+            run = v + a * run;
+            out[row + uint(i)].rgb += norm * (run - v);
+        }
+    }
+}
+
 // Develops the exposure into a print. D = per-channel 1 / pupil weight of the full aperture.
 kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
                     constant float4* F [[buffer(2)]], constant float4& D [[buffer(3)]],
-                    device uchar4* out [[buffer(4)]], uint2 p [[thread_position_in_grid]]) {
+                    device uchar4* out [[buffer(4)]], device const float4* streaks [[buffer(5)]],
+                    uint2 p [[thread_position_in_grid]]) {
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
@@ -364,6 +400,7 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
     lin.g = acc_at(acc, pc, O).g;
     lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
     lin *= D.rgb * expo * vig;
+    if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;    // D.w: the lens streaks
     // Halation: light past the film base bouncing back, around bright highlights.
     float3 halo = 0;
     if (F[6].x > 0) {
@@ -386,7 +423,7 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
 // print would burn out but the negative keeps.
 kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
                      constant float4& D [[buffer(3)]], device half* out [[buffer(4)]],
-                     uint2 p [[thread_position_in_grid]]) {
+                     device const float4* streaks [[buffer(5)]], uint2 p [[thread_position_in_grid]]) {
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
@@ -399,6 +436,7 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
     lin.g = acc_at(acc, pc, O).g;
     lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
     lin = max(lin * D.rgb * expo * vig, 0.0);
+    if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;
     if (O[6].z > 0) lin *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(pc - c));
     uint i = idx(p, O) * 3;
     out[i] = half(min(lin.r, 60000.0)); out[i + 1] = half(min(lin.g, 60000.0)); out[i + 2] = half(min(lin.b, 60000.0));

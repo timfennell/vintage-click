@@ -66,6 +66,7 @@ final class RenderLoop {
     private let developPSO: MTLComputePipelineState
     private let relightPSO: MTLComputePipelineState
     private let negativePSO: MTLComputePipelineState
+    private let streakPSO: MTLComputePipelineState
     // The scan's own colours (relighting reads them; Spirula's are overwritten).
     private let means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
     private let colours: (buf: MTLBuffer, off: Int)
@@ -148,6 +149,7 @@ final class RenderLoop {
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
+        streakPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "streak")!)
         shadowPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shadow_vis")!)
         count = model.count
         higherCoeffs = (model.shDegree + 1) * (model.shDegree + 1) - 1
@@ -510,6 +512,21 @@ final class RenderLoop {
                 if channel < 0 { full += SIMD3(repeating: w) } else { full[k % 3] += w }
             }
             var dv = SIMD4<Float>(1 / simd_max(full, SIMD3(repeating: 1e-6)), 0)
+            // A wire across the stop: its horizontal diffraction streaks, from the whole exposure.
+            var streaks = e.accum
+            if b.lens.streak > 0, let sb = device.makeBuffer(length: w * h * 16, options: .storageModePrivate) {
+                streaks = sb
+                dv.w = 1
+                var z = SIMD4<Float>(Float(w) * 0.004, b.lens.streak, 0, 0)
+                ce.setComputePipelineState(streakPSO)
+                ce.setBuffer(e.accum, offset: 0, index: 0)
+                ce.setBytes(&o, length: o.count * 16, index: 1)
+                ce.setBytes(&dv, length: 16, index: 3)
+                ce.setBytes(&z, length: 16, index: 4)
+                ce.setBuffer(sb, offset: 0, index: 5)
+                ce.dispatchThreads(MTLSize(width: h, height: 1, depth: 1),
+                                   threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            }
             var f = b.developed.packed
             ce.setComputePipelineState(developPSO)
             ce.setBuffer(e.accum, offset: 0, index: 0)
@@ -517,6 +534,7 @@ final class RenderLoop {
             ce.setBytes(&f, length: f.count * 16, index: 2)
             ce.setBytes(&dv, length: 16, index: 3)
             ce.setBuffer(out, offset: 0, index: 4)
+            ce.setBuffer(streaks, offset: 0, index: 5)
             ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             if e.wantsNegative, let neg = device.makeBuffer(length: w * h * 6, options: .storageModeShared) {
                 negBuf = neg
@@ -525,6 +543,7 @@ final class RenderLoop {
                 ce.setBytes(&o, length: o.count * 16, index: 1)
                 ce.setBytes(&dv, length: 16, index: 3)
                 ce.setBuffer(neg, offset: 0, index: 4)
+                ce.setBuffer(streaks, offset: 0, index: 5)
                 ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             }
         }

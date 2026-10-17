@@ -36,6 +36,9 @@ struct Lens {
     var curvatureRadial: Float = 0
     var curvatureTangential: Float = 0
     var movement = Movement.none
+    /// A thin vertical wire across the stop: the share of light it diffracts
+    /// into a horizontal streak (the anamorphic-look flare).
+    var streak: Float = 0
     var collection = ""
 
     /// What the lens can do besides focus: tilt its focus plane (degrees) or shift its axis (mm).
@@ -205,10 +208,10 @@ private let toysAndMods: [Lens] = [
          focalMM: 58, maxAperture: 2, minAperture: 16, blades: 0, bladeRotation: 0,
          catsEye: 0.9, soapBubble: 0.3, vignette: 0.6, minFocusM: 0.5, lateralCA: 0.0018, axialCA: 0.05,
          sphericalAberration: 0.3, curvatureRadial: 0.5, curvatureTangential: 5.0),
-    Lens(name: "Krasnogorsk Solnce 58mm f/2 · Anamorfake", inspiredBy: "the same Soviet fifty with an oval insert at the stop: tall oval bokeh, a widescreen look",
+    Lens(name: "Krasnogorsk Solnce 58mm f/2 · Anamorfake", inspiredBy: "the same Soviet fifty with an oval insert and a fishing line across the stop: tall oval bokeh, horizontal streak flares",
          focalMM: 58, maxAperture: 2, minAperture: 16, blades: 0, bladeRotation: 0,
          catsEye: 0.9, soapBubble: 0.25, vignette: 0.5, minFocusM: 0.5, lateralCA: 0.0009, axialCA: 0.035,
-         squeeze: 0.5, curvatureRadial: 0.1, curvatureTangential: 0.45),
+         squeeze: 0.5, curvatureRadial: 0.1, curvatureTangential: 0.45, streak: 0.03),
     Lens(name: "Burnside Bendy 50mm f/2.5", inspiredBy: "the bendy tilting lens: steer a sharp sweet spot anywhere, the rest melts away",
          focalMM: 50, maxAperture: 2.5, minAperture: 22, blades: 0, bladeRotation: 0,
          catsEye: 0.3, soapBubble: 0.1, vignette: 0.45, minFocusM: 0.45, lateralCA: 0.0015, axialCA: 0.04,
