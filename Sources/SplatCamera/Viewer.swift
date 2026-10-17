@@ -160,6 +160,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                      body.metresPerUnit, radius * body.metresPerUnit, photo.0, photo.1))
         // A new session loads a new roll after the ones already in the darkroom.
         body.rollNumber = 1
+        pickGait()
         loop.onFinderRendered = { [weak self] ms in self?.record(renderMs: ms) }
         loop.onDeveloped = { [weak self] job, image, seconds in self?.developed(job, image, seconds) }
         resetView()
@@ -172,7 +173,6 @@ final class Viewer: NSObject, MTKViewDelegate {
         camera = FlyCamera()
         camera.up = keepUp
         camera.focalMM = body.lens.focalMM
-        camera.moveSpeed = radius * 0.6
         // Back off far enough to frame the subject, beyond the lens's closest focus.
         let dist = max(radius * 1.2 * camera.focalMM / 36 + radius,
                        body.lens.minFocusM * 1.15 / body.metresPerUnit)
@@ -185,7 +185,6 @@ final class Viewer: NSObject, MTKViewDelegate {
                 camera.position = spot.position
                 camera.yaw = spot.yaw
             }
-            camera.moveSpeed = 1.4 / body.metresPerUnit      // walking pace
             home = camera
             body.focusM = max(body.lens.minFocusM, 5)
             return
@@ -298,8 +297,9 @@ final class Viewer: NSObject, MTKViewDelegate {
                 lens: nil, body: body, lighting: lighting, fromLight: pov))
         } else {
             let fx = camera.focalPixels(width: width)
+            let carried = carriedCamera
             loop.requestFinder(FinderJob(
-                view: camera.viewMatrix, position: camera.position, fx: fx,
+                view: carried.viewMatrix, position: carried.position, fx: fx,
                 lens: lensOn ? body.lensParams(fNumber: n, focalPx: fx, cells: 1, table: table(body, n)) : nil,
                 body: body, lighting: lighting))
         }
@@ -544,10 +544,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.down) { body.changeShutter(-1) }
             if p.contains(.x) { body.nextLens() }
             if p.contains(.y) { openFilm() }
-            if p.contains(.l3) {
-                let walk = inside ? 1.4 / body.metresPerUnit : radius * 0.6
-            camera.moveSpeed = camera.moveSpeed > walk * 1.5 ? walk : walk * 4
-            }
+            if p.contains(.l3) { changeGait(gait == Self.gaits.count - 1 ? -gait : 1) }
             body.dofPreview = s.bHeld
             body.turnFocus(s.triggers, dt: dt)
             // The wheel is the focus ring: away from you focuses farther.
@@ -562,23 +559,24 @@ final class Viewer: NSObject, MTKViewDelegate {
             mode = mode == .lighting ? .camera : .lighting
             pov = nil
         }
-        // The controls drive whichever you are looking through: the camera or a light.
+        if p.contains(.faster) { changeGait(1) }
+        if p.contains(.slower) { changeGait(-1) }
+        // The controls drive whichever you are looking through: the camera or a light,
+        // at the chosen pace in real metres per second (Shift: three times that).
         let input = FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0)
+        let pace = Self.gaits[gait].metres / body.metresPerUnit * (s.run ? 3 : 1)
+        camera.moveSpeed = pace
+        lightCam.moveSpeed = pace
+        stride(input, dt: dt, running: s.run)
         lighting.up = camera.up
         if let i = pov, lighting.lights.indices.contains(i) {
             lightCam.turn(s.mouseLook)
-            let pace = lightCam.moveSpeed
-            if s.run { lightCam.moveSpeed = pace * 3 }
             lightCam.update(input, dt: dt)
-            lightCam.moveSpeed = pace
             lighting.lights[i].position = lightCam.position
             lighting.lights[i].aim = lightCam.forward
         } else {
             camera.turn(s.mouseLook)
-            let pace = camera.moveSpeed
-            if s.run { camera.moveSpeed = pace * 3 }
             camera.update(input, dt: dt)
-            camera.moveSpeed = pace
         }
         camera.focalMM = body.lens.focalMM
         if mode == .camera && p.contains(.a) { releaseShutter() }
@@ -641,7 +639,6 @@ final class Viewer: NSObject, MTKViewDelegate {
         lightCam = FlyCamera()
         lightCam.up = camera.up
         lightCam.focalMM = 28
-        lightCam.moveSpeed = inside ? 1.4 / body.metresPerUnit : radius * 0.6
         lightCam.lookAt(l.position + l.aim, from: l.position)
     }
 
@@ -676,6 +673,56 @@ final class Viewer: NSObject, MTKViewDelegate {
         lighting.lights = [place(2, side: -0.8, up: 0.7, metres: 2.0, spot: 0.6),
                            place(3, side: 0.9, up: 0.2, metres: 2.2, spot: 0)]
         lighting.ambient = 0.1
+    }
+
+    // MARK: pace
+
+    /// How fast you move, in real metres per second: from a macro focusing
+    /// rail to a run. The scene's scale turns it into scene units.
+    static let gaits: [(name: String, metres: Float)] = [
+        ("rail", 0.005), ("creep", 0.02), ("inch", 0.08), ("step", 0.3),
+        ("stroll", 0.8), ("walk", 1.4), ("jog", 3), ("run", 6),
+    ]
+    private(set) var gait = 5
+    private var bobPhase: Float = 0, bobAmount: Float = 0
+
+    /// The pace that suits the scene's real size: walking in a place; for an
+    /// object, about half its size a second (a bee: a crawl; a car: a stroll).
+    func pickGait() {
+        if inside {
+            gait = 5
+        } else {
+            let want = radius * body.metresPerUnit * 0.5
+            gait = Self.gaits.indices.min(by: { abs(log(Self.gaits[$0].metres / want)) < abs(log(Self.gaits[$1].metres / want)) }) ?? 5
+        }
+        print("Pace: \(Self.gaits[gait].name) (\(Self.gaits[gait].metres) m/s) for a subject \(radius * body.metresPerUnit) m across-ish")
+    }
+
+    private func changeGait(_ d: Int) {
+        gait = max(0, min(Self.gaits.count - 1, gait + d))
+        let g = Self.gaits[gait]
+        hud?.flash(g.metres < 0.1 ? String(format: "%@ %.0f MM/S", g.name.uppercased(), g.metres * 1000)
+                   : String(format: "%@ %.1f M/S", g.name.uppercased(), g.metres))
+    }
+
+    /// A step's bob and sway when walking or running at human scale.
+    private func stride(_ input: FlyInput, dt: Float, running: Bool) {
+        let moving = min(1, simd_length(input.move))
+        let g = Self.gaits[gait].metres * (running ? 3 : 1)
+        let onFoot: Float = g >= 1.0 ? 1 : 0
+        bobAmount += (moving * onFoot - bobAmount) * min(1, dt * 6)
+        // Steps a second rise with pace: about 1.8 walking, 2.8 running.
+        bobPhase += dt * .pi * 2 * (1.4 + 0.25 * min(g, 6)) * (moving > 0.05 ? 1 : 0)
+    }
+
+    /// The camera as it is carried: the step's bob added to where you are.
+    var carriedCamera: FlyCamera {
+        guard bobAmount > 0.001 else { return camera }
+        let g = Self.gaits[gait].metres
+        let amp = min(0.05, 0.01 * g) / body.metresPerUnit * bobAmount
+        var c = camera
+        c.position += camera.up * (amp * abs(sin(bobPhase))) + camera.right * (amp * 0.5 * sin(bobPhase * 0.5))
+        return c
     }
 
     // MARK: setting the scale
@@ -776,8 +823,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let ratio = scale / body.metresPerUnit
         body.metresPerUnit = scale
         body.focusM = max(body.lens.minFocusM, body.focusM * ratio)
-        camera.moveSpeed /= ratio
-        home.moveSpeed /= ratio
+        pickGait()
         tables.removeAll()
         hud?.flash(String(format: "SCALE SET: %.3g M PER UNIT", scale))
         onScaleSet?(scale)
@@ -1049,7 +1095,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             hud?.flash("BUFFER FULL")
             return
         }
-        let job = ExposureJob(camera: camera, body: body, lighting: lighting, frameNumber: body.framesShot + 1,
+        let job = ExposureJob(camera: carriedCamera, body: body, lighting: lighting, frameNumber: body.framesShot + 1,
                               cells: body.cellCentres(cellsPerExposure), accum: accum, size: size,
                               wantsNegative: keepNegative)
         job.outputPath = scriptedPath
@@ -1108,7 +1154,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         guard let hud else { return }
         let b = body
         var i = ViewfinderHUD.Info()
-        i.lens = b.lens.name
+        let g = Self.gaits[gait]
+        i.lens = b.lens.name + "  ·  " + (g.metres < 0.1 ? String(format: "%@ %.0f mm/s", g.name, g.metres * 1000)
+                                           : String(format: "%@ %.1f m/s", g.name, g.metres))
         i.aperture = String(format: b.takingAperture < 10 ? "%.1f" : "%.0f", b.takingAperture)
         i.shutter = b.shutter.seconds >= 1 ? "\(b.shutter.label)\"" : b.shutter.label
         i.shutterIndex = b.shutterIndex

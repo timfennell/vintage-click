@@ -116,7 +116,8 @@ final class MenuOverlay: NSView {
     static let guide: [(title: String, rows: [(String, String, String)])] = [
         ("CAMERA", [
             ("walk / look", "sticks", "WASD · mouse"),
-            ("run", "L3 (toggle)", "hold Shift"),
+            ("pace: rail ... run (real m/s)", "L3 (steps up)", ",  .  (slower / faster)"),
+            ("burst of speed (x3)", "", "hold Shift"),
             ("rise / sink", "R1 / L1", "Space / Ctrl"),
             ("focus ring", "R2 far · L2 near", "mouse wheel"),
             ("aperture", "d-pad ◀ ▶", "[  ]"),
