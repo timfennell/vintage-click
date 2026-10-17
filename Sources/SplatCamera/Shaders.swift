@@ -16,6 +16,7 @@
 //   O[3] = (cat's eye, soap bubble, blade rotation, vignette)
 //   O[4] = background (display rgb)  O[5] = (prism radius px, finder brightness, seed, exposure stops)
 //   O[6] = (lateral colour at the corner, -, -, -)
+//   O[7] = finder only: where the image sits in the window (origin px, scale, corner radius px)
 // Film (FilmStock.packed): F[0..2] crosstalk rows, F[3] = (balance, b&w),
 //   F[4] = (b&w mix, saturation), F[5] = (contrast, black lift, shoulder, grain),
 //   F[6] = (halation, tint), F[7] = (iso, grain size, toe, -)
@@ -205,7 +206,15 @@ float3 prism_sample(device const float* f, float2 p, float2 shift, float z, cons
 // split-prism disc (halves shift apart with defocus) and a microprism collar.
 fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(0)]],
                            constant float4* O [[buffer(1)]], constant float4* F [[buffer(2)]]) {
-    float2 p = in.pos.xy;
+    // The finder: the screen's image, a rounded-corner window in a black surround.
+    float2 p = (in.pos.xy - O[7].xy) / O[7].z;
+    float2 halfSize = O[0].xy * 0.5;
+    float2 dq = abs(p - halfSize) - (halfSize - O[7].w);
+    float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;   // < 0 inside
+    if (edge > 1.0) {
+        float g = 0.022 + 0.01 * value_noise(in.pos.xy / 3.0, 31);        // the surround's black
+        return float4(g, g, g * 1.05, 1);
+    }
     float2 c = O[0].xy * 0.5;
     float R = O[5].x;
     float r = length(p - c);
@@ -247,7 +256,10 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
     float2 q = field(p, O);
     float vig = 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
     col *= vig * (1 - 0.22 * dot(q, q)) * O[5].y;
-    return float4(to_srgb(col), 1);
+    // The window's edge: a soft dark lip, then the surround.
+    col *= smoothstep(0.0, O[7].w * 0.9, -edge) * 0.25 + 0.75;
+    float3 outc = to_srgb(col);
+    return float4(mix(outc, float3(0.022), saturate(edge + 0.5)), 1);
 }
 
 // Centre-weighted meter: one sample per cell, linear luminance.
@@ -331,7 +343,9 @@ vertex LineOut wire_vertex(uint vid [[vertex_id]], device const float4* v [[buff
                            constant float4* O [[buffer(1)]]) {
     float4 p = v[vid];
     LineOut o;
-    o.pos = float4(p.x / O[0].x * 2 - 1, 1 - p.y / O[0].y * 2, 0, 1);
+    // Image pixels into the window (the finder's image is inset, O[7]).
+    float2 w = O[7].xy + p.xy * O[7].z;
+    o.pos = float4(w.x / O[0].x * 2 - 1, 1 - w.y / O[0].y * 2, 0, 1);   // the window is the frame's size
     o.z = p.z;
     o.a = p.w;
     return o;
@@ -339,7 +353,7 @@ vertex LineOut wire_vertex(uint vid [[vertex_id]], device const float4* v [[buff
 
 fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[buffer(0)]],
                               constant float4* O [[buffer(1)]], constant float4& colour [[buffer(2)]]) {
-    float zs = frame_z(f, clamp_px(int2(in.pos.xy), O), O);
+    float zs = frame_z(f, clamp_px(int2((in.pos.xy - O[7].xy) / O[7].z), O), O);
     float a = in.a * (in.z > zs * 1.01 ? 0.3 : 1.0);
     return float4(colour.rgb, colour.a * a);
 }

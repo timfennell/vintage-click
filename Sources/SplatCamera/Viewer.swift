@@ -331,6 +331,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             SIMD4(Float(height) * 0.065, pow(l.maxAperture / b.viewingAperture, 2), Float(seed),
                   b.exposureStops),
             SIMD4(l.lateralCA, l.axialCA, 0, 0),
+            Self.finderInset(width: width, height: height),
         ]
         if job.fromLight != nil {
             o[5].x = 0          // no focusing aids
@@ -370,6 +371,16 @@ final class Viewer: NSObject, MTKViewDelegate {
             segs.append((top, foot))
         }
         return segs
+    }
+
+    /// Where the finder's image sits in the window, as fractions: a 3:2 window
+    /// inset in the black surround, room below for the LED readouts. The HUD
+    /// lays out against the same rectangle.
+    static let finderImage = (x: CGFloat(0.09), y: CGFloat(0.045), scale: CGFloat(0.82))
+
+    static func finderInset(width: Int, height: Int) -> SIMD4<Float> {
+        let f = finderImage
+        return SIMD4(Float(f.x) * Float(width), Float(f.y) * Float(height), Float(f.scale), Float(height) * 0.025)
     }
 
     /// The light heads as wireframes on the screen, over the frame they belong to.
@@ -412,6 +423,9 @@ final class Viewer: NSObject, MTKViewDelegate {
                   let vb = device.makeBuffer(bytes: verts, length: verts.count * 16, options: .storageModeShared)
             else { continue }
             var colour: SIMD4<Float> = chosen ? [1.0, 0.72, 0.25, 0.95] : [0.85, 0.88, 0.9, 0.55]
+            let f = Self.finderImage
+            enc.setScissorRect(MTLScissorRect(x: Int(f.x * CGFloat(width)), y: Int(f.y * CGFloat(height)),
+                                              width: Int(f.scale * CGFloat(width)), height: Int(f.scale * CGFloat(height))))
             enc.setRenderPipelineState(wirePSO)
             enc.setVertexBuffer(vb, offset: 0, index: 0)
             enc.setVertexBytes(&o, length: o.count * 16, index: 1)
@@ -803,10 +817,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         var i = ViewfinderHUD.Info()
         i.lens = b.lens.name
         i.aperture = String(format: b.takingAperture < 10 ? "%.1f" : "%.0f", b.takingAperture)
-        i.shutter = b.shutter.seconds >= 1 ? "\(b.shutter.label)s" : "1/\(b.shutter.label)"
+        i.shutter = b.shutter.seconds >= 1 ? "\(b.shutter.label)\"" : b.shutter.label
+        i.shutterIndex = b.shutterIndex
         i.stock = b.stock.name
         i.iso = Int(b.stock.iso)
-        i.counter = b.framesLeft > 0 ? "\(b.framesShot + 1)/\(b.stock.exposures)" : "END"
+        i.counter = b.framesLeft > 0 ? "\(b.framesShot + 1)" : "E"
         i.focus = b.focusM >= 100 ? "∞" : String(format: "%.2f m", b.focusM)
         i.meterStops = b.exposureStops + log2(max(meterLum, 1e-4) / 0.18)
         var modes: [String] = []
