@@ -180,8 +180,14 @@ func startSession(_ plyPath: String) {
     window.contentAspectRatio = NSSize(width: res[0], height: res[1])
     window.backgroundColor = .black
     let note = NSTextField(labelWithString: "Loading the scan…  (a big place takes a minute)")
-    note.textColor = NSColor(calibratedRed: 1, green: 0.72, blue: 0.25, alpha: 1)
-    note.font = .monospacedSystemFont(ofSize: 16, weight: .medium)
+    // Lit, as all the game's lettering is: warm cream Futura, glowing.
+    note.textColor = NSColor(calibratedRed: 1.0, green: 0.90, blue: 0.74, alpha: 0.95)
+    note.font = MenuOverlay.glowFont(17)
+    let glow = NSShadow()
+    glow.shadowColor = NSColor(calibratedRed: 1.0, green: 0.85, blue: 0.6, alpha: 0.7)
+    glow.shadowBlurRadius = 8
+    glow.shadowOffset = .zero
+    note.shadow = glow
     note.translatesAutoresizingMaskIntoConstraints = false
     let holder = NSView()
     holder.addSubview(note)

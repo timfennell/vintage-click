@@ -368,8 +368,8 @@ final class ContactSheetView: NSView {
                 let i = cut.first + j
                 guard i < roll.frames.count else {
                     if pend.contains(i + 1) {
-                        label("in the darkroom", at: NSPoint(x: fr.minX + 4, y: fr.midY - 5), size: 1.6 * mm,
-                              color: NSColor(white: 0.45, alpha: 1))
+                        label("in the darkroom", at: NSPoint(x: fr.minX + 2 * mm, y: fr.midY - 1.2 * mm), size: 2.0 * mm,
+                              color: Self.cream.withAlphaComponent(0.6))
                     }
                     continue
                 }
@@ -450,11 +450,22 @@ final class ContactSheetView: NSView {
         if let table = tableImage() { NSImage(cgImage: table, size: b.size).draw(in: b) }
         let L = tableLayout()
         guard !L.strips.isEmpty else {
-            label("No rolls developed yet.", at: NSPoint(x: b.midX - 110, y: b.midY), size: 18,
-                  color: NSColor(white: 0.2, alpha: 1))
+            drawRail("No rolls developed yet: shoot a roll, and it comes here from the darkroom")
             return
         }
         drawStrips(L, fine: false, near: nil)
+        // The session, how many films, and the chosen frame (the edge print names each film).
+        let rollsHere = sessionRolls.map { rolls[$0] }
+        let when = rollsHere.first?.session ?? ""
+        var chosen = ""
+        if L.cells.indices.contains(selected) {
+            let c = L.cells[selected]
+            chosen = " · roll \(rolls[c.roll].number) frame \(c.frame + 1)"
+        }
+        let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×     sticks: loupe  L2/R2: power  d-pad: frame  A: mark  L1/R1: session  B: back",
+                          when.isEmpty ? "" : when + " · ", rollsHere.count, rollsHere.count == 1 ? "roll" : "rolls",
+                          sessionIndex + 1, sessions.count, chosen, loupePower)
+        drawRail(hint)
 
         // The loupe: the table under it, magnified, from the full-size frames.
         let c = loupeCentre ?? CGPoint(x: b.midX, y: b.midY)
@@ -479,19 +490,6 @@ final class ContactSheetView: NSView {
         NSGraphicsContext.restoreGraphicsState()
         loupeLayer(c, R)
 
-        // The session, how many films, and the chosen frame (the edge print names each film).
-        let rollsHere = sessionRolls.map { rolls[$0] }
-        let when = rollsHere.first?.session ?? ""
-        var chosen = ""
-        if L.cells.indices.contains(selected) {
-            let c = L.cells[selected]
-            chosen = " · roll \(rolls[c.roll].number) frame \(c.frame + 1)"
-        }
-        let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×     sticks: loupe  L2/R2: power  d-pad: frame  A: mark  L1/R1: session  B: back",
-                          when.isEmpty ? "" : when + " · ", rollsHere.count, rollsHere.count == 1 ? "roll" : "rolls",
-                          sessionIndex + 1, sessions.count, chosen, loupePower)
-        let hintW = NSAttributedString(string: hint, attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold)]).size().width
-        label(hint, at: NSPoint(x: max(8, b.midX - hintW / 2), y: b.height - 20), size: 11.5, color: NSColor(white: 0.15, alpha: 1))
     }
 
     /// Edge print: small, a little soft (a latent image, not ink), in the margin.
@@ -878,12 +876,40 @@ final class ContactSheetView: NSView {
         return img
     }
 
+    /// Lettering as light, as in the finder and the menus: warm cream Futura, glowing.
     private func label(_ s: String, at p: NSPoint, size: CGFloat, color: NSColor) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: max(size, 7), weight: .semibold),
-            .foregroundColor: color,
-        ]
-        NSAttributedString(string: s, attributes: attrs).draw(at: p)
+        NSAttributedString(string: s, attributes: labelAttrs(size, color)).draw(at: p)
+    }
+
+    private func labelAttrs(_ size: CGFloat, _ color: NSColor) -> [NSAttributedString.Key: Any] {
+        let glow = NSShadow()
+        glow.shadowColor = color.withAlphaComponent(0.55)
+        glow.shadowBlurRadius = size * 0.4
+        glow.shadowOffset = .zero
+        return [.font: MenuOverlay.glowFont(max(size, 7) * 1.05), .foregroundColor: color, .shadow: glow]
+    }
+
+    private static let cream = NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.80, alpha: 0.92)
+
+    /// The table's front rail: dark worn aluminium along the bottom edge,
+    /// with the status lit along it.
+    private func drawRail(_ text: String) {
+        let b = bounds
+        let h: CGFloat = 34
+        let rail = NSRect(x: 0, y: b.height - h, width: b.width, height: h)
+        NSGradient(colors: [NSColor(white: 0.16, alpha: 1), NSColor(white: 0.07, alpha: 1), NSColor(white: 0.04, alpha: 1)])?
+            .draw(in: rail, angle: 90)
+        // Its top edge catches the table's light; brushed lines along it.
+        NSColor(white: 0.55, alpha: 0.5).setFill()
+        NSRect(x: 0, y: rail.minY, width: b.width, height: 1).fill()
+        var rng = Grit(seed: 31)
+        for _ in 0..<40 {
+            NSColor(white: rng.unit() < 0.5 ? 0.25 : 0.0, alpha: 0.18).setFill()
+            NSRect(x: rng.unit() * b.width, y: rail.minY + 2 + rng.unit() * (h - 4), width: 30 + rng.unit() * 200, height: 0.6).fill()
+        }
+        let attrs = labelAttrs(12, Self.cream)
+        let w = NSAttributedString(string: text, attributes: attrs).size().width
+        label(text, at: NSPoint(x: max(10, b.midX - w / 2), y: rail.minY + (h - 16) / 2), size: 12, color: Self.cream)
     }
 }
 
