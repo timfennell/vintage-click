@@ -262,6 +262,24 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
     return float4(mix(outc, float3(0.022), saturate(edge + 0.5)), 1);
 }
 
+// What is under the finder's crosshair: the nearest surface's ray depth (scene
+// units) around the centre, and how solid it is there. For measuring.
+kernel void probe(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
+                  device float* out [[buffer(2)]], uint g [[thread_position_in_grid]]) {
+    if (g > 0) return;
+    uint n = uint(O[0].x * O[0].y);
+    int2 c = int2(O[0].xy * 0.5);
+    float best = 0, solid = 0;
+    for (int dy = -2; dy <= 2; dy++)
+        for (int dx = -2; dx <= 2; dx++) {
+            uint i = idx(clamp_px(c + int2(dx, dy), O), O);
+            float T = f[3 * n + i], d = f[4 * n + i];
+            if (T < 0.5 && d > 0 && (best == 0 || d < best)) { best = d; solid = 1 - T; }
+        }
+    out[0] = best;
+    out[1] = solid;
+}
+
 // Centre-weighted meter: one sample per cell, linear luminance.
 kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
                   device float* out [[buffer(2)]], uint2 g [[thread_position_in_grid]],

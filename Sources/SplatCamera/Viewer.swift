@@ -17,6 +17,20 @@ final class Viewer: NSObject, MTKViewDelegate {
     private let meterPSO: MTLComputePipelineState
     private let wirePSO: MTLRenderPipelineState
     private let meterBuf: MTLBuffer
+    private let probePSO: MTLComputePipelineState
+    private let probeBuf: MTLBuffer
+    /// The surface point under the crosshair (scene units), from the last finder frame.
+    private var crosshairHit: SIMD3<Float>?
+
+    /// Setting the scale by measuring: two points on the scan, then their real distance.
+    enum MeasureStep { case first, second(SIMD3<Float>), entry(SIMD3<Float>, SIMD3<Float>) }
+    private(set) var measure: MeasureStep?
+    private var entryText = ""
+    private var entryValue: Float = 1
+    private var entryUnit = 2
+    static let units: [(name: String, metres: Float)] = [("mm", 0.001), ("cm", 0.01), ("m", 1), ("in", 0.0254), ("ft", 0.3048)]
+    /// A new scale was set (metres per scene unit): main remembers it for the file.
+    var onScaleSet: ((Float) -> Void)?
     private static let meterGrid = (48, 32)
     private static let maxPending = 4
 
@@ -117,6 +131,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         wd.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         wirePSO = try device.makeRenderPipelineState(descriptor: wd)
         meterPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "meter")!)
+        probePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "probe")!)
+        probeBuf = device.makeBuffer(length: 16, options: .storageModeShared)!
         super.init()
 
         body.metresPerUnit = metresPerUnit
@@ -301,6 +317,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         ce.setBuffer(meterBuf, offset: 0, index: 2)
         ce.dispatchThreads(MTLSize(width: Self.meterGrid.0, height: Self.meterGrid.1, depth: 1),
                            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        ce.setComputePipelineState(probePSO)
+        ce.setBuffer(probeBuf, offset: 0, index: 2)
+        ce.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
         ce.endEncoding()
 
         let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
@@ -312,11 +331,20 @@ final class Viewer: NSObject, MTKViewDelegate {
         drawWireframes(enc, frame: frame, optics: &o)
         enc.endEncoding()
         present(cb, drawable)
-        let loop = self.loop, slot = frame.slot, meter = meterBuf
+        let loop = self.loop, slot = frame.slot, meter = meterBuf, probe = probeBuf
+        // The centre ray of that frame: from its camera, along its view axis.
+        let V = frame.job.view
+        let eye = frame.job.position, axis = SIMD3<Float>(V[8], V[9], V[10])
+        let fromCamera = frame.job.fromLight == nil
         cb.addCompletedHandler { [weak self] _ in
             loop.release(slot: slot)
             let lum = Self.centreWeighted(meter)
-            DispatchQueue.main.async { self?.meterLum = lum }
+            let p = probe.contents().bindMemory(to: Float.self, capacity: 2)
+            let hit: SIMD3<Float>? = p[0] > 0 && fromCamera ? eye + axis * p[0] : nil
+            DispatchQueue.main.async {
+                self?.meterLum = lum
+                self?.crosshairHit = hit
+            }
         }
         cb.commit()
         updateHUD(mirrorUp: false)
@@ -466,7 +494,10 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
 
     private func handleInput(dt: Float) {
-        input.keyMode = menuOpen ? .menu : (mode == .sheet ? .sheet : (mode == .lighting ? .lighting : .camera))
+        var entering = false
+        if case .entry = measure { entering = true }
+        input.keyMode = menuOpen ? .menu : entering ? .entry
+            : (mode == .sheet ? .sheet : (mode == .lighting ? .lighting : .camera))
         let s = input.poll()
         let p = s.pressed
         if menuOpen {
@@ -475,6 +506,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         }
         if p.contains(.menu) {
             openMenu()
+            return
+        }
+        if measure != nil {
+            measureInput(s, dt: dt)
             return
         }
         if p.contains(.cycleUp) { cycleUp() }
@@ -623,6 +658,149 @@ final class Viewer: NSObject, MTKViewDelegate {
         lighting.ambient = 0.1
     }
 
+    // MARK: setting the scale
+
+    /// Scripted check: pick a point, turn a little, pick another (then the entry panel shows).
+    func measureDemo() {
+        startMeasure()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+            if let h = crosshairHit { measure = .second(h) }
+            camera.yaw -= 8 * .pi / 180
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [self] in
+            if case .second(let a) = measure, let h = crosshairHit {
+                let metres = simd_distance(a, h) * body.metresPerUnit
+                measure = .entry(a, h)
+                entryUnit = metres < 0.1 ? 0 : metres < 1 ? 1 : 2
+                entryValue = metres / Self.units[entryUnit].metres
+            }
+        }
+        // Then say it is really 4.5 mm (a bee's head), as typing it would.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9) { [self] in
+            if case .entry(let a, let b) = measure {
+                let now = simd_distance(a, b) * body.metresPerUnit
+                print(String(format: "measured %.4f m, setting 0.0045 m: scale %.5g -> %.5g", now, body.metresPerUnit,
+                             body.metresPerUnit * 0.0045 / now))
+                applyScale(body.metresPerUnit * 0.0045 / now)
+                measure = nil
+            }
+        }
+    }
+
+    /// Measure two points on the scan and say how far apart they really are.
+    func startMeasure() {
+        closeMenu()
+        if mode != .camera { switchTo(.camera) }
+        measure = .first
+    }
+
+    private func measureInput(_ s: GamepadInput.State, dt: Float) {
+        let p = s.pressed
+        switch measure {
+        case .first, .second:
+            // Walk and look as usual to aim the crosshair.
+            camera.turn(s.mouseLook)
+            camera.update(FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0), dt: dt)
+            if p.contains(.b) { measure = nil; return }
+            guard p.contains(.a) else { return }
+            guard let hit = crosshairHit else {
+                hud?.flash("NOTHING UNDER THE CROSSHAIR")
+                return
+            }
+            if case .second(let a) = measure {
+                let metres = simd_distance(a, hit) * body.metresPerUnit
+                guard metres > 0 else { return }
+                measure = .entry(a, hit)
+                // Start the dial on the length it measures now, in a sensible unit.
+                entryUnit = metres < 0.1 ? 0 : metres < 1 ? 1 : 2
+                entryValue = metres / Self.units[entryUnit].metres
+                entryText = ""
+            } else {
+                measure = .second(hit)
+            }
+        case .entry(let a, let b):
+            if p.contains(.b) { measure = .second(a); return }
+            // Typing: digits and a unit (2.5 m, 30cm, 6 ft).
+            if s.erase > 0 { entryText = String(entryText.dropLast(s.erase)) }
+            entryText += s.typed.replacingOccurrences(of: ",", with: ".")
+            if !s.typed.isEmpty || s.erase > 0 {
+                let letters = entryText.filter(\.isLetter).lowercased()
+                if let u = Self.units.firstIndex(where: { $0.name == letters }) { entryUnit = u }
+                if let v = Float(entryText.filter { "0123456789.".contains($0) }) { entryValue = v }
+            }
+            // The pad: dial the value, step the unit.
+            if p.contains(.up) { entryValue *= 1.1; entryText = "" }
+            if p.contains(.down) { entryValue /= 1.1; entryText = "" }
+            entryValue *= exp(s.triggers * dt * 0.8)
+            if p.contains(.left) || p.contains(.right) {
+                let metres = entryValue * Self.units[entryUnit].metres
+                entryUnit = (entryUnit + (p.contains(.right) ? 1 : Self.units.count - 1)) % Self.units.count
+                entryValue = metres / Self.units[entryUnit].metres
+                entryText = ""
+            }
+            if p.contains(.a) {
+                let real = entryValue * Self.units[entryUnit].metres
+                let now = simd_distance(a, b) * body.metresPerUnit
+                guard real > 0, now > 0 else { return }
+                applyScale(body.metresPerUnit * real / now)
+                measure = nil
+            }
+        case nil:
+            break
+        }
+    }
+
+    /// The scan's new size: metres per scene unit. Distances in metres that are
+    /// pinned to the scene (where you focus) keep their place; paces follow.
+    private func applyScale(_ scale: Float) {
+        let ratio = scale / body.metresPerUnit
+        body.metresPerUnit = scale
+        body.focusM = max(body.lens.minFocusM, body.focusM * ratio)
+        camera.moveSpeed /= ratio
+        home.moveSpeed /= ratio
+        tables.removeAll()
+        hud?.flash(String(format: "SCALE SET: %.3g M PER UNIT", scale))
+        onScaleSet?(scale)
+    }
+
+    /// The measuring overlay for the HUD: crosshair, the line, the question.
+    private func measureInfo() -> ViewfinderHUD.Measure? {
+        guard let m = measure else { return nil }
+        let fx = camera.focalPixels(width: width)
+        func project(_ p: SIMD3<Float>) -> CGPoint? {
+            let V = camera.viewMatrix
+            let c = SIMD3(V[0] * p.x + V[1] * p.y + V[2] * p.z + V[3], V[4] * p.x + V[5] * p.y + V[6] * p.z + V[7],
+                          V[8] * p.x + V[9] * p.y + V[10] * p.z + V[11])
+            guard c.z > 0 else { return nil }
+            return CGPoint(x: CGFloat((fx * c.x / c.z + Float(width) / 2) / Float(width)),
+                           y: CGFloat((fx * c.y / c.z + Float(height) / 2) / Float(height)))
+        }
+        func metres(_ d: Float) -> String {
+            d < 0.1 ? String(format: "%.1f mm", d * 1000) : d < 1 ? String(format: "%.1f cm", d * 100) : String(format: "%.2f m", d)
+        }
+        var info = ViewfinderHUD.Measure()
+        switch m {
+        case .first:
+            info.prompt = "SET THE SCALE · aim at one end of something you know the size of · A / click · B / right button cancels"
+        case .second(let a):
+            info.a = project(a)
+            if let hit = crosshairHit {
+                info.b = project(hit)
+                info.label = "now " + metres(simd_distance(a, hit) * body.metresPerUnit)
+            }
+            info.prompt = "aim at the other end · A / click · B back"
+        case .entry(let a, let b):
+            info.a = project(a)
+            info.b = project(b)
+            info.crosshair = false
+            info.label = "now " + metres(simd_distance(a, b) * body.metresPerUnit)
+            let shown = entryText.isEmpty ? String(format: "%.3g", entryValue) : entryText.filter { "0123456789.".contains($0) }
+            info.entry = "\(shown) \(Self.units[entryUnit].name)"
+            info.prompt = "How long is it really?  type it (2.5 m, 30 cm, 6 ft) · or ▲▼ / L2 R2 dial, ◀▶ unit · Enter / A set · B re-aim"
+        }
+        return info
+    }
+
     // MARK: the menu
 
     private var modeName: String {
@@ -667,6 +845,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         items += [
             .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") { [weak self] in
                 self?.openFilm() },
+            .init(title: "Set the scale (measure)…",
+                  detail: String(format: "now %.3g m per unit: aim at two points, say how far apart they are", body.metresPerUnit)) {
+                [weak self] in self?.startMeasure() },
             .init(title: "Reset the view", detail: "back to where you started") { [weak self] in
                 guard let self else { return }
                 self.camera = self.home
@@ -867,11 +1048,17 @@ final class Viewer: NSObject, MTKViewDelegate {
         var modes: [String] = []
         if b.dofPreview { modes.append("DOF PREVIEW") }
         if mode == .lighting { modes.append("LIGHTING") }
+        // Nearer than the lens can focus: back off, or fit a closer-focusing lens.
+        if pov == nil, let hit = crosshairHit,
+           simd_distance(hit, camera.position) * b.metresPerUnit < b.lens.minFocusM * 0.85 {
+            modes.append(String(format: "TOO CLOSE TO FOCUS (%.2g M MIN)", b.lens.minFocusM))
+        }
         let pending = loop.pendingExposures
         if pending > 0 { modes.append("DEVELOPING \(pending)") }
         i.mode = modes.joined(separator: "  ")
         i.stats = statsLine
         i.mirrorUp = mirrorUp
+        i.measure = measureInfo()
         if mode == .lighting {
             var lines = lighting.lights.enumerated().map { k, l -> String in
                 let mark = k == pov ? "◉" : " "

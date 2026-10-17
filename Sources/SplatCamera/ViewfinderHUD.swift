@@ -6,6 +6,15 @@ import AppKit
 /// red seven-segment LEDs on the black surround below for aperture, speed,
 /// focus distance and the frame counter. AppKit, over the Metal view.
 final class ViewfinderHUD: NSView {
+    /// Setting the scale: points as fractions of the image (0...1), what to say.
+    struct Measure {
+        var crosshair = true
+        var a: CGPoint?
+        var b: CGPoint?
+        var label = ""
+        var prompt = ""
+        var entry: String?
+    }
     struct Info {
         var lens = ""
         var aperture = ""
@@ -24,6 +33,7 @@ final class ViewfinderHUD: NSView {
         /// in fractions of the image's width.
         var beam: (hot: CGFloat, edge: CGFloat, falloff: CGFloat)?
         var title = ""                  // big label: which light you are flying
+        var measure: Measure?
     }
     var info = Info() { didSet { needsDisplay = true } }
 
@@ -92,6 +102,55 @@ final class ViewfinderHUD: NSView {
                  align: .right, width: img.width * 0.5)
         }
         drawLEDs(img, u: u)
+        if let m = info.measure { drawMeasure(m, in: img, u: u) }
+    }
+
+    // MARK: setting the scale
+
+    private func drawMeasure(_ m: Measure, in img: NSRect, u: CGFloat) {
+        let yellow = NSColor(calibratedRed: 1, green: 0.85, blue: 0.2, alpha: 1)
+        func at(_ p: CGPoint) -> NSPoint { NSPoint(x: img.minX + p.x * img.width, y: img.minY + p.y * img.height) }
+        let ctx = NSGraphicsContext.current?.cgContext
+        ctx?.saveGState()
+        ctx?.setShadow(offset: .zero, blur: 3, color: NSColor.black.cgColor)
+        yellow.setStroke()
+        yellow.setFill()
+        if m.crosshair {
+            let c = NSPoint(x: img.midX, y: img.midY)
+            let x = NSBezierPath()
+            x.lineWidth = 1.5
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] as [(CGFloat, CGFloat)] {
+                x.move(to: NSPoint(x: c.x + dx * 0.6 * u, y: c.y + dy * 0.6 * u))
+                x.line(to: NSPoint(x: c.x + dx * 2.2 * u, y: c.y + dy * 2.2 * u))
+            }
+            x.stroke()
+        }
+        if let a = m.a {
+            let pa = at(a)
+            NSBezierPath(ovalIn: NSRect(x: pa.x - 0.45 * u, y: pa.y - 0.45 * u, width: 0.9 * u, height: 0.9 * u)).fill()
+            if let b = m.b {
+                let pb = at(b)
+                let line = NSBezierPath()
+                line.lineWidth = 2
+                line.move(to: pa)
+                line.line(to: pb)
+                line.stroke()
+                NSBezierPath(ovalIn: NSRect(x: pb.x - 0.45 * u, y: pb.y - 0.45 * u, width: 0.9 * u, height: 0.9 * u)).fill()
+                text(m.label, at: NSPoint(x: (pa.x + pb.x) / 2 + u, y: (pa.y + pb.y) / 2 - 2 * u), size: 1.2 * u,
+                     color: yellow, width: 20 * u)
+            }
+        }
+        ctx?.restoreGState()
+        if let entry = m.entry {
+            let w = 34 * u, h = 7 * u
+            let r = NSRect(x: img.midX - w / 2, y: img.maxY - h - 3 * u, width: w, height: h)
+            NSColor(white: 0.06, alpha: 0.92).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 0.8 * u, yRadius: 0.8 * u).fill()
+            text("really:", at: NSPoint(x: r.minX + 1.5 * u, y: r.minY + 2.2 * u), size: 1.2 * u, color: NSColor(white: 0.7, alpha: 1))
+            text(entry + "▏", at: NSPoint(x: r.minX + 9 * u, y: r.minY + 1.6 * u), size: 2.2 * u, color: yellow, width: w)
+        }
+        text(m.prompt, at: NSPoint(x: img.midX, y: img.maxY - 2.2 * u), size: 0.95 * u, color: yellow,
+             align: .center, width: img.width)
     }
 
     // MARK: LEDs

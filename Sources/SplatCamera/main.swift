@@ -28,7 +28,7 @@ args.removeAll { $0 == "--inside" }
 // --burst N: fire N frames a second apart while the finder keeps running.
 let burst = Int(option("--burst") ?? "1") ?? 1
 let photoRes = option("--photo-res").map { $0.split(separator: "x").compactMap { Int($0) } }
-let sceneScale = option("--scale").flatMap { Float($0) }
+var sceneScale = option("--scale").flatMap { Float($0) }
 var sceneEV = option("--ev").flatMap { Float($0) }
 let cells = option("--cells").flatMap { Int($0) }
 let lensChoice = option("--lens").flatMap { Int($0) }
@@ -50,6 +50,8 @@ args.removeAll { $0 == "--no-shadows" }
 // --menu / --controls: open with the game menu or the controls guide up (for checks).
 let startMenu = args.contains("--menu"), startControls = args.contains("--controls")
 let startFilm = args.contains("--film-menu")
+let measureDemo = args.contains("--measure-demo")
+args.removeAll { $0 == "--measure-demo" }
 args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
@@ -208,6 +210,7 @@ func configureSession() {
         if startMenu { viewer.openMenu() }
         if startControls { viewer.showControls() }
         if startFilm { viewer.openFilm() }
+        if measureDemo { viewer.measureDemo() }
     }
     if let t = turn, t.count == 2 {
         viewer.camera.yaw -= t[0] * .pi / 180
@@ -244,12 +247,21 @@ func configureSession() {
     view.addSubview(menu)
     viewer.menu = menu
     viewer.sceneIsPlace = inside
+    viewer.onScaleSet = { scale in
+        // Remember it with the file, so it opens this size next time.
+        let path = currentScene?.path ?? cliPath
+        guard let path else { return }
+        var k = SceneKind.remembered(path) ?? SceneKind(place: inside, ev: sceneEV ?? 12)
+        k.scale = scale
+        k.remember(path)
+    }
     viewer.onSwitchKind = {
         // Remember the other answer for this file and reopen it that way.
         let path = currentScene?.path ?? cliPath
         guard let path else { return }
         var k = SceneKind.remembered(path) ?? SceneKind(place: inside, ev: sceneEV ?? 12)
         k.place.toggle()
+        k.scale = nil          // a measured size belonged to the other reading
         k.ev = k.place ? max(k.ev, 15) : 12
         k.remember(path)
         delegate.relaunch(with: path)
@@ -300,10 +312,13 @@ func configureSession() {
 struct SceneKind {
     var place: Bool
     var ev: Float
+    /// Metres per scene unit, once measured (otherwise from place/object).
+    var scale: Float?
 
     static func remembered(_ path: String) -> SceneKind? {
         guard let d = UserDefaults.standard.dictionary(forKey: "scene:" + path) else { return nil }
-        return SceneKind(place: d["place"] as? Bool ?? false, ev: Float(d["ev"] as? Double ?? 12))
+        return SceneKind(place: d["place"] as? Bool ?? false, ev: Float(d["ev"] as? Double ?? 12),
+                         scale: (d["scale"] as? Double).map(Float.init))
     }
     /// A guess from the scan's shape, from a quick sample of the file: a place
     /// is dominated by its ground (flat: its thinnest spread a small share of
@@ -369,7 +384,9 @@ struct SceneKind {
     }
 
     func remember(_ path: String) {
-        UserDefaults.standard.set(["place": place, "ev": Double(ev)], forKey: "scene:" + path)
+        var d: [String: Any] = ["place": place, "ev": Double(ev)]
+        if let scale { d["scale"] = Double(scale) }
+        UserDefaults.standard.set(d, forKey: "scene:" + path)
         UserDefaults.standard.set(path, forKey: "lastScene")
     }
 }
@@ -409,8 +426,11 @@ final class PanelWatcher: NSObject, NSOpenSavePanelDelegate {
 var currentScene: (path: String, kind: SceneKind)?
 
 func begin(_ path: String, _ k: SceneKind) {
+    var k = k
+    if k.scale == nil { k.scale = SceneKind.remembered(path)?.scale }
     k.remember(path)
     currentScene = (path, k)
+    if let s = k.scale { sceneScale = sceneScale ?? s }
     inside = k.place
     sceneEV = sceneEV ?? k.ev
     startSession(path)
@@ -482,6 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.createsNewApplicationInstance = true
         if let path, let k = SceneKind.remembered(path) {
             config.arguments = [path, "--ev", String(k.ev)] + (k.place ? ["--inside"] : [])
+                + (k.scale.map { ["--scale", String($0)] } ?? [])
         } else if let path {
             config.arguments = [path]
         }

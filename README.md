@@ -73,8 +73,13 @@ develops it: exposure from aperture, shutter and ISO against the scene's EV
 grain. Frames land in `~/Pictures/Splat Camera/Roll NN - <stock>/` with a
 JSON of how each was taken.
 
-Scans carry no scale: `--scale` sets metres per scene unit (by default the
-subject is treated as a 60 cm still life).
+Scans carry no scale. When choosing a scan the app guesses from its shape
+(an object on the rig, about 60 cm, or a place to stand in, about 30 m), and
+the menu can switch it. To set it exactly: menu > Set the scale (measure):
+aim the crosshair at one end of something you know the size of and press A /
+click, then at the other end, then type its real length (2.5 m, 30 cm, 6 ft)
+or dial it on the pad. The scale is remembered with the file; `--scale`
+(metres per unit) sets it from the command line.
 
 ## Lighting
 

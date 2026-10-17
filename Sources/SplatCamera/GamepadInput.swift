@@ -31,8 +31,10 @@ final class GamepadInput {
         var digit: Int?                     // number key pressed: 1-9, or 0 (also `)
         var run = false                     // Shift held
         var pointer: CGPoint?               // mouse in the window (light table), view points
+        var typed = ""                      // characters typed (entry mode: a number and unit)
+        var erase = 0                       // backspaces typed (entry mode)
     }
-    enum KeyMode { case camera, lighting, sheet, menu }
+    enum KeyMode { case camera, lighting, sheet, menu, entry }
     /// Which layout the keyboard is in (set by the viewer).
     var keyMode = KeyMode.camera
     /// The view the mouse is taken by (mouse look) and reported over.
@@ -43,6 +45,8 @@ final class GamepadInput {
 
     private var held: Set<Button> = []
     private(set) var controllerName: String?
+    private var typedText = ""
+    private var erased = 0
     private var mouseDelta = SIMD2<Float>(0, 0)
     private var heldSlots: Set<Int> = []
     private var wheelDelta: Float = 0
@@ -51,7 +55,12 @@ final class GamepadInput {
 
     init() {
         // Mouse and keys arrive as AppKit events; eat the keys so the window does not beep.
-        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { _ in nil }
+        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
+            if let self, self.keyMode == .entry, e.type == .keyDown {
+                if e.keyCode == 51 { self.erased += 1 } else if let c = e.characters { self.typedText += c }
+            }
+            return nil
+        }
         NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
                                                     .leftMouseDown, .leftMouseUp, .rightMouseDown,
                                                     .rightMouseUp, .scrollWheel]) { [weak self] e in
@@ -145,6 +154,12 @@ final class GamepadInput {
                 (.keyL, .r3), (.tab, .view), (.keyH, .menu), (.keyU, .cycleUp),
             ]
             switch keyMode {
+            case .entry:
+                keys = [(.returnOrEnter, .a), (.escape, .b), (.upArrow, .up), (.downArrow, .down),
+                        (.leftArrow, .left), (.rightArrow, .right)]
+                s.move = .zero
+                s.look = .zero
+                s.shoulders = 0
             case .menu:
                 keys = [(.upArrow, .up), (.downArrow, .down), (.keyW, .up), (.keyS, .down),
                         (.leftArrow, .left), (.rightArrow, .right), (.keyA, .left), (.keyD, .right),
@@ -167,7 +182,9 @@ final class GamepadInput {
                                       .graveAccentAndTilde]
             for (n, code) in slots.enumerated() where k(code) > 0 && !heldSlots.contains(n) { s.digit = n % 10 }
             heldSlots = Set(slots.enumerated().filter { k($0.1) > 0 }.map(\.0))
-            if k(.escape) > 0 || keyMode == .menu { capture(false) }
+            if k(.escape) > 0 || keyMode == .menu || keyMode == .entry { capture(false) }
+            s.typed = typedText.filter { "0123456789.,".contains($0) || $0.isLetter }
+            s.erase = erased
             if leftClick { now.insert(.a) }
             leftClick = false
             s.mouseLook = mouseDelta
@@ -180,6 +197,8 @@ final class GamepadInput {
         }
         mouseDelta = .zero
         wheelDelta = 0
+        typedText = ""
+        erased = 0
         s.move = simd_clamp(s.move, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
         s.pressed = now.subtracting(held)
         held = now
