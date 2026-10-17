@@ -62,6 +62,23 @@ final class RenderLoop {
     private let colours: (buf: MTLBuffer, off: Int)
     private let count: Int, higherCoeffs: Int
     private var lastRelight: [SIMD4<Float>] = []
+
+    // Shadow maps: per light, Spirula's render from the head (transmittance and
+    // median depth), at finder or photo quality; and per splat, per light, how
+    // much light gets through (0-255), worked out from them.
+    enum ShadowQuality: Int {
+        case finder, photo
+        var size: Int { self == .finder ? 512 : 1536 }
+        /// Blocker taps, filter taps, largest penumbra (texels).
+        var taps: SIMD3<Float> { self == .finder ? [8, 12, 10] : [24, 48, 48] }
+    }
+    static let maxLights = 8
+    var shadowsOn = true
+    private let shadowPSO: MTLComputePipelineState
+    private var shadowMaps: [ShadowQuality: [(buf: MTLBuffer, off: Int, index: Int32)]] = [:]
+    private var shadowKeys: [ShadowQuality: [[SIMD4<Float>]]] = [:]
+    private var visibility: [ShadowQuality: MTLBuffer] = [:]
+    private var shadowVersion = 0
     private var finderSlots: [(buf: MTLBuffer, off: Int, index: Int32)] = []
     private let photoSlot: (buf: MTLBuffer, off: Int, index: Int32)
 
@@ -117,6 +134,7 @@ final class RenderLoop {
         accumulatePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "accumulate")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
+        shadowPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shadow_vis")!)
         count = model.count
         higherCoeffs = (model.shDegree + 1) * (model.shDegree + 1) - 1
         func upload(_ a: [Float]) -> MTLBuffer {
@@ -221,15 +239,81 @@ final class RenderLoop {
         return rc == 0
     }
 
+    /// Brings each light's shadow map and the splats' visibility up to date
+    /// for this lighting (only lights that moved, turned or changed beam).
+    private func prepareShadows(_ plot: LightingPlot, body: CameraBody, quality q: ShadowQuality) -> MTLBuffer? {
+        if visibility[q] == nil {
+            visibility[q] = device.makeBuffer(length: max(count * Self.maxLights, 16), options: .storageModePrivate)
+        }
+        guard let vis = visibility[q] else { return nil }
+        let res = q.size
+        for (slot, light) in plot.lights.prefix(Self.maxLights).enumerated() {
+            let key: [SIMD4<Float>] = [SIMD4(light.position, light.spot), SIMD4(light.aim, Float(light.head)),
+                                       SIMD4(plot.up, body.metresPerUnit)]
+            var keys = shadowKeys[q] ?? []
+            if keys.count > slot && keys[slot] == key { continue }
+            // A frame for this slot's map, made the first time it is needed.
+            var maps = shadowMaps[q] ?? []
+            while maps.count <= slot {
+                var b: UnsafeMutableRawPointer?
+                var o = 0
+                var first: Int32 = 0
+                guard sr_add_shared_frames(Int32(res), Int32(res), 1, &b, &o, &first) == 0 else {
+                    print(SpirulaError("shadow map"))
+                    return nil
+                }
+                maps.append((Unmanaged<MTLBuffer>.fromOpaque(b!).takeUnretainedValue(), o, first))
+            }
+            shadowMaps[q] = maps
+            // The view from the head, wide enough for the beam's field.
+            var cam = FlyCamera()
+            cam.up = plot.up
+            cam.lookAt(light.position + light.aim, from: light.position)
+            let field = min(light.beam.angle(at: 0.1) * 1.15, 120) * .pi / 360
+            let fx = Float(res) / 2 / tan(field)
+            setLens(nil)
+            guard render(maps[slot].index, view: cam.viewMatrix, fx: fx, cx: Float(res) / 2, cy: Float(res) / 2)
+            else { return nil }
+            let kit = light.kit
+            let source = (kit.kind == .softlight ? 0.27 : Photometry.optics(kit).lensR) / body.metresPerUnit
+            let V = cam.viewMatrix
+            var S: [SIMD4<Float>] = [
+                SIMD4(V[0], V[1], V[2], V[3]), SIMD4(V[4], V[5], V[6], V[7]), SIMD4(V[8], V[9], V[10], V[11]),
+                SIMD4(fx, Float(res), body.metresPerUnit, source),
+                SIMD4(q.taps, Float(slot)),
+            ]
+            var n = UInt32(count)
+            guard let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return nil }
+            ce.setComputePipelineState(shadowPSO)
+            ce.setBuffer(means, offset: 0, index: 0)
+            ce.setBuffer(maps[slot].buf, offset: maps[slot].off, index: 1)
+            ce.setBytes(&S, length: S.count * 16, index: 2)
+            ce.setBuffer(vis, offset: 0, index: 3)
+            ce.setBytes(&n, length: 4, index: 4)
+            ce.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                               threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            ce.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+            while keys.count <= slot { keys.append([]) }
+            keys[slot] = key
+            shadowKeys[q] = keys
+            shadowVersion += 1
+        }
+        return vis
+    }
+
     /// Writes the relit colours for this lighting, seen from `eye`, into
     /// Spirula's colour buffer (skipped when nothing changed).
-    private func relight(_ plot: LightingPlot, eye: SIMD3<Float>, body: CameraBody) {
+    private func relight(_ plot: LightingPlot, eye: SIMD3<Float>, body: CameraBody, quality: ShadowQuality) {
+        let vis = plot.lights.isEmpty || !shadowsOn ? nil : prepareShadows(plot, body: body, quality: quality)
         var g: [SIMD4<Float>] = [
             SIMD4(eye, plot.ambient),
-            SIMD4(Float(plot.lights.count), Float(count), Float(higherCoeffs), 0.25),
-            SIMD4(plot.ambientTint, 0),
+            SIMD4(Float(min(plot.lights.count, Self.maxLights)), Float(count), Float(higherCoeffs), 0.25),
+            SIMD4(plot.ambientTint, vis == nil ? 0 : 1),
+            SIMD4(Float(quality.rawValue), Float(shadowVersion), 0, 0),
         ]
-        let packs = plot.lights.map { $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV, up: plot.up) }
+        let packs = plot.lights.prefix(Self.maxLights).map { $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV, up: plot.up) }
         var lt: [SIMD4<Float>] = packs.flatMap(\.head)
         let tables: [SIMD4<Float>] = packs.flatMap(\.table)
         if g + lt + [SIMD4(plot.lights.map(\.spot).reduce(0, +), 0, 0, 0)] == lastRelight { return }
@@ -247,6 +331,7 @@ final class RenderLoop {
         ce.setBytes(&g, length: g.count * 16, index: 4)
         ce.setBytes(&lt, length: lt.count * 16, index: 5)
         ce.setBuffer(tableBuf, offset: 0, index: 6)
+        ce.setBuffer(vis ?? tableBuf, offset: 0, index: 7)
         ce.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         ce.endEncoding()
@@ -259,7 +344,7 @@ final class RenderLoop {
         let slot = (0..<finderSlots.count).first { $0 != latest?.slot && displaying[$0] == 0 }
         cond.unlock()
         guard let slot else { return }
-        relight(job.lighting, eye: job.position, body: job.body)
+        relight(job.lighting, eye: job.position, body: job.body, quality: .finder)
         setLens(job.lens)
         let t0 = CACurrentMediaTime()
         let ok = render(finderSlots[slot].index, view: job.view, fx: job.fx,
@@ -295,7 +380,7 @@ final class RenderLoop {
         let n = b.takingAperture
         let fx = e.camera.focalPixels(width: w)
         let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
-        relight(e.lighting, eye: e.camera.position, body: b)
+        relight(e.lighting, eye: e.camera.position, body: b, quality: .photo)
         // Axial colour: with it, each sub-pupil carries one channel, focused
         // where that colour focuses (red a little beyond green, blue short).
         let channel = b.lens.axialCA > 0 ? e.next % 3 : -1

@@ -53,6 +53,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     var filmFPS: Double = 24
     /// Scripted runs: where the next developed frame goes, and who to tell.
     var scriptedPath: URL?
+    /// Scripted runs ignore the controls (a pad left on the desk must not move the camera).
+    var scripted = false
     var onSaved: ((String) -> Void)?
 
     // Timing (finder renders, which is what the GPU can keep up with)
@@ -226,7 +228,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let now = CACurrentMediaTime()
         let dt = Float(min(0.1, now - lastTime))
         lastTime = now
-        if benchFrames > 0 { benchOrbit() } else { handleInput(dt: dt) }
+        if benchFrames > 0 { benchOrbit() } else if !scripted { handleInput(dt: dt) }
 
         // Looking at prints: the finder rests and the darkroom gets the GPU.
         if mode == .sheet {
@@ -503,7 +505,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let p = s.pressed
         var plot = lighting
         let n = plot.lights.count
-        if p.contains(.x) {
+        if p.contains(.x) && plot.lights.count < RenderLoop.maxLights {
             // A new head where you are looking from, aimed the same way.
             let from = pov.map { _ in lightCam } ?? camera
             plot.lights.append(PlacedLight(head: plot.kitChoice, position: from.position, aim: from.forward))

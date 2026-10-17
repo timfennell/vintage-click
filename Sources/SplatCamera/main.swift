@@ -37,6 +37,8 @@ args.removeAll { $0 == "--sheet" }
 let house = option("--house")
 let meterWait = Double(option("--meter-wait") ?? "1.5") ?? 1.5
 let flyLight = option("--fly").flatMap { Int($0) }
+let noShadows = args.contains("--no-shadows")
+args.removeAll { $0 == "--no-shadows" }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -121,6 +123,7 @@ if let n = apertureChoice {
 if let i = filmChoice { viewer.body.stockIndex = i % filmStocks.count }
 if pinhole { viewer.setBenchLens(false) }
 if demoLights { viewer.demoLights() }
+if noShadows { viewer.loop.shadowsOn = false }
 if let h = house { viewer.lighting.setHouseLights(h) }
 if lightingMode || flyLight != nil { viewer.startLighting() }
 if let k = flyLight { viewer.flyLight(k - 1) }
@@ -172,6 +175,7 @@ if bench > 0 {
 }
 
 if let p = shootPath {
+    viewer.scripted = true
     var saved = 0
     viewer.onSaved = { path in
         print("Saved \(path)")

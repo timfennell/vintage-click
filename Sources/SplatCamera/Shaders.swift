@@ -314,7 +314,7 @@ fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[b
 // lights give back a share of the scan as captured. Writes new SH DC colours
 // straight into the renderer's buffer (render with the higher bands off).
 //   G[0] = (camera position, house lights)   G[1] = (lights, N, K higher coeffs, shine colour)
-//   G[2] = (house lights' colour, -)
+//   G[2] = (house lights' colour, shadows on)   VIS = per splat, per light, the light let through (0-255)
 //   per light, 4 float4s (PlacedLight.packed): (pos, -), (aim, dimmer / E_ref),
 //   (colour, shine), (right, metres per unit); and its beam table B (candela per
 //   colour; 32 bins off axis with edges at 90 (t/32)^1.3 degrees, x 8 around it).
@@ -346,10 +346,65 @@ float3 sh_sum(float3 d, device const float* sh, uint K, uint first, uint last) {
 float3 srgb_to_lin3(float3 c) { c = max(c, 0.0); return float3(srgb_to_lin(c.r), srgb_to_lin(c.g), srgb_to_lin(c.b)); }
 float3 lin_to_srgb3(float3 c) { c = max(c, 0.0); return float3(lin_to_srgb(c.r), lin_to_srgb(c.g), lin_to_srgb(c.b)); }
 
+// Shadows: how much of one light reaches each splat, from that light's
+// shadow map (Spirula's render from the head: transmittance and median depth
+// per texel). A blocker search finds how far in front the occluders are; the
+// penumbra then widens with the head's source size (the lit face of the
+// Fresnel lens, or a softlight's opening) times the occluder-to-receiver
+// gap, as real soft shadows do; the filter averages the light let through.
+// Occluders fade in over a short depth (fur shadows itself gradually).
+//   S[0..2] = the light's view rows (world -> light, OpenCV axes)
+//   S[3] = (fx, map size, metres per unit, source radius in scene units)
+//   S[4] = (blocker taps, filter taps, largest penumbra in texels, light slot)
+float2 shadow_tap(device const float* map, int2 t, uint res) {
+    t = clamp(t, int2(0), int2(res) - 1);
+    uint n = res * res, j = uint(t.y) * res + uint(t.x);
+    return float2(map[3 * n + j], map[4 * n + j]);   // transmittance, median ray depth
+}
+
+kernel void shadow_vis(device const float* means [[buffer(0)]], device const float* map [[buffer(1)]],
+                       constant float4* S [[buffer(2)]], device uchar* vis [[buffer(3)]],
+                       constant uint& N [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+    if (i >= N) return;
+    uint slot = uint(S[4].w);
+    float3 m = float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
+    float3 pc = float3(dot(S[0].xyz, m) + S[0].w, dot(S[1].xyz, m) + S[1].w, dot(S[2].xyz, m) + S[2].w);
+    float fx = S[3].x, res = S[3].y;
+    if (pc.z <= 0) { vis[i * 8 + slot] = 255; return; }
+    float2 uv = float2(fx * pc.x / pc.z, fx * pc.y / pc.z) + res * 0.5;
+    if (any(uv < 0) || any(uv >= res)) { vis[i * 8 + slot] = 255; return; }
+    float dr = length(pc);
+    // Self-shadowing guard: a little in front of the receiver, more far off.
+    float bias = 0.012 * dr + 0.004 / S[3].z;
+    float ramp = 0.03 * dr;
+    uint nb = uint(S[4].x), nf = uint(S[4].y);
+    // Blockers: occluders in front, near this texel.
+    float search = min(S[4].z, max(2.0, S[3].w / dr * fx * 0.5));
+    float dsum = 0, cnt = 0;
+    for (uint k = 0; k < nb; k++) {
+        float2 o = vogel(k, nb) * search;
+        float2 tp = shadow_tap(map, int2(uv + o), uint(res));
+        if (tp.x < 0.97 && tp.y > 0 && tp.y < dr - bias) { dsum += tp.y; cnt += 1; }
+    }
+    if (cnt == 0) { vis[i * 8 + slot] = 255; return; }
+    float db = dsum / cnt;
+    // Penumbra: source size x (receiver - blocker) / blocker, in texels.
+    float pen = clamp(S[3].w * (dr - db) / max(db, 1e-6) / dr * fx, 1.0, S[4].z);
+    float lit = 0;
+    for (uint k = 0; k < nf; k++) {
+        float2 o = vogel(k, nf) * pen;
+        float2 tp = shadow_tap(map, int2(uv + o), uint(res));
+        float occl = 0;
+        if (tp.x < 0.97 && tp.y > 0) occl = (1 - tp.x) * saturate((dr - bias - tp.y) / ramp);
+        lit += 1 - occl;
+    }
+    vis[i * 8 + slot] = uchar(clamp(lit / float(nf), 0.0, 1.0) * 255 + 0.5);
+}
+
 kernel void relight(device const float* means [[buffer(0)]], device const float* dc0 [[buffer(1)]],
                     device const float* sh0 [[buffer(2)]], device float* out_dc [[buffer(3)]],
                     constant float4* G [[buffer(4)]], constant float4* LT [[buffer(5)]],
-                    device const float4* BT [[buffer(6)]],
+                    device const float4* BT [[buffer(6)]], device const uchar* VIS [[buffer(7)]],
                     uint i [[thread_position_in_grid]]) {
     uint N = uint(G[1].y), K = uint(G[1].z), nl = uint(G[1].x);
     if (i >= N) return;
@@ -383,6 +438,7 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         float3 cd = mix(mix(B[t0 * 8 + p0].rgb, B[t0 * 8 + p0 + 1].rgb, fp),
                         mix(B[(t0 + 1) * 8 + p0].rgb, B[(t0 + 1) * 8 + p0 + 1].rgb, fp), ft);
         float3 e3 = cd * L[1].w / (dist_m * dist_m);
+        if (G[2].w > 0.5) e3 *= float(VIS[i * 8 + l]) / 255.0;     // shadowed
         float e = dot(e3, float3(0.2126, 0.7152, 0.0722));
         if (e <= 0) continue;
         float3 col = L[2].rgb * (e3 / e);
