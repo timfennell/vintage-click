@@ -4,6 +4,7 @@
 <dict>
     <key>CFBundleName</key><string>Splat Camera</string>
     <key>CFBundleDisplayName</key><string>Splat Camera</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>com.timfennell.splatcamera</string>
     <key>CFBundleExecutable</key><string>SplatCamera</string>
     <key>CFBundlePackageType</key><string>APPL</string>
