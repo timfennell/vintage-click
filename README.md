@@ -96,6 +96,13 @@ power, 2-10x); it magnifies from the full-size frames. The d-pad chooses a
 frame (the loupe glides to it) and A marks it as a keeper in red grease
 pencil (kept in the roll's marks.json). Nothing pops up when the shutter fires.
 
+## The menu
+
+Esc (keyboard) or + / Menu (pad) opens the game menu: switch between the
+camera, lighting and the light table, reset the view, open another scene,
+choose where rolls are kept, quit, and see every control (Controls, also
+Help > Controls) for pad and keyboard side by side.
+
 ## Controls
 
 Keyboard and mouse, laid out like a first-person game (click in the window to

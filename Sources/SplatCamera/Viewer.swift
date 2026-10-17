@@ -36,6 +36,11 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var mirrorUpUntil = 0.0
     var hud: ViewfinderHUD?
     var sheet: ContactSheetView?
+    var menu: MenuOverlay?
+    /// The app's own jobs, wired by main: another scene, where rolls go, quit.
+    var appActions: (openScene: () -> Void, chooseRolls: () -> Void, quit: () -> Void)?
+    private var menuOpen = false
+    private var menuStick: Float = 0
 
     /// What the controls are doing: the camera, placing lights, or the contact sheet.
     enum Mode { case camera, lighting, sheet }
@@ -443,9 +448,17 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
 
     private func handleInput(dt: Float) {
-        input.keyMode = mode == .sheet ? .sheet : (mode == .lighting ? .lighting : .camera)
+        input.keyMode = menuOpen ? .menu : (mode == .sheet ? .sheet : (mode == .lighting ? .lighting : .camera))
         let s = input.poll()
         let p = s.pressed
+        if menuOpen {
+            menuInput(s)
+            return
+        }
+        if p.contains(.menu) {
+            openMenu()
+            return
+        }
         if p.contains(.cycleUp) { cycleUp() }
         switch mode {
         case .sheet:
@@ -471,7 +484,6 @@ final class Viewer: NSObject, MTKViewDelegate {
             lightingInput(s, dt: dt)
             body.dofPreview = false
         }
-        if mode == .camera && p.contains(.menu) { camera = home }
         if p.contains(.view) { openSheet() }
         if p.contains(.r3) {
             mode = mode == .lighting ? .camera : .lighting
@@ -526,7 +538,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             if let i = pov { plot.lights[i].head = plot.kitChoice }
         }
         if let i = pov, plot.lights.indices.contains(i) {
-            if p.contains(.menu) {
+            if p.contains(.removeLight) {
                 plot.lights.remove(at: i)
                 plot.selected = max(0, i - 1)
                 pov = nil
@@ -591,6 +603,99 @@ final class Viewer: NSObject, MTKViewDelegate {
         lighting.lights = [place(2, side: -0.8, up: 0.7, metres: 2.0, spot: 0.6),
                            place(3, side: 0.9, up: 0.2, metres: 2.2, spot: 0)]
         lighting.ambient = 0.1
+    }
+
+    // MARK: the menu
+
+    private var modeName: String {
+        switch mode {
+        case .camera: return "camera"
+        case .lighting: return pov.map { "lighting · flying light \($0 + 1)" } ?? "lighting"
+        case .sheet: return "light table"
+        }
+    }
+
+    /// The controls guide, straight away (Help menu).
+    func showControls() {
+        openMenu()
+        menu?.showingHelp = true
+    }
+
+    func openMenu() {
+        guard let menu else { return }
+        menuOpen = true
+        menu.currentMode = modeName
+        menu.showingHelp = false
+        var items: [MenuOverlay.Item] = [
+            .init(title: "Back to the \(mode == .sheet ? "light table" : mode == .lighting ? "lights" : "camera")",
+                  detail: "carry on where you were") { [weak self] in self?.closeMenu() },
+            .init(title: "Camera", detail: "frame, focus and expose") { [weak self] in
+                self?.closeMenu(); self?.switchTo(.camera) },
+            .init(title: "Lighting", detail: "place and fly the lights, set the house lights") { [weak self] in
+                self?.closeMenu(); self?.switchTo(.lighting) },
+            .init(title: "Light table", detail: "your rolls, through a loupe") { [weak self] in
+                self?.closeMenu(); self?.switchTo(.sheet) },
+        ]
+        if mode == .lighting, let i = pov {
+            items.append(.init(title: "Remove light \(i + 1)", detail: "the one you are flying") { [weak self] in
+                guard let self else { return }
+                self.lighting.lights.remove(at: i)
+                self.lighting.selected = max(0, i - 1)
+                self.pov = nil
+                self.closeMenu()
+            })
+        }
+        items += [
+            .init(title: "Reset the view", detail: "back to where you started") { [weak self] in
+                guard let self else { return }
+                self.camera = self.home
+                self.closeMenu()
+            },
+            .init(title: "Controls", detail: "every button, pad and keyboard") { [weak self] in
+                self?.menu?.showingHelp = true },
+            .init(title: "Open another scene…", detail: "a .ply scan") { [weak self] in self?.appActions?.openScene() },
+            .init(title: "Where rolls are kept…", detail: ContactSheetView.root.path) { [weak self] in
+                self?.appActions?.chooseRolls()
+                self?.openMenu()
+            },
+            .init(title: "Quit", detail: "") { [weak self] in self?.appActions?.quit() },
+        ]
+        menu.items = items
+        menu.selected = 0
+        menu.isHidden = false
+    }
+
+    private func closeMenu() {
+        menuOpen = false
+        menu?.isHidden = true
+    }
+
+    private func switchTo(_ m: Mode) {
+        guard m != mode else { return }
+        if mode == .sheet { closeSheet() }
+        pov = nil
+        switch m {
+        case .sheet: openSheet()
+        case .lighting: mode = .lighting
+        case .camera: mode = .camera
+        }
+    }
+
+    private func menuInput(_ s: GamepadInput.State) {
+        guard let menu else { return }
+        let p = s.pressed
+        if menu.showingHelp {
+            if !p.isDisjoint(with: [.a, .b, .menu]) { menu.showingHelp = false }
+            return
+        }
+        // A stick steps once per push, like the d-pad.
+        let y = s.move.y + s.look.y
+        if abs(y) > 0.5 && abs(menuStick) <= 0.5 { menu.move(y > 0 ? -1 : 1) }
+        menuStick = y
+        if p.contains(.up) { menu.move(-1) }
+        if p.contains(.down) { menu.move(1) }
+        if p.contains(.a) { menu.choose() }
+        if p.contains(.b) || p.contains(.menu) { closeMenu() }
     }
 
     // MARK: contact sheet
@@ -722,7 +827,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                                 lighting.ambient * 100, lightKit[lighting.kitChoice].name))
             if pov != nil {
                 lines.append("Flying the light: WASD / sticks move it, mouse / right stick aims it · wheel or L2/R2 flood/spot · - = or ▲▼ dimmer · T / Y head")
-                lines.append("Backspace / Menu remove · 0 or B back to the camera · 1-9 or ◀▶ another light · F / X add one · G / L3 house lights · L / R3 done")
+                lines.append("Backspace (or the menu) removes it · 0 or B back to the camera · 1-9 or ◀▶ another light · F / X add one · G / L3 house lights · L / R3 done")
             } else {
                 lines.append("1-9 or ◀▶ fly a light from its own view · F / X add one at your view · G / L3 house lights")
                 lines.append("L / R3 back to the camera controls")

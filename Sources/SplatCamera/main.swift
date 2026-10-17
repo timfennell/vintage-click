@@ -46,6 +46,9 @@ let focusChoice = option("--focus").flatMap { Float($0) }
 let turn = option("--turn").map { $0.split(separator: ",").compactMap { Float($0) } }
 let noShadows = args.contains("--no-shadows")
 args.removeAll { $0 == "--no-shadows" }
+// --menu / --controls: open with the game menu or the controls guide up (for checks).
+let startMenu = args.contains("--menu"), startControls = args.contains("--controls")
+args.removeAll { $0 == "--menu" || $0 == "--controls" }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -192,6 +195,10 @@ func configureSession() {
     if lightingMode || flyLight != nil { viewer.startLighting() }
     if let k = flyLight { viewer.flyLight(k - 1) }
     if let m = focusChoice { viewer.body.focusM = m }
+    DispatchQueue.main.async {
+        if startMenu { viewer.openMenu() }
+        if startControls { viewer.showControls() }
+    }
     if let t = turn, t.count == 2 {
         viewer.camera.yaw -= t[0] * .pi / 180
         viewer.camera.pitch += t[1] * .pi / 180
@@ -221,6 +228,14 @@ func configureSession() {
     sheet.isHidden = true
     view.addSubview(sheet)
     viewer.sheet = sheet
+    let menu = MenuOverlay(frame: view.bounds)
+    menu.autoresizingMask = [.width, .height]
+    menu.isHidden = true
+    view.addSubview(menu)
+    viewer.menu = menu
+    viewer.appActions = (openScene: { delegate.relaunch(with: nil) },
+                         chooseRolls: { delegate.chooseRollsFolder(nil) },
+                         quit: { quit() })
 
     viewer.onStats = { line in
         print(line)
@@ -391,26 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(ContactSheetView.root)
     }
 
-    @objc func showControls(_ sender: Any?) {
-        let a = NSAlert()
-        a.messageText = "Controls"
-        a.informativeText = """
-        KEYBOARD AND MOUSE (click the window to take the mouse, Esc to let go)
-        Mouse look · WASD walk · Shift run · Space / Ctrl rise / sink
-        Left click shutter · hold right button: depth-of-field preview · wheel: focus
-        [ ] aperture · - = shutter speed · 1-8 lens · R new roll · Tab light table
-        L lighting: 1-9 fly a light from its own view, 0 back to the camera,
-          F add, Backspace remove, T head, wheel flood/spot, - = dimmer, G house lights
-        Light table: the mouse is the loupe, wheel its power, click marks a keeper
-
-        PAD (Xbox / PlayStation / Switch, by position)
-        Sticks walk / look · L1 R1 sink / rise · L2 R2 focus · bottom button shutter
-        hold right button: DOF preview · left button: lens · top button: new roll
-        d-pad: aperture / shutter · View/−: light table · Menu/+: reset view
-        Right-stick click: lighting (d-pad ◀▶ fly a light, B back, X add)
-        """
-        a.runModal()
-    }
+    @objc func showControls(_ sender: Any?) { viewer?.showControls() }
 
     func buildMenus() {
         let main = NSMenu()

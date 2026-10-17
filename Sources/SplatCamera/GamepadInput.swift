@@ -32,13 +32,13 @@ final class GamepadInput {
         var run = false                     // Shift held
         var pointer: CGPoint?               // mouse in the window (light table), view points
     }
-    enum KeyMode { case camera, lighting, sheet }
+    enum KeyMode { case camera, lighting, sheet, menu }
     /// Which layout the keyboard is in (set by the viewer).
     var keyMode = KeyMode.camera
     /// The view the mouse is taken by (mouse look) and reported over.
     weak var view: NSView?
     enum Button: Hashable {
-        case a, b, x, y, left, right, up, down, l1, r1, menu, view, l3, r3, cycleUp
+        case a, b, x, y, left, right, up, down, l1, r1, menu, view, l3, r3, cycleUp, removeLight
     }
 
     private var held: Set<Button> = []
@@ -78,7 +78,8 @@ final class GamepadInput {
             if mouseCaptured { mouseDelta += SIMD2(Float(e.deltaX), Float(-e.deltaY)) }
         case .leftMouseDown:
             // The first click only takes the mouse; after that it is the shutter.
-            if keyMode != .sheet && !mouseCaptured { capture(true) } else { leftClick = true }
+            let looking = keyMode == .camera || keyMode == .lighting
+            if looking && !mouseCaptured { capture(true) } else if looking { leftClick = true }
         case .rightMouseDown: rightHeld = true
         case .rightMouseUp: rightHeld = false
         case .scrollWheel:
@@ -144,10 +145,16 @@ final class GamepadInput {
                 (.keyL, .r3), (.tab, .view), (.keyH, .menu), (.keyU, .cycleUp),
             ]
             switch keyMode {
+            case .menu:
+                keys = [(.upArrow, .up), (.downArrow, .down), (.keyW, .up), (.keyS, .down),
+                        (.returnOrEnter, .a), (.spacebar, .a), (.escape, .b), (.deleteOrBackspace, .b)]
+                s.move = .zero
+                s.look = .zero
+                s.shoulders = 0
             case .camera:
-                keys += [(.keyR, .y), (.keyG, .l3)]
+                keys += [(.keyR, .y), (.keyG, .l3), (.escape, .menu)]
             case .lighting:
-                keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .menu), (.keyG, .l3)]
+                keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .removeLight), (.keyG, .l3), (.escape, .menu)]
             case .sheet:
                 keys += [(.leftArrow, .left), (.rightArrow, .right), (.upArrow, .up), (.downArrow, .down),
                          (.keyQ, .l1), (.keyE, .r1), (.escape, .b), (.returnOrEnter, .a)]
@@ -159,7 +166,7 @@ final class GamepadInput {
                                       .graveAccentAndTilde]
             for (n, code) in slots.enumerated() where k(code) > 0 && !heldSlots.contains(n) { s.digit = n % 10 }
             heldSlots = Set(slots.enumerated().filter { k($0.1) > 0 }.map(\.0))
-            if k(.escape) > 0 { capture(false) }
+            if k(.escape) > 0 || keyMode == .menu { capture(false) }
             if leftClick { now.insert(.a) }
             leftClick = false
             s.mouseLook = mouseDelta
