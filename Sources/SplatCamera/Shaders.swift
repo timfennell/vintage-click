@@ -266,7 +266,7 @@ float3 surround(float2 pos, float2 pe, float edge, device const float* f, consta
     near /= 16;
     float h = O[0].y;
     // Very faint: the glass itself stays clean; only the black catches a little.
-    float halo = 0.07 * exp(-max(edge, 0.0) / (h * 0.025)) + 0.02 * exp(-max(edge, 0.0) / (h * 0.11));
+    float halo = 0.035 * exp(-max(edge, 0.0) / (h * 0.025)) + 0.01 * exp(-max(edge, 0.0) / (h * 0.11));
     return to_srgb(lin + near * halo * O[5].y);
 }
 
