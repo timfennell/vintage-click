@@ -119,7 +119,7 @@ Pad (Xbox / PlayStation / Switch Pro), camera mode:
 | X / square | next lens from the bag |
 | Y / triangle | load a new roll (next stock) |
 | R3 | lighting mode |
-| View / Share | contact sheet |
+| View / Share | light table |
 | Menu | reset the view |
 | L3 | walk faster / slower |
 
