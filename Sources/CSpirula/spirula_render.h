@@ -36,3 +36,5 @@ int sr_add_shared_frames(int width, int height, int count, void** out_buffers,
 // The splats' SH DC colours [N,3] fp32 on the GPU, to relight in place
 // (render with sr_set_render_degree(0)): unretained id<MTLBuffer> + offset.
 int sr_color_buffer(void** out_buffer, size_t* out_offset);
+// "PINHOLE" (default) or "FISHEYE" (equidistant: radius = f * angle) for later renders.
+int sr_set_camera_model(const char* name);

@@ -16,6 +16,7 @@ func pupilWeight(_ l: SIMD2<Float>, q: SIMD2<Float>, lens: Lens, fNumber: Float)
     } else if r > 1 {
         return 0
     }
+    if r < lens.obstruction { return 0 }      // a mirror lens's secondary mirror
     let open = lens.maxAperture / fNumber
     if simd_length(l * open + lens.catsEye * q) > 1 { return 0 }
     return (1 + lens.soapBubble * pow(r, 6)) / (1 + lens.soapBubble * 0.25)
@@ -30,7 +31,7 @@ func vogel(_ k: Int, _ n: Int) -> SIMD2<Float> {
 
 /// What the photographer has set, and the optics that follow from it.
 struct CameraBody {
-    var lensIndex = 1
+    var lensIndex = lensBag.firstIndex { $0.name == "Kestrel 50mm f/1.4" } ?? 0
     var apertureIndex = 0
     var shutterIndex = 7                // 1/125
     var focusM: Float = 1               // focus distance, metres

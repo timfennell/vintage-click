@@ -296,12 +296,13 @@ final class Viewer: NSObject, MTKViewDelegate {
                 view: lightCam.viewMatrix, position: lightCam.position, fx: lightCam.focalPixels(width: width),
                 lens: nil, body: body, lighting: lighting, fromLight: pov))
         } else {
-            let fx = camera.focalPixels(width: width)
+            let fx = body.lens.focalPixels(width: width, height: height)
             let carried = carriedCamera
+            let fisheye = body.lens.isFisheye
             loop.requestFinder(FinderJob(
                 view: carried.viewMatrix, position: carried.position, fx: fx,
-                lens: lensOn ? body.lensParams(fNumber: n, focalPx: fx, cells: 1, table: table(body, n)) : nil,
-                body: body, lighting: lighting))
+                lens: lensOn && !fisheye ? body.lensParams(fNumber: n, focalPx: fx, cells: 1, table: table(body, n)) : nil,
+                body: body, lighting: lighting, fisheye: fisheye))
         }
 
         guard let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
@@ -382,7 +383,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             // Stopping down for the depth-of-field preview darkens the screen.
             SIMD4(Float(height) * 0.065, pow(l.maxAperture / b.viewingAperture, 2), Float(seed),
                   b.exposureStops),
-            SIMD4(l.lateralCA, l.axialCA, 0, 0),
+            SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(height) / 2 : 0, l.obstruction),
             Self.finderInset(width: width, height: height),
         ]
         if job.fromLight != nil {
@@ -542,14 +543,18 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.right) { body.changeAperture(1) }
             if p.contains(.up) { body.changeShutter(1) }
             if p.contains(.down) { body.changeShutter(-1) }
-            if p.contains(.x) { body.nextLens() }
+            if p.contains(.x) { openLenses() }
             if p.contains(.y) { openFilm() }
             if p.contains(.l3) { changeGait(gait == Self.gaits.count - 1 ? -gait : 1) }
             body.dofPreview = s.bHeld
             body.turnFocus(s.triggers, dt: dt)
             // The wheel is the focus ring: away from you focuses farther.
             if s.wheel != 0 { body.focusM = max(body.lens.minFocusM, min(200, body.focusM * exp(s.wheel * 0.03))) }
-            if let d = s.digit, d >= 1, d <= lensBag.count { body.chooseLens(d - 1) }
+            // Number keys: that lens of the mounted lens's collection.
+            if let d = s.digit, d >= 1, let shelf = lensCollections.firstIndex(where: { $0.name == body.lens.collection }) {
+                let start = lensCollections.prefix(shelf).reduce(0) { $0 + $1.lenses.count }
+                if d <= lensCollections[shelf].lenses.count { mount(start + d - 1) }
+            }
         case .lighting:
             lightingInput(s, dt: dt)
             body.dofPreview = false
@@ -907,6 +912,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.currentMode = modeName
         menu.showingHelp = false
         menu.showingFilm = false
+        menu.showingLenses = false
         var items: [MenuOverlay.Item] = [
             .init(title: "Back to the \(mode == .sheet ? "light table" : mode == .lighting ? "lights" : "camera")",
                   detail: "carry on where you were") { [weak self] in self?.closeMenu() },
@@ -927,6 +933,8 @@ final class Viewer: NSObject, MTKViewDelegate {
             })
         }
         items += [
+            .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
+                self?.openLenses() },
             .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") { [weak self] in
                 self?.openFilm() },
             .init(title: "Set the scale (measure)…",
@@ -968,6 +976,28 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.items = items
         menu.selected = 0
         menu.isHidden = false
+    }
+
+    /// The camera bag: collections and their lenses (the pad's left button, B, or the menu).
+    func openLenses() {
+        if !menuOpen { openMenu() }
+        guard let menu else { return }
+        let shelf = lensCollections.firstIndex { $0.name == body.lens.collection } ?? 0
+        menu.lensShelf = shelf
+        menu.lensChoice = lensCollections[shelf].lenses.firstIndex { $0.name == body.lens.name } ?? 0
+        menu.mountedLens = body.lensIndex
+        menu.onMountLens = { [weak self] i in
+            self?.mount(i)
+            self?.closeMenu()
+        }
+        menu.showingLenses = true
+    }
+
+    private func mount(_ i: Int) {
+        guard lensBag.indices.contains(i), i != body.lensIndex else { return }
+        body.chooseLens(i)
+        camera.focalMM = body.lens.focalMM
+        hud?.flash(body.lens.name.uppercased())
     }
 
     /// Straight to loading a roll (the pad's top button, R, or the menu).
@@ -1014,6 +1044,19 @@ final class Viewer: NSObject, MTKViewDelegate {
         let p = s.pressed
         if menu.showingHelp {
             if !p.isDisjoint(with: [.a, .b, .menu]) { menu.showingHelp = false }
+            return
+        }
+        if menu.showingLenses {
+            let y = s.move.y + s.look.y, x = s.move.x + s.look.x
+            if abs(y) > 0.5 && abs(menuStick) <= 0.5 { menu.moveLens(y > 0 ? -1 : 1) }
+            menuStick = y
+            if p.contains(.up) { menu.moveLens(-1) }
+            if p.contains(.down) { menu.moveLens(1) }
+            if p.contains(.left) || (x < -0.5 && filmStickX >= -0.5) { menu.moveShelf(-1) }
+            if p.contains(.right) || (x > 0.5 && filmStickX <= 0.5) { menu.moveShelf(1) }
+            filmStickX = x
+            if p.contains(.a) { menu.mountLens() }
+            if p.contains(.b) || p.contains(.menu) { menu.showingLenses = false }
             return
         }
         if menu.showingFilm {
@@ -1096,7 +1139,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             return
         }
         let job = ExposureJob(camera: carriedCamera, body: body, lighting: lighting, frameNumber: body.framesShot + 1,
-                              cells: body.cellCentres(cellsPerExposure), accum: accum, size: size,
+                              cells: body.lens.isFisheye ? [.zero] : body.cellCentres(cellsPerExposure), accum: accum, size: size,
                               wantsNegative: keepNegative)
         job.outputPath = scriptedPath
         loop.expose(job)

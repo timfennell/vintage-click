@@ -18,6 +18,27 @@ final class MenuOverlay: NSView {
     var filmChoice = 0 { didSet { needsDisplay = true } }
     var filmPush = 0 { didSet { needsDisplay = true } }
     var onLoadFilm: ((Int, Int) -> Void)?
+    /// Showing the lens page: a collection, a lens in it; mounting one.
+    var showingLenses = false { didSet { needsDisplay = true } }
+    var lensShelf = 0 { didSet { needsDisplay = true } }
+    var lensChoice = 0 { didSet { needsDisplay = true } }
+    var mountedLens = 0
+    var onMountLens: ((Int) -> Void)?
+    private var lensRects: [NSRect] = []
+    private var shelfRects: [NSRect] = []
+
+    func moveLens(_ d: Int) {
+        let n = lensCollections[lensShelf].lenses.count
+        lensChoice = (lensChoice + d + n) % n
+    }
+    func moveShelf(_ d: Int) {
+        lensShelf = (lensShelf + d + lensCollections.count) % lensCollections.count
+        lensChoice = 0
+    }
+    func mountLens() {
+        let before = lensCollections.prefix(lensShelf).reduce(0) { $0 + $1.lenses.count }
+        onMountLens?(before + lensChoice)
+    }
     private var filmRects: [NSRect] = []
     private var ratingRect = NSRect.zero
 
@@ -50,11 +71,18 @@ final class MenuOverlay: NSView {
     }
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if !showingHelp && !showingFilm, let i = itemRects.firstIndex(where: { $0.contains(p) }), i != selected { selected = i }
+        if !showingHelp && !showingFilm && !showingLenses, let i = itemRects.firstIndex(where: { $0.contains(p) }), i != selected { selected = i }
     }
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if showingHelp { showingHelp = false; return }
+        if showingLenses {
+            if let i = shelfRects.firstIndex(where: { $0.contains(p) }) { lensShelf = i; lensChoice = 0; return }
+            if let i = lensRects.firstIndex(where: { $0.contains(p) }) {
+                if i == lensChoice { mountLens() } else { lensChoice = i }
+            }
+            return
+        }
         if showingFilm {
             // The rating line: click its left half to pull, right half to push.
             if ratingRect.contains(p) {
@@ -85,6 +113,7 @@ final class MenuOverlay: NSView {
         let u = bounds.height / 60
         if showingHelp { drawHelp(u); return }
         if showingFilm { drawFilm(u); return }
+        if showingLenses { drawLenses(u); return }
         let w = min(bounds.width * 0.6, 46 * u * 1.4), rowH = 3.4 * u
         let h = CGFloat(items.count) * rowH + 9 * u
         let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
@@ -124,7 +153,7 @@ final class MenuOverlay: NSView {
             ("shutter speed", "d-pad ▲ ▼", "-  ="),
             ("fire the shutter", "bottom (A)", "left click"),
             ("depth-of-field preview", "hold right (B)", "hold right click"),
-            ("next lens / lens 1-8", "left (X)", "1 - 8"),
+            ("camera bag (change lens)", "left (X)", "B, or 1 - 9 in the collection"),
             ("load film (stock, push / pull)", "top (Y)", "R"),
         ]),
         ("LIGHTING", [
@@ -151,6 +180,55 @@ final class MenuOverlay: NSView {
             ("take / free the mouse", "", "click / Esc"),
         ]),
     ]
+
+    /// The camera bag: collections across the top, their lenses below.
+    private func drawLenses(_ u: CGFloat) {
+        let shelf = lensCollections[lensShelf]
+        let rowH = 3.3 * u
+        let w = min(bounds.width * 0.86, 84 * u)
+        let h = CGFloat(max(shelf.lenses.count, 8)) * rowH + 15 * u
+        let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
+        NSColor(white: 0.08, alpha: 0.96).setFill()
+        NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).fill()
+        text("CAMERA BAG", NSPoint(x: panel.minX + 2 * u, y: panel.minY + 1.5 * u), size: 1.5 * u, color: amber, weight: .bold)
+        // The shelves.
+        shelfRects = []
+        var x = panel.minX + 17 * u
+        for (i, c) in lensCollections.enumerated() {
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 1.05 * u, weight: .semibold)]
+            let tw = NSAttributedString(string: c.name, attributes: attrs).size().width + 2 * u
+            let r = NSRect(x: x, y: panel.minY + 1.2 * u, width: tw, height: 2.2 * u)
+            shelfRects.append(r)
+            if i == lensShelf {
+                amber.withAlphaComponent(0.25).setFill()
+                NSBezierPath(roundedRect: r, xRadius: 0.4 * u, yRadius: 0.4 * u).fill()
+            }
+            text(c.name, NSPoint(x: r.minX + u, y: r.minY + 0.35 * u), size: 1.05 * u,
+                 color: i == lensShelf ? amber : NSColor(white: 0.7, alpha: 1), weight: .semibold)
+            x += tw + 0.6 * u
+        }
+        text(shelf.about, NSPoint(x: panel.minX + 2 * u, y: panel.minY + 4.0 * u), size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
+        lensRects = []
+        let before = lensCollections.prefix(lensShelf).reduce(0) { $0 + $1.lenses.count }
+        for (i, l) in shelf.lenses.enumerated() {
+            let r = NSRect(x: panel.minX + u, y: panel.minY + 6.2 * u + CGFloat(i) * rowH, width: w - 2 * u, height: rowH - 0.4 * u)
+            lensRects.append(r)
+            if i == lensChoice {
+                amber.withAlphaComponent(0.18).setFill()
+                NSBezierPath(roundedRect: r, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
+            }
+            let mounted = before + i == mountedLens
+            text((i == lensChoice ? "▶ " : "  ") + l.name + (mounted ? "  ●" : ""), NSPoint(x: r.minX + u, y: r.minY + 0.4 * u),
+                 size: 1.2 * u, color: i == lensChoice ? amber : .white)
+            let kind = l.projection == .circularFisheye ? "circular fisheye" : l.projection == .fisheye ? "fisheye" : "\(l.blades == 0 ? "round" : "\(l.blades)-blade") iris"
+            let close = l.minFocusM < 1 ? String(format: "%.0f cm", l.minFocusM * 100) : String(format: "%.1f m", l.minFocusM)
+            text("\(kind) · close \(close)", NSPoint(x: r.minX + w * 0.5, y: r.minY + 0.55 * u), size: 0.95 * u,
+                 color: NSColor(white: 0.72, alpha: 1))
+            text(l.inspiredBy, NSPoint(x: r.minX + 3 * u, y: r.minY + 1.95 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1))
+        }
+        text("◀▶ collection   ▲▼ lens   A / Enter / click again: mount   B / Esc back      ● on the camera",
+             NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u), size: 0.9 * u, color: NSColor(white: 0.6, alpha: 1))
+    }
 
     /// Loading a roll: the stocks in the bag, and how to rate the roll.
     private func drawFilm(_ u: CGFloat) {

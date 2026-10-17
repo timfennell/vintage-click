@@ -18,6 +18,7 @@ struct FinderJob {
     var body: CameraBody
     var lighting: LightingPlot
     var fromLight: Int? = nil       // seen from this light's head, not the camera
+    var fisheye = false             // through a fisheye: Spirula's equidistant camera
 }
 
 /// One exposure on its way through the camera: the scene as it was when the
@@ -250,6 +251,11 @@ final class RenderLoop {
         }
     }
 
+    /// Fisheye lenses render through Spirula's equidistant camera; all else is pinhole.
+    private func setCameraModel(_ fisheye: Bool) {
+        if sr_set_camera_model(fisheye ? "FISHEYE" : "PINHOLE") != 0 { print(SpirulaError("camera model")) }
+    }
+
     private func setLens(_ params: [SIMD4<Float>]?) {
         let rc: Int32
         if let p = params {
@@ -345,8 +351,12 @@ final class RenderLoop {
         let packs = plot.lights.prefix(Self.maxLights).map { $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV, up: plot.up) }
         var lt: [SIMD4<Float>] = packs.flatMap(\.head)
         let tables: [SIMD4<Float>] = packs.flatMap(\.table)
-        if g + lt + [SIMD4(plot.lights.map(\.spot).reduce(0, +), 0, 0, 0)] == lastRelight { return }
-        lastRelight = g + lt + [SIMD4(plot.lights.map(\.spot).reduce(0, +), 0, 0, 0)]
+        let spots: Float = plot.lights.reduce(Float(0)) { $0 + $1.spot }
+        var key: [SIMD4<Float>] = g
+        key.append(contentsOf: lt)
+        key.append(SIMD4<Float>(spots, 0, 0, 0))
+        if key == lastRelight { return }
+        lastRelight = key
         if lt.isEmpty { lt = [SIMD4<Float>](repeating: .zero, count: 4) }
         let tableBuf = tables.isEmpty
             ? device.makeBuffer(length: 16, options: .storageModeShared)
@@ -375,9 +385,11 @@ final class RenderLoop {
         guard let slot else { return }
         relight(job.lighting, eye: job.position, body: job.body, quality: .finder)
         setLens(job.lens)
+        setCameraModel(job.fisheye)
         let t0 = CACurrentMediaTime()
         let ok = render(finderSlots[slot].index, view: job.view, fx: job.fx,
                         cx: Float(finderSize.w) / 2, cy: Float(finderSize.h) / 2)
+        setCameraModel(false)
         let ms = (CACurrentMediaTime() - t0) * 1000
         guard ok else { return }
         cond.lock()
@@ -397,7 +409,7 @@ final class RenderLoop {
             SIMD4(l.catsEye, l.soapBubble, l.bladeRotation, l.vignette),
             background,
             SIMD4(0, 1, Float(b.rollNumber * 100 + e.frameNumber), b.exposureStops),
-            SIMD4(l.lateralCA, l.axialCA, 0, 0),
+            SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(h) / 2 : 0, l.obstruction),
         ]
     }
 
@@ -407,7 +419,7 @@ final class RenderLoop {
         let b = e.body
         let (w, h) = e.size
         let n = b.takingAperture
-        let fx = e.camera.focalPixels(width: w)
+        let fx = b.lens.focalPixels(width: w, height: h)
         let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
         relight(e.lighting, eye: e.camera.position, body: b, quality: .photo)
         // Axial colour: with it, each sub-pupil carries one channel, focused
@@ -415,14 +427,21 @@ final class RenderLoop {
         // Splitting the samples by colour needs enough of them: with fewer, each
         // channel's blur comes from different lens points and blotches.
         let channel = b.lens.axialCA > 0 && e.cells.count >= 64 ? e.next % 3 : -1
-        var body = b
-        if channel >= 0 {
-            body.focusM = 1 / (1 / b.focusM + b.lens.axialCA * Float(1 - channel))
-        }
-        let invFocus = body.metresPerUnit / body.focusM
-        setLens(body.lensParams(fNumber: n, focalPx: fx, cells: e.cells.count, table: nil))
-
         let c = e.cells[e.next]
+        var body = b
+        var dioptres = 1 / b.focusM
+        if channel >= 0 { dioptres += b.lens.axialCA * Float(1 - channel) }
+        // Spherical aberration: rays through the rim of the open aperture focus
+        // nearer (a soft-focus glow); it fades as the aperture closes.
+        let open = b.lens.maxAperture / n
+        dioptres += b.lens.sphericalAberration * simd_length_squared(c) * open * open
+        body.focusM = 1 / dioptres
+        let invFocus = body.metresPerUnit / body.focusM
+        // A fisheye has no meaningful depth of field to sample: one look, its own camera.
+        setLens(b.lens.isFisheye ? nil : body.lensParams(fNumber: n, focalPx: fx, cells: e.cells.count, table: nil))
+        setCameraModel(b.lens.isFisheye)
+        defer { setCameraModel(false) }
+
         let d = c * radiusUnits
         var vm = e.camera.viewMatrix
         vm[3] -= d.x

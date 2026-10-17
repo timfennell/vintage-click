@@ -15,7 +15,8 @@
 //   O[2] = (focal m, N, N wide open, blades)
 //   O[3] = (cat's eye, soap bubble, blade rotation, vignette)
 //   O[4] = background (display rgb)  O[5] = (prism radius px, finder brightness, seed, exposure stops)
-//   O[6] = (lateral colour at the corner, -, -, -)
+//   O[6] = (lateral colour at the corner, axial colour, circular fisheye's image radius px (0: none),
+//           mirror lens's central obstruction in aperture radii)
 //   O[7] = finder only: where the image sits in the window (origin px, scale, corner radius px)
 // Film (FilmStock.packed): F[0..2] crosstalk rows, F[3] = (balance, b&w),
 //   F[4] = (b&w mix, saturation), F[5] = (contrast, black lift, shoulder, grain),
@@ -107,6 +108,7 @@ float pupil(float2 l, float2 q, constant float4* O) {
     } else if (r > 1) {
         return 0;
     }
+    if (r < O[6].w) return 0;       // a mirror lens's secondary mirror
     float open = O[2].z / O[2].y;   // current radius in wide-open radii
     if (length(l * open + O[3].x * q) > 1) return 0;
     float soap = O[3].y;
@@ -256,6 +258,8 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
     float2 q = field(p, O);
     float vig = 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
     col *= vig * (1 - 0.22 * dot(q, q)) * O[5].y;
+    // A circular fisheye's image is a disc: black beyond it.
+    if (O[6].z > 0) col *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(p - c));
     // The window's edge: a soft dark lip, then the surround.
     col *= smoothstep(0.0, O[7].w * 0.9, -edge) * 0.25 + 0.75;
     float3 outc = to_srgb(col);
@@ -347,6 +351,7 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
         }
         halo /= 32;
     }
+    if (O[6].z > 0) lin *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(pc - c));
     float3 col = film_look(lin, halo, pc, uint(O[5].z), O[0].y, F);
     out[idx(p, O)] = uchar4(uchar3(round(col * 255)), 255);
 }
@@ -370,6 +375,7 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
     lin.g = acc_at(acc, pc, O).g;
     lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
     lin = max(lin * D.rgb * expo * vig, 0.0);
+    if (O[6].z > 0) lin *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(pc - c));
     uint i = idx(p, O) * 3;
     out[i] = half(min(lin.r, 60000.0)); out[i + 1] = half(min(lin.g, 60000.0)); out[i + 2] = half(min(lin.b, 60000.0));
 }

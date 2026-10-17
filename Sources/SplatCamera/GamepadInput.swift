@@ -168,7 +168,7 @@ final class GamepadInput {
                 s.look = .zero
                 s.shoulders = 0
             case .camera:
-                keys += [(.keyR, .y), (.escape, .menu), (.comma, .slower), (.period, .faster)]
+                keys += [(.keyR, .y), (.keyB, .x), (.escape, .menu), (.comma, .slower), (.period, .faster)]
             case .lighting:
                 keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .removeLight), (.keyG, .l3), (.escape, .menu),
                          (.comma, .slower), (.period, .faster)]
