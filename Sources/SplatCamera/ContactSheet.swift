@@ -465,6 +465,7 @@ final class ContactSheetView: NSView {
             NSImage(cgImage: seen, size: NSSize(width: 2 * R, height: 2 * R))
                 .draw(in: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R))
         }
+        loupeReticle(c, R)
         // Specks on the loupe's own glass, and its flare off the rim.
         var lr = Grit(seed: 77)
         for _ in 0..<7 {
@@ -475,13 +476,6 @@ final class ContactSheetView: NSView {
         NSGradient(colors: [NSColor(white: 1, alpha: 0.10), NSColor(white: 1, alpha: 0)])?
             .draw(fromCenter: NSPoint(x: c.x - R * 0.45, y: c.y - R * 0.5), radius: 0,
                   toCenter: NSPoint(x: c.x - R * 0.45, y: c.y - R * 0.5), radius: R * 0.5, options: [])
-        NSGraphicsContext.restoreGraphicsState()
-        // Lens edge falloff and the black barrel.
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)).addClip()
-        NSGradient(colors: [NSColor(white: 0, alpha: 0), NSColor(white: 0, alpha: 0), NSColor(white: 0, alpha: 0.45)],
-                   atLocations: [0, 0.8, 1], colorSpace: .deviceRGB)?
-            .draw(fromCenter: c, radius: 0, toCenter: c, radius: R, options: [])
         NSGraphicsContext.restoreGraphicsState()
         loupeBody(c, R)
 
@@ -526,13 +520,66 @@ final class ContactSheetView: NSView {
         return p
     }
 
-    /// The zoom tab swings round the barrel with the power, as a lens's
-    /// focusing tab does: 2x at the upper right, 10x low on the right (radians, y down).
-    private static let tabRange: (CGFloat, CGFloat) = (-0.25, 1.25)
+    /// The power, read inside the optic: a scale printed on the glass along the
+    /// bottom, and a fine needle swinging up to it from below the field.
+    private func loupeReticle(_ c: CGPoint, _ R: CGFloat) {
+        let pivot = NSPoint(x: c.x, y: c.y + R * 1.02)
+        let rr = R * 0.5
+        func angle(_ p: CGFloat) -> CGFloat {
+            let t = (log(p) - log(2)) / (log(10) - log(2))
+            return -.pi / 2 - 0.62 + 1.24 * max(0, min(1, t))     // up, from left to right
+        }
+        let ink = NSColor(white: 0.06, alpha: 0.8)
+        let halo = NSShadow()
+        halo.shadowColor = NSColor(white: 1, alpha: 0.35)
+        halo.shadowBlurRadius = 1.5
+        halo.shadowOffset = .zero
+        NSGraphicsContext.saveGraphicsState()
+        halo.set()
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: pivot, radius: rr, startAngle: angle(2) * 180 / .pi, endAngle: angle(10) * 180 / .pi)
+        arc.lineWidth = 1
+        ink.setStroke()
+        arc.stroke()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont(name: "Futura-Medium", size: R * 0.045) ?? NSFont.systemFont(ofSize: R * 0.045),
+            .foregroundColor: ink,
+        ]
+        for p in stride(from: 2.0, through: 10.0, by: 0.5) {
+            let a = angle(CGFloat(p))
+            let major = [2.0, 3, 4, 6, 8, 10].contains(p)
+            let t = NSBezierPath()
+            t.move(to: NSPoint(x: pivot.x + cos(a) * rr, y: pivot.y + sin(a) * rr))
+            t.line(to: NSPoint(x: pivot.x + cos(a) * (rr + R * (major ? 0.04 : 0.022)), y: pivot.y + sin(a) * (rr + R * (major ? 0.04 : 0.022))))
+            t.lineWidth = major ? 1.1 : 0.7
+            t.stroke()
+            if major {
+                let str = NSAttributedString(string: p == 10 ? "10×" : "\(Int(p))", attributes: attrs)
+                let sz = str.size()
+                let q = NSPoint(x: pivot.x + cos(a) * (rr + R * 0.075), y: pivot.y + sin(a) * (rr + R * 0.075))
+                str.draw(at: NSPoint(x: q.x - sz.width / 2, y: q.y - sz.height / 2))
+            }
+        }
+        // The needle: fine, dark, from below the field to just past the scale.
+        let a = angle(loupePower)
+        let needle = NSBezierPath()
+        needle.move(to: NSPoint(x: pivot.x + cos(a) * R * 0.2, y: pivot.y + sin(a) * R * 0.2))
+        needle.line(to: NSPoint(x: pivot.x + cos(a) * (rr + R * 0.035), y: pivot.y + sin(a) * (rr + R * 0.035)))
+        needle.lineWidth = 1.3
+        NSColor(white: 0.02, alpha: 0.9).setStroke()
+        needle.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// The knob's place round the barrel for a power (radians, y down), the
+    /// same sweep as the needle's.
+    private static let tabRange: (CGFloat, CGFloat) = (.pi / 2 + 0.62, .pi / 2 - 0.62)
     private static func tabAngle(_ power: CGFloat) -> CGFloat {
         let t = (log(power) - log(2)) / (log(10) - log(2))
         return tabRange.0 + (tabRange.1 - tabRange.0) * max(0, min(1, t))
     }
+    /// The zoom knob rides round the bottom of the barrel with the needle
+    /// inside (geared to it): lower left at 2x, lower right at 10x.
     private var knobAngle: CGFloat { Self.tabAngle(loupePower) }
 
     /// The loupe stands on the table: its shadow, soft, down and to the right.
@@ -546,14 +593,8 @@ final class ContactSheetView: NSView {
         sh.set()
         NSColor(white: 0.1, alpha: 1).setFill()
         ringPath(c, R, R + band).fill()
-        let k = NSPoint(x: c.x + cos(knobAngle) * (R + band + R * 0.15), y: c.y + sin(knobAngle) * (R + band + R * 0.15))
-        NSBezierPath(ovalIn: NSRect(x: k.x - R * 0.085, y: k.y - R * 0.085, width: R * 0.17, height: R * 0.17)).fill()
-        let arm = NSBezierPath()
-        arm.move(to: NSPoint(x: c.x + cos(knobAngle - 0.06) * (R + band * 0.8), y: c.y + sin(knobAngle - 0.06) * (R + band * 0.8)))
-        arm.line(to: k)
-        arm.line(to: NSPoint(x: c.x + cos(knobAngle + 0.06) * (R + band * 0.8), y: c.y + sin(knobAngle + 0.06) * (R + band * 0.8)))
-        arm.close()
-        arm.fill()
+        let k = NSPoint(x: c.x + cos(knobAngle) * (R + band + R * 0.06), y: c.y + sin(knobAngle) * (R + band + R * 0.06))
+        NSBezierPath(ovalIn: NSRect(x: k.x - R * 0.09, y: k.y - R * 0.09, width: R * 0.18, height: R * 0.18)).fill()
         NSGraphicsContext.restoreGraphicsState()
     }
 
@@ -633,70 +674,76 @@ final class ContactSheetView: NSView {
             NSGraphicsContext.restoreGraphicsState()
             a += (w + band * 0.03) / r
         }
-        NSGraphicsContext.restoreGraphicsState()
-        // Bevels: a bright lip where the glass sits, a dark outer edge.
-        let lip = NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R))
-        lip.lineWidth = 1.5
-        NSColor(white: 0.55, alpha: 0.6).setStroke()
-        lip.stroke()
-        let outer = NSBezierPath(ovalIn: NSRect(x: c.x - R - band, y: c.y - R - band, width: 2 * (R + band), height: 2 * (R + band)))
-        outer.lineWidth = 1.2
-        NSColor(white: 0, alpha: 0.8).setStroke()
-        outer.stroke()
-
-        // The power scale engraved round the barrel's edge, read against the tab.
-        let scaleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont(name: "Futura-Medium", size: band * 0.26) ?? NSFont.systemFont(ofSize: band * 0.26),
-            .foregroundColor: NSColor(white: 0.88, alpha: 0.6),
-        ]
-        for p in [2, 3, 4, 6, 8, 10] {
-            let a = Self.tabAngle(CGFloat(p)) - 0.11
-            let tick = NSBezierPath()
-            tick.move(to: NSPoint(x: c.x + cos(a) * (R + band * 0.08), y: c.y + sin(a) * (R + band * 0.08)))
-            tick.line(to: NSPoint(x: c.x + cos(a) * (R + band * 0.3), y: c.y + sin(a) * (R + band * 0.3)))
-            tick.lineWidth = 1
-            NSColor(white: 0.88, alpha: 0.55).setStroke()
-            tick.stroke()
-            let str = NSAttributedString(string: "\(p)", attributes: scaleAttrs)
-            let sz = str.size()
-            let q = NSPoint(x: c.x + cos(a) * (R + band * 0.52), y: c.y + sin(a) * (R + band * 0.52))
+        // Gloss: the enamel mirrors the room. A soft window of light along the
+        // crown at the upper left with a sharp core, a dimmer one opposite.
+        func gleam(from a0: CGFloat, to a1: CGFloat, at r: CGFloat, width: CGFloat, alpha: CGFloat, blur: CGFloat) {
+            let arc = NSBezierPath()
+            arc.appendArc(withCenter: c, radius: r, startAngle: a0, endAngle: a1)
+            arc.lineWidth = width
+            arc.lineCapStyle = .round
+            let glow = NSShadow()
+            glow.shadowColor = NSColor(white: 1, alpha: alpha)
+            glow.shadowBlurRadius = blur
+            glow.shadowOffset = .zero
             NSGraphicsContext.saveGraphicsState()
-            let t = NSAffineTransform()
-            t.translateX(by: q.x, yBy: q.y)
-            t.rotate(byRadians: a + .pi / 2)
-            t.concat()
-            str.draw(at: NSPoint(x: -sz.width / 2, y: -sz.height / 2))
+            glow.set()
+            NSColor(white: 1, alpha: alpha).setStroke()
+            arc.stroke()
             NSGraphicsContext.restoreGraphicsState()
         }
-
-        // The zoom tab: a flat arm off the barrel ending in a knurled button
-        // (a lock button in its middle), swinging round with the power.
-        let dir = NSPoint(x: cos(knobAngle), y: sin(knobAngle))
-        let tipD = R + band + R * 0.15
-        let k = NSPoint(x: c.x + dir.x * tipD, y: c.y + dir.y * tipD)
-        let arm = NSBezierPath()
-        let w0: CGFloat = 0.075
-        arm.move(to: NSPoint(x: c.x + cos(knobAngle - w0) * (R + band * 0.55), y: c.y + sin(knobAngle - w0) * (R + band * 0.55)))
-        arm.line(to: NSPoint(x: k.x - dir.y * R * 0.045, y: k.y + dir.x * R * 0.045))
-        arm.line(to: NSPoint(x: k.x + dir.y * R * 0.045, y: k.y - dir.x * R * 0.045))
-        arm.line(to: NSPoint(x: c.x + cos(knobAngle + w0) * (R + band * 0.55), y: c.y + sin(knobAngle + w0) * (R + band * 0.55)))
-        arm.close()
-        NSGraphicsContext.saveGraphicsState()
-        arm.addClip()
-        NSGradient(colors: [NSColor(white: 0.20, alpha: 1), NSColor(white: 0.05, alpha: 1)])?.draw(in: arm, angle: -50)
+        gleam(from: 196, to: 252, at: R + band * 0.45, width: band * 0.16, alpha: 0.30, blur: band * 0.35)
+        gleam(from: 205, to: 238, at: R + band * 0.42, width: band * 0.04, alpha: 0.85, blur: band * 0.06)
+        gleam(from: 15, to: 60, at: R + band * 0.5, width: band * 0.1, alpha: 0.12, blur: band * 0.3)
+        // Worn brass shines where it faces the light.
+        var shine = Grit(seed: 1959)
+        for _ in 0..<26 {
+            let a = (shine.unit() < 0.6 ? -0.9 + shine.signed() * 0.9 : shine.unit() * 2 * .pi)
+            let span = 0.03 + 0.16 * shine.unit()
+            let r = R + band * (0.9 + 0.12 * shine.unit())
+            _ = shine.unit(); _ = shine.unit()
+            let facing = max(0, cos(a + span / 2 - (-2.3)))        // light from the upper left
+            guard facing > 0.2 else { continue }
+            let p = NSBezierPath()
+            p.appendArc(withCenter: c, radius: r, startAngle: (a + span * 0.3) * 180 / .pi, endAngle: (a + span * 0.7) * 180 / .pi)
+            p.lineWidth = band * 0.03
+            NSColor(calibratedRed: 1, green: 0.93, blue: 0.7, alpha: 0.75 * facing).setStroke()
+            p.stroke()
+        }
         NSGraphicsContext.restoreGraphicsState()
-        arm.lineWidth = 1.6
-        Self.brass.withAlphaComponent(0.55).setStroke()
-        arm.stroke()
-        // The index line on the tab, pointing at the scale.
-        let idx = NSBezierPath()
-        idx.move(to: NSPoint(x: c.x + dir.x * (R + band * 0.6), y: c.y + dir.y * (R + band * 0.6)))
-        idx.line(to: NSPoint(x: c.x + dir.x * (R + band * 1.15), y: c.y + dir.y * (R + band * 1.15)))
-        idx.lineWidth = 1.4
-        NSColor(white: 0.9, alpha: 0.7).setStroke()
-        idx.stroke()
+        // Bevels: the inner lip and the outer edge catch the light table's glow
+        // from below (bright all round), the lip brightest toward the light.
+        let lip = NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R))
+        lip.lineWidth = 2.2
+        NSColor(white: 0.8, alpha: 0.45).setStroke()
+        lip.stroke()
+        let lipGleam = NSBezierPath()
+        lipGleam.appendArc(withCenter: c, radius: R + 1, startAngle: 190, endAngle: 270)
+        lipGleam.lineWidth = 1.6
+        NSColor(white: 1, alpha: 0.8).setStroke()
+        lipGleam.stroke()
+        let outer = NSBezierPath(ovalIn: NSRect(x: c.x - R - band, y: c.y - R - band, width: 2 * (R + band), height: 2 * (R + band)))
+        outer.lineWidth = 2
+        NSColor(calibratedRed: 0.85, green: 0.88, blue: 0.95, alpha: 0.35).setStroke()
+        outer.stroke()
+        let outerDark = NSBezierPath(ovalIn: NSRect(x: c.x - R - band + 1.5, y: c.y - R - band + 1.5,
+                                                    width: 2 * (R + band) - 3, height: 2 * (R + band) - 3))
+        outerDark.lineWidth = 1
+        NSColor(white: 0, alpha: 0.7).setStroke()
+        outerDark.stroke()
+
+        // The zoom knob: a knurled button on a short neck off the barrel.
+        let dir = NSPoint(x: cos(knobAngle), y: sin(knobAngle))
+        let k = NSPoint(x: c.x + dir.x * (R + band + R * 0.06), y: c.y + dir.y * (R + band + R * 0.06))
+        let neck = NSBezierPath()
+        neck.move(to: NSPoint(x: c.x + cos(knobAngle - 0.035) * (R + band * 0.9), y: c.y + sin(knobAngle - 0.035) * (R + band * 0.9)))
+        neck.line(to: NSPoint(x: k.x - dir.y * R * 0.03, y: k.y + dir.x * R * 0.03))
+        neck.line(to: NSPoint(x: k.x + dir.y * R * 0.03, y: k.y - dir.x * R * 0.03))
+        neck.line(to: NSPoint(x: c.x + cos(knobAngle + 0.035) * (R + band * 0.9), y: c.y + sin(knobAngle + 0.035) * (R + band * 0.9)))
+        neck.close()
+        NSColor(white: 0.1, alpha: 1).setFill()
+        neck.fill()
         // The button, seen from above: knurled rim, domed top, worn to brass at the edge.
-        let kr = R * 0.075
+        let kr = R * 0.085
         let rim = NSBezierPath(ovalIn: NSRect(x: k.x - kr, y: k.y - kr, width: 2 * kr, height: 2 * kr))
         NSGraphicsContext.saveGraphicsState()
         rim.addClip()
@@ -727,8 +774,15 @@ final class ContactSheetView: NSView {
         let lb = capR * 0.45
         Self.brass.withAlphaComponent(0.85).setFill()
         NSBezierPath(ovalIn: NSRect(x: k.x - lb, y: k.y - lb, width: 2 * lb, height: 2 * lb)).fill()
-        NSColor(white: 1, alpha: 0.35).setFill()
+        NSColor(white: 1, alpha: 0.6).setFill()
         NSBezierPath(ovalIn: NSRect(x: k.x - lb * 0.6, y: k.y - lb * 0.7, width: lb * 0.7, height: lb * 0.6)).fill()
+        // A glint on the cap and along the arm, toward the light.
+        let glint = NSBezierPath()
+        glint.appendArc(withCenter: k, radius: capR * 0.8, startAngle: 200, endAngle: 250)
+        glint.lineWidth = capR * 0.18
+        glint.lineCapStyle = .round
+        NSColor(white: 1, alpha: 0.55).setStroke()
+        glint.stroke()
     }
 
     private var tableCache: (size: NSSize, image: CGImage)?
@@ -856,11 +910,40 @@ final class ContactSheetView: NSView {
         let soft = fringed.clampedToExtent().applyingFilter("CIMaskedVariableBlur", parameters: [
             "inputMask": mask, kCIInputRadiusKey: 4.5 * scale,
         ]).cropped(to: img.extent)
-        // The light falling off toward the edge.
-        let dim = soft.applyingFilter("CIVignetteEffect", parameters: [
-            kCIInputCenterKey: mid, kCIInputRadiusKey: half * 1.05, kCIInputIntensityKey: 0.6, "inputFalloff": 0.4,
+        // The light falling off: smoothly from the middle (cos^4 of the angle
+        // off axis), then faster in the last stretch where the barrel cuts in.
+        let dim = soft.applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: CIImage(cgImage: falloffMask(side)),
         ])
         return ci.createCGImage(dim, from: img.extent)
+    }
+
+    private var falloffCache: (side: Int, image: CGImage)?
+
+    private func falloffMask(_ side: Int) -> CGImage {
+        if let f = falloffCache, f.side == side { return f.image }
+        var px = [UInt8](repeating: 255, count: side * side * 4)
+        let h = Float(side) / 2
+        for y in 0..<side {
+            for x in 0..<side {
+                let r = (((Float(x) + 0.5 - h) * (Float(x) + 0.5 - h) + (Float(y) + 0.5 - h) * (Float(y) + 0.5 - h)).squareRoot()) / h
+                let t = 0.62 * r                              // tan of the angle off axis at that radius
+                let c2 = 1 / (1 + t * t)
+                var v = c2 * c2                               // cos^4
+                let e = max(0, min(1, (r - 0.86) / 0.14))
+                v *= 1 - 0.55 * e * e * (3 - 2 * e)            // the barrel's own shading at the rim
+                let i = (y * side + x) * 4
+                // A touch warm as it darkens, as old glass is.
+                px[i] = UInt8(max(0, min(255, v * 255 + (1 - v) * 10)))
+                px[i + 1] = UInt8(max(0, min(255, v * 255)))
+                px[i + 2] = UInt8(max(0, min(255, v * 255 - (1 - v) * 14)))
+            }
+        }
+        let ctx = CGContext(data: &px, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        let img = ctx.makeImage()!
+        falloffCache = (side, img)
+        return img
     }
 
     private func label(_ s: String, at p: NSPoint, size: CGFloat, color: NSColor) {
