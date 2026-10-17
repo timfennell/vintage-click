@@ -458,6 +458,7 @@ final class ContactSheetView: NSView {
         // The loupe: the table under it, magnified, from the full-size frames.
         let c = loupeCentre ?? CGPoint(x: b.midX, y: b.midY)
         let R = b.height * 0.2
+        loupeShadow(c, R)
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)).addClip()
         if let seen = loupeView(L, centre: c, radius: R) {
@@ -482,14 +483,7 @@ final class ContactSheetView: NSView {
                    atLocations: [0, 0.8, 1], colorSpace: .deviceRGB)?
             .draw(fromCenter: c, radius: 0, toCenter: c, radius: R, options: [])
         NSGraphicsContext.restoreGraphicsState()
-        let barrel = NSBezierPath(ovalIn: NSRect(x: c.x - R - 7, y: c.y - R - 7, width: 2 * R + 14, height: 2 * R + 14))
-        barrel.lineWidth = 14
-        NSColor(white: 0.08, alpha: 0.95).setStroke()
-        barrel.stroke()
-        let rim = NSBezierPath(ovalIn: NSRect(x: c.x - R - 14, y: c.y - R - 14, width: 2 * R + 28, height: 2 * R + 28))
-        rim.lineWidth = 1.5
-        NSColor(white: 0.55, alpha: 0.9).setStroke()
-        rim.stroke()
+        loupeBody(c, R)
 
         // The session, how many films, and the chosen frame (the edge print names each film).
         let rollsHere = sessionRolls.map { rolls[$0] }
@@ -522,6 +516,181 @@ final class ContactSheetView: NSView {
     }
 
     // MARK: the table and the loupe, as things
+
+    private static let brass = NSColor(calibratedRed: 0.74, green: 0.56, blue: 0.26, alpha: 1)
+
+    private func ringPath(_ c: CGPoint, _ r0: CGFloat, _ r1: CGFloat) -> NSBezierPath {
+        let p = NSBezierPath(ovalIn: NSRect(x: c.x - r1, y: c.y - r1, width: 2 * r1, height: 2 * r1))
+        p.append(NSBezierPath(ovalIn: NSRect(x: c.x - r0, y: c.y - r0, width: 2 * r0, height: 2 * r0)))
+        p.windingRule = .evenOdd
+        return p
+    }
+
+    /// Where the zoom knob sticks out (radians, y down: lower right).
+    private let knobAngle: CGFloat = 0.62
+
+    /// The loupe stands on the table: its shadow, soft, down and to the right.
+    private func loupeShadow(_ c: CGPoint, _ R: CGFloat) {
+        let band = R * 0.16
+        let sh = NSShadow()
+        sh.shadowColor = NSColor(white: 0, alpha: 0.45)
+        sh.shadowBlurRadius = R * 0.12
+        sh.shadowOffset = NSSize(width: R * 0.05, height: R * 0.07)
+        NSGraphicsContext.saveGraphicsState()
+        sh.set()
+        NSColor(white: 0.1, alpha: 1).setFill()
+        ringPath(c, R, R + band).fill()
+        let k = NSPoint(x: c.x + cos(knobAngle) * (R + band + R * 0.11), y: c.y + sin(knobAngle) * (R + band + R * 0.11))
+        NSBezierPath(ovalIn: NSRect(x: k.x - R * 0.12, y: k.y - R * 0.13, width: R * 0.24, height: R * 0.26)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// The loupe's barrel: black enamel over brass, rounded and lit from the
+    /// upper left, worn through to the brass where hands hold it, chipped and
+    /// scratched, knurled, engraved; and the zoom knob, which turns with the power.
+    private func loupeBody(_ c: CGPoint, _ R: CGFloat) {
+        let band = R * 0.16
+        let ring = ringPath(c, R, R + band)
+        var rng = Grit(seed: 1959)
+        NSGraphicsContext.saveGraphicsState()
+        ring.addClip()
+        // Enamel: a rounded profile (dark at both edges, a sheen along the crown).
+        NSGradient(colors: [NSColor(white: 0.03, alpha: 1), NSColor(white: 0.17, alpha: 1), NSColor(white: 0.06, alpha: 1),
+                            NSColor(white: 0.02, alpha: 1)],
+                   atLocations: [0, 0.45, 0.75, 1], colorSpace: .deviceRGB)?
+            .draw(fromCenter: c, radius: R, toCenter: c, radius: R + band, options: [])
+        // Light from the upper left.
+        NSGradient(colors: [NSColor(white: 1, alpha: 0.16), NSColor(white: 1, alpha: 0), NSColor(white: 0, alpha: 0.25)])?
+            .draw(in: NSRect(x: c.x - R - band, y: c.y - R - band, width: 2 * (R + band), height: 2 * (R + band)), angle: -50)
+        // Knurling on the outer grip.
+        for k in 0..<240 {
+            let a = CGFloat(k) / 240 * 2 * .pi
+            let p = NSBezierPath()
+            p.move(to: NSPoint(x: c.x + cos(a) * (R + band * 0.72), y: c.y + sin(a) * (R + band * 0.72)))
+            p.line(to: NSPoint(x: c.x + cos(a) * (R + band), y: c.y + sin(a) * (R + band)))
+            p.lineWidth = 0.8
+            NSColor(white: k % 2 == 0 ? 0.0 : 0.3, alpha: 0.35).setStroke()
+            p.stroke()
+        }
+        // Worn through to the brass: along the outer edge, most where it is handled.
+        for _ in 0..<26 {
+            let a = (rng.unit() < 0.6 ? -0.9 + rng.signed() * 0.9 : rng.unit() * 2 * .pi)
+            let span = 0.03 + 0.16 * rng.unit()
+            let r = R + band * (0.9 + 0.12 * rng.unit())
+            let p = NSBezierPath()
+            p.appendArc(withCenter: c, radius: r, startAngle: a * 180 / .pi, endAngle: (a + span) * 180 / .pi)
+            p.lineWidth = band * (0.06 + 0.16 * rng.unit())
+            p.lineCapStyle = .round
+            Self.brass.withAlphaComponent(0.4 + 0.5 * rng.unit()).setStroke()
+            p.stroke()
+        }
+        // Chips, and scratches across the crown.
+        for _ in 0..<18 {
+            let a = rng.unit() * 2 * .pi, d = R + band * rng.unit(), r = band * (0.03 + 0.07 * rng.unit())
+            Self.brass.withAlphaComponent(0.4 + 0.4 * rng.unit()).setFill()
+            NSBezierPath(ovalIn: NSRect(x: c.x + cos(a) * d - r, y: c.y + sin(a) * d - r * 0.7, width: 2 * r, height: 1.4 * r)).fill()
+        }
+        for _ in 0..<30 {
+            let a = rng.unit() * 2 * .pi, d = R + band * (0.15 + 0.7 * rng.unit()), l = band * (0.3 + 1.2 * rng.unit())
+            let t = a + .pi / 2 + rng.signed() * 0.6
+            let p = NSBezierPath()
+            let o = NSPoint(x: c.x + cos(a) * d, y: c.y + sin(a) * d)
+            p.move(to: o)
+            p.line(to: NSPoint(x: o.x + cos(t) * l, y: o.y + sin(t) * l))
+            p.lineWidth = 0.5
+            NSColor(white: rng.unit() < 0.7 ? 0.55 : 0.0, alpha: 0.35).setStroke()
+            p.stroke()
+        }
+        // Engraved, the paint mostly worn out of the letters.
+        let words = "OHI  LOUPE  4 – 10×  JAPAN"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont(name: "Futura-Medium", size: band * 0.24) ?? NSFont.systemFont(ofSize: band * 0.24),
+            .foregroundColor: NSColor(white: 0.85, alpha: 0.55),
+        ]
+        var a: CGFloat = -.pi / 2 - 0.42
+        for ch in words {
+            let str = NSAttributedString(string: String(ch), attributes: attrs)
+            let w = str.size().width
+            let r = R + band * 0.38
+            NSGraphicsContext.saveGraphicsState()
+            let t = NSAffineTransform()
+            t.translateX(by: c.x + cos(a) * r, yBy: c.y + sin(a) * r)
+            t.rotate(byRadians: a + .pi / 2)
+            t.concat()
+            str.draw(at: NSPoint(x: -w / 2, y: -str.size().height / 2))
+            NSGraphicsContext.restoreGraphicsState()
+            a += (w + band * 0.03) / r
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        // Bevels: a bright lip where the glass sits, a dark outer edge.
+        let lip = NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R))
+        lip.lineWidth = 1.5
+        NSColor(white: 0.55, alpha: 0.6).setStroke()
+        lip.stroke()
+        let outer = NSBezierPath(ovalIn: NSRect(x: c.x - R - band, y: c.y - R - band, width: 2 * (R + band), height: 2 * (R + band)))
+        outer.lineWidth = 1.2
+        NSColor(white: 0, alpha: 0.8).setStroke()
+        outer.stroke()
+
+        // The zoom knob: a short neck, then a knurled drum; it turns with the power.
+        let dir = NSPoint(x: cos(knobAngle), y: sin(knobAngle))
+        let across = NSPoint(x: -dir.y, y: dir.x)
+        let base = NSPoint(x: c.x + dir.x * (R + band * 0.9), y: c.y + dir.y * (R + band * 0.9))
+        func at(_ along: CGFloat, _ side: CGFloat) -> NSPoint {
+            NSPoint(x: base.x + dir.x * along + across.x * side, y: base.y + dir.y * along + across.y * side)
+        }
+        let neck = NSBezierPath()
+        let nl = R * 0.07
+        neck.move(to: at(0, -R * 0.06)); neck.line(to: at(nl, -R * 0.045))
+        neck.line(to: at(nl, R * 0.045)); neck.line(to: at(0, R * 0.06)); neck.close()
+        NSColor(white: 0.12, alpha: 1).setFill()
+        neck.fill()
+        Self.brass.withAlphaComponent(0.35).setStroke()
+        neck.lineWidth = 0.8
+        neck.stroke()
+        // The drum, seen from the side: a rounded block, knurled across.
+        let w = R * 0.13, h = R * 0.24
+        let drum = NSBezierPath()
+        drum.move(to: at(nl * 0.9, -h / 2)); drum.line(to: at(nl * 0.9 + w, -h / 2))
+        drum.line(to: at(nl * 0.9 + w, h / 2)); drum.line(to: at(nl * 0.9, h / 2)); drum.close()
+        NSGraphicsContext.saveGraphicsState()
+        drum.addClip()
+        NSGradient(colors: [NSColor(white: 0.04, alpha: 1), NSColor(white: 0.22, alpha: 1), NSColor(white: 0.05, alpha: 1)])?
+            .draw(in: drum, angle: atan2(across.y, across.x) * 180 / .pi)
+        // Ridges move as it turns: the power sets their phase.
+        let phase = log(loupePower) * 2.4
+        for k in -16...16 {
+            let side = (CGFloat(k) + phase.truncatingRemainder(dividingBy: 1)) / 16 * h / 2
+            let p = NSBezierPath()
+            p.move(to: at(nl * 0.9, side)); p.line(to: at(nl * 0.9 + w, side))
+            p.lineWidth = 1.4
+            NSColor(white: k % 2 == 0 ? 0.0 : 0.4, alpha: 0.7).setStroke()
+            p.stroke()
+        }
+        // Brass through the paint at its ends and edges.
+        for edge in [CGFloat(-0.5), 0.5] {
+            let p = NSBezierPath()
+            p.move(to: at(nl * 0.9, edge * h)); p.line(to: at(nl * 0.9 + w, edge * h))
+            p.lineWidth = band * 0.08
+            Self.brass.withAlphaComponent(0.6).setStroke()
+            p.stroke()
+        }
+        let tipEnd = NSBezierPath()
+        tipEnd.move(to: at(nl * 0.9 + w, -h / 2)); tipEnd.line(to: at(nl * 0.9 + w, h / 2))
+        tipEnd.lineWidth = band * 0.1
+        Self.brass.withAlphaComponent(0.45).setStroke()
+        tipEnd.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+        // Its index dot, turning round with the drum.
+        let turn = phase * 2 * .pi / 3
+        let dotSide = sin(turn) * h * 0.42
+        if cos(turn) > -0.2 {
+            let d = at(nl * 0.9 + w * 0.5, dotSide)
+            let r = R * 0.014
+            NSColor(white: 0.92, alpha: 0.75 * max(0.3, cos(turn))).setFill()
+            NSBezierPath(ovalIn: NSRect(x: d.x - r, y: d.y - r, width: 2 * r, height: 2 * r)).fill()
+        }
+    }
 
     private var tableCache: (size: NSSize, image: CGImage)?
 
