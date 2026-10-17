@@ -84,10 +84,13 @@ if let i = args.firstIndex(of: "--photometry"), i + 1 < args.count {
 // Trace the light heads' optics in the background while the scan loads.
 for head in lightKit.indices { DispatchQueue.global(qos: .userInitiated).async { _ = Photometry.tablesFor(head) } }
 
-/// Exit, after the renderer has stopped (never mid-render).
+/// Exit, after the renderer has stopped (never mid-render), and without C++
+/// teardown: the GPU device's destructors racing a render crashed the app.
 func quit(_ code: Int32 = 0) -> Never {
     viewer?.loop.shutdown()
-    exit(code)
+    UserDefaults.standard.synchronize()
+    fflush(stdout)
+    _exit(code)
 }
 
 let app = NSApplication.shared
@@ -323,7 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var opened = false
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-    func applicationWillTerminate(_ notification: Notification) { viewer?.loop.shutdown() }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { quit() }
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
         // A path given on the command line arrives here too: it starts below, with its flags.

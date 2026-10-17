@@ -170,7 +170,7 @@ final class RenderLoop {
         stopping = true
         cond.signal()
         cond.unlock()
-        _ = stopped.wait(timeout: .now() + 10)
+        stopped.wait()
     }
 
     /// Asks for a finder frame of this view (replacing any not yet started).

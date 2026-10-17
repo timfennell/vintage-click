@@ -12,6 +12,16 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>GCSupportsControllerUserInteraction</key><true/>
+    <key>NSHumanReadableCopyright</key><string>GPL-3.0. Renderer: Spirula Studio (GPL-3.0).</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Gaussian splat scan</string>
+            <key>CFBundleTypeExtensions</key><array><string>ply</string></array>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+        </dict>
+    </array>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
