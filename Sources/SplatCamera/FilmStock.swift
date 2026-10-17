@@ -23,6 +23,29 @@ struct FilmStock {
     var halation: Float = 0
     var halationTint = SIMD3<Float>(1.0, 0.25, 0.05)
 
+    /// The stock as the lab develops it after rating it `push` stops faster
+    /// (+) or slower (-) than box speed. Pushing (longer development) raises
+    /// contrast, blocks up the shadows, burns highlights sooner, coarsens the
+    /// grain and lifts the fog; pulling softens contrast and fines the grain.
+    func developed(push p: Int) -> FilmStock {
+        guard p != 0 else { return self }
+        var s = self
+        let x = Float(p)
+        if p > 0 {
+            s.contrast *= 1 + 0.12 * x
+            s.toe *= 1 + 0.06 * x
+            s.shoulder *= 1 + 0.08 * x
+            s.grain *= 1 + 0.3 * x
+            s.blackLift += 0.006 * x
+            s.saturation *= 1 + 0.04 * x
+        } else {
+            s.contrast *= 1 + 0.10 * x
+            s.shoulder *= 1 + 0.08 * x
+            s.grain *= 1 + 0.15 * x
+        }
+        return s
+    }
+
     /// The stock packed for the shaders (see Shaders.swift, `Film`).
     var packed: [SIMD4<Float>] {
         let m = crosstalk.transpose   // rows

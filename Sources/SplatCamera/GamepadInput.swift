@@ -147,6 +147,7 @@ final class GamepadInput {
             switch keyMode {
             case .menu:
                 keys = [(.upArrow, .up), (.downArrow, .down), (.keyW, .up), (.keyS, .down),
+                        (.leftArrow, .left), (.rightArrow, .right), (.keyA, .left), (.keyD, .right),
                         (.returnOrEnter, .a), (.spacebar, .a), (.escape, .b), (.deleteOrBackspace, .b)]
                 s.move = .zero
                 s.look = .zero

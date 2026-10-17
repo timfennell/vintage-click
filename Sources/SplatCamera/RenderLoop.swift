@@ -465,7 +465,7 @@ final class RenderLoop {
                 if channel < 0 { full += SIMD3(repeating: w) } else { full[k % 3] += w }
             }
             var dv = SIMD4<Float>(1 / simd_max(full, SIMD3(repeating: 1e-6)), 0)
-            var f = b.stock.packed
+            var f = b.developed.packed
             ce.setComputePipelineState(developPSO)
             ce.setBuffer(e.accum, offset: 0, index: 0)
             ce.setBytes(&o, length: o.count * 16, index: 1)

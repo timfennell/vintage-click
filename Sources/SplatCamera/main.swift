@@ -48,7 +48,8 @@ let noShadows = args.contains("--no-shadows")
 args.removeAll { $0 == "--no-shadows" }
 // --menu / --controls: open with the game menu or the controls guide up (for checks).
 let startMenu = args.contains("--menu"), startControls = args.contains("--controls")
-args.removeAll { $0 == "--menu" || $0 == "--controls" }
+let startFilm = args.contains("--film-menu")
+args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -198,6 +199,7 @@ func configureSession() {
     DispatchQueue.main.async {
         if startMenu { viewer.openMenu() }
         if startControls { viewer.showControls() }
+        if startFilm { viewer.openFilm() }
     }
     if let t = turn, t.count == 2 {
         viewer.camera.yaw -= t[0] * .pi / 180

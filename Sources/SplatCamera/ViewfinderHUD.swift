@@ -182,7 +182,7 @@ final class ViewfinderHUD: NSView {
         var notes: [String] = []
         if let m = message, CACurrentMediaTime() < m.until { notes.append(m.text) }
         if !info.mode.isEmpty { notes.append(info.mode) }
-        notes.append("ISO \(info.iso)")
+        notes.append(info.stock.contains(" at EI ") ? "EI \(info.iso) · " + (info.stock.contains("push") ? "PUSH" : "PULL") : "ISO \(info.iso)")
         text(notes.joined(separator: "   ·   "), at: NSPoint(x: img.midX, y: y + h * 1.3), size: 0.75 * u,
              color: ledRed.withAlphaComponent(0.85), align: .center, width: img.width)
     }

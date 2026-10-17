@@ -41,6 +41,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     var appActions: (openScene: () -> Void, chooseRolls: () -> Void, quit: () -> Void)?
     private var menuOpen = false
     private var menuStick: Float = 0
+    private var filmStickX: Float = 0
 
     /// What the controls are doing: the camera, placing lights, or the contact sheet.
     enum Mode { case camera, lighting, sheet }
@@ -288,7 +289,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         finderGain *= pow(want / finderGain, min(1, Float(dt) * 0.8))
         var o = finderOptics(frame.job, seed: UInt32(displayFrame))
         o[5].y *= finderGain
-        var f = frame.job.body.stock.packed
+        var f = frame.job.body.developed.packed
 
         let ce = cb.makeComputeCommandEncoder()!
         ce.setComputePipelineState(meterPSO)
@@ -484,7 +485,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.up) { body.changeShutter(1) }
             if p.contains(.down) { body.changeShutter(-1) }
             if p.contains(.x) { body.nextLens() }
-            if p.contains(.y) { body.loadNextRoll() }
+            if p.contains(.y) { openFilm() }
             if p.contains(.l3) {
                 let walk = inside ? 1.4 / body.metresPerUnit : radius * 0.6
             camera.moveSpeed = camera.moveSpeed > walk * 1.5 ? walk : walk * 4
@@ -640,6 +641,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         menuOpen = true
         menu.currentMode = modeName
         menu.showingHelp = false
+        menu.showingFilm = false
         var items: [MenuOverlay.Item] = [
             .init(title: "Back to the \(mode == .sheet ? "light table" : mode == .lighting ? "lights" : "camera")",
                   detail: "carry on where you were") { [weak self] in self?.closeMenu() },
@@ -660,6 +662,8 @@ final class Viewer: NSObject, MTKViewDelegate {
             })
         }
         items += [
+            .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") { [weak self] in
+                self?.openFilm() },
             .init(title: "Reset the view", detail: "back to where you started") { [weak self] in
                 guard let self else { return }
                 self.camera = self.home
@@ -677,6 +681,22 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.items = items
         menu.selected = 0
         menu.isHidden = false
+    }
+
+    /// Straight to loading a roll (the pad's top button, R, or the menu).
+    func openFilm() {
+        if !menuOpen { openMenu() }
+        guard let menu else { return }
+        menu.filmChoice = body.stockIndex
+        menu.filmPush = body.push
+        menu.onLoadFilm = { [weak self] stock, push in
+            guard let self else { return }
+            self.body.loadRoll(stock: stock, push: push)
+            self.body.meterShutter(sceneLuminance: self.meterLum)
+            self.hud?.flash("LOADED \(self.body.rollName.uppercased())")
+            self.closeMenu()
+        }
+        menu.showingFilm = true
     }
 
     private func closeMenu() {
@@ -700,6 +720,19 @@ final class Viewer: NSObject, MTKViewDelegate {
         let p = s.pressed
         if menu.showingHelp {
             if !p.isDisjoint(with: [.a, .b, .menu]) { menu.showingHelp = false }
+            return
+        }
+        if menu.showingFilm {
+            let y = s.move.y + s.look.y, x = s.move.x + s.look.x
+            if abs(y) > 0.5 && abs(menuStick) <= 0.5 { menu.moveFilm(y > 0 ? -1 : 1) }
+            menuStick = y
+            if p.contains(.up) { menu.moveFilm(-1) }
+            if p.contains(.down) { menu.moveFilm(1) }
+            if p.contains(.left) || (x < -0.5 && filmStickX >= -0.5) { menu.changePush(-1) }
+            if p.contains(.right) || (x > 0.5 && filmStickX <= 0.5) { menu.changePush(1) }
+            filmStickX = x
+            if p.contains(.a) { menu.loadFilm() }
+            if p.contains(.b) || p.contains(.menu) { menu.showingFilm = false }
             return
         }
         // A stick steps once per push, like the d-pad.
@@ -783,7 +816,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             url = p
         } else {
             let dir = ContactSheetView.root
-                .appendingPathComponent(String(format: "Roll %02d - %@", b.rollNumber, b.stock.name))
+                .appendingPathComponent(String(format: "Roll %02d - %@", b.rollNumber, b.rollName))
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             url = dir.appendingPathComponent(String(format: "frame-%02d.png", job.frameNumber))
         }
@@ -791,7 +824,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let meta: [String: Any] = [
             "lens": b.lens.name, "lens_inspired_by": b.lens.inspiredBy,
             "aperture": b.takingAperture, "shutter": "1/\(b.shutter.label)",
-            "film": b.stock.name, "iso": b.stock.iso, "focus_m": b.focusM,
+            "film": b.stock.name, "iso": b.stock.iso, "rated_ei": b.ratedEI, "push": b.push, "focus_m": b.focusM,
             "exposure_stops": b.exposureStops, "sub_pupils": job.cells.count,
             "metres_per_unit": b.metresPerUnit, "width": image.width, "height": image.height,
         ]
@@ -819,8 +852,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         i.aperture = String(format: b.takingAperture < 10 ? "%.1f" : "%.0f", b.takingAperture)
         i.shutter = b.shutter.seconds >= 1 ? "\(b.shutter.label)\"" : b.shutter.label
         i.shutterIndex = b.shutterIndex
-        i.stock = b.stock.name
-        i.iso = Int(b.stock.iso)
+        i.stock = b.rollName
+        i.iso = Int(b.ratedEI)
         i.counter = b.framesLeft > 0 ? "\(b.framesShot + 1)" : "E"
         i.focus = b.focusM >= 100 ? "∞" : String(format: "%.2f m", b.focusM)
         i.meterStops = b.exposureStops + log2(max(meterLum, 1e-4) / 0.18)

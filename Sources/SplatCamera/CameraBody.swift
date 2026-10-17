@@ -35,6 +35,8 @@ struct CameraBody {
     var shutterIndex = 7                // 1/125
     var focusM: Float = 1               // focus distance, metres
     var stockIndex = 1
+    /// The roll's rating against box speed, in stops: -1 pulled ... +3 pushed.
+    var push = 0
     var framesShot = 0
     var rollNumber = 1
     var dofPreview = false
@@ -44,6 +46,13 @@ struct CameraBody {
 
     var lens: Lens { lensBag[lensIndex] }
     var stock: FilmStock { filmStocks[stockIndex] }
+    /// The speed the roll is rated (and metered) at.
+    var ratedEI: Float { stock.iso * exp2(Float(push)) }
+    /// The stock as it will be developed for that rating.
+    var developed: FilmStock { stock.developed(push: push) }
+    var rollName: String {
+        push == 0 ? stock.name : String(format: "%@ at EI %.0f (%@%d)", stock.name, ratedEI, push > 0 ? "push +" : "pull ", push)
+    }
     var takingAperture: Float { lens.apertureStops[min(apertureIndex, lens.apertureStops.count - 1)] }
     /// What the finder shows: wide open, unless the preview lever is held.
     var viewingAperture: Float { dofPreview ? takingAperture : lens.maxAperture }
@@ -53,7 +62,7 @@ struct CameraBody {
     /// Stops over (+) or under (-) the exposure the scan was captured at.
     var exposureStops: Float {
         let n = takingAperture, t = shutter.seconds
-        let ev = log2(n * n / t) - log2(stock.iso / 100)
+        let ev = log2(n * n / t) - log2(ratedEI / 100)
         return sceneEV - ev
     }
 
@@ -87,6 +96,14 @@ struct CameraBody {
         apertureIndex = stops.enumerated().min(by: { abs($0.1 - n) < abs($1.1 - n) })!.offset
         focusM = max(focusM, lens.minFocusM)
     }
+    /// A fresh roll of this stock, rated at box speed + `push` stops.
+    mutating func loadRoll(stock index: Int, push p: Int) {
+        stockIndex = index
+        push = p
+        framesShot = 0
+        rollNumber += 1
+    }
+
     mutating func loadNextRoll() {
         stockIndex = (stockIndex + 1) % filmStocks.count
         framesShot = 0

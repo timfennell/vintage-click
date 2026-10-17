@@ -13,6 +13,17 @@ final class MenuOverlay: NSView {
     var selected = 0 { didSet { needsDisplay = true } }
     /// Showing the controls guide instead of the menu.
     var showingHelp = false { didSet { needsDisplay = true } }
+    /// Showing the film page: which stock, rated how (push/pull stops).
+    var showingFilm = false { didSet { needsDisplay = true } }
+    var filmChoice = 0 { didSet { needsDisplay = true } }
+    var filmPush = 0 { didSet { needsDisplay = true } }
+    var onLoadFilm: ((Int, Int) -> Void)?
+    private var filmRects: [NSRect] = []
+    private var ratingRect = NSRect.zero
+
+    func moveFilm(_ d: Int) { filmChoice = (filmChoice + d + filmStocks.count) % filmStocks.count }
+    func changePush(_ d: Int) { filmPush = max(-1, min(3, filmPush + d)) }
+    func loadFilm() { onLoadFilm?(filmChoice, filmPush) }
     var currentMode = ""
 
     override var isFlipped: Bool { true }
@@ -39,11 +50,23 @@ final class MenuOverlay: NSView {
     }
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if !showingHelp, let i = itemRects.firstIndex(where: { $0.contains(p) }), i != selected { selected = i }
+        if !showingHelp && !showingFilm, let i = itemRects.firstIndex(where: { $0.contains(p) }), i != selected { selected = i }
     }
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if showingHelp { showingHelp = false; return }
+        if showingFilm {
+            // The rating line: click its left half to pull, right half to push.
+            if ratingRect.contains(p) {
+                changePush(p.x < ratingRect.midX ? -1 : 1)
+                return
+            }
+            // Click a stock to choose it, click it again to load it.
+            if let i = filmRects.firstIndex(where: { $0.contains(p) }) {
+                if i == filmChoice { loadFilm() } else { filmChoice = i }
+            }
+            return
+        }
         if let i = itemRects.firstIndex(where: { $0.contains(p) }) {
             selected = i
             choose()
@@ -61,6 +84,7 @@ final class MenuOverlay: NSView {
         bounds.fill()
         let u = bounds.height / 60
         if showingHelp { drawHelp(u); return }
+        if showingFilm { drawFilm(u); return }
         let w = min(bounds.width * 0.6, 46 * u * 1.4), rowH = 3.4 * u
         let h = CGFloat(items.count) * rowH + 9 * u
         let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
@@ -100,7 +124,7 @@ final class MenuOverlay: NSView {
             ("fire the shutter", "bottom (A)", "left click"),
             ("depth-of-field preview", "hold right (B)", "hold right click"),
             ("next lens / lens 1-8", "left (X)", "1 - 8"),
-            ("load a new roll", "top (Y)", "R"),
+            ("load film (stock, push / pull)", "top (Y)", "R"),
         ]),
         ("LIGHTING", [
             ("lighting mode on / off", "R3", "L"),
@@ -126,6 +150,45 @@ final class MenuOverlay: NSView {
             ("take / free the mouse", "", "click / Esc"),
         ]),
     ]
+
+    /// Loading a roll: the stocks in the bag, and how to rate the roll.
+    private func drawFilm(_ u: CGFloat) {
+        let rowH = 3.3 * u
+        let w = min(bounds.width * 0.7, 70 * u), h = CGFloat(filmStocks.count) * rowH + 15 * u
+        let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
+        NSColor(white: 0.08, alpha: 0.96).setFill()
+        NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).fill()
+        text("LOAD FILM", NSPoint(x: panel.minX + 2 * u, y: panel.minY + 1.5 * u), size: 1.5 * u, color: amber, weight: .bold)
+        text("the roll in the camera is rewound and put away", NSPoint(x: panel.minX + 15 * u, y: panel.minY + 1.9 * u),
+             size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
+        filmRects = []
+        for (i, s) in filmStocks.enumerated() {
+            let r = NSRect(x: panel.minX + u, y: panel.minY + 5 * u + CGFloat(i) * rowH, width: w - 2 * u, height: rowH - 0.4 * u)
+            filmRects.append(r)
+            if i == filmChoice {
+                amber.withAlphaComponent(0.18).setFill()
+                NSBezierPath(roundedRect: r, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
+            }
+            let kind = s.blackAndWhite ? "B&W" : (s.contrast > 1.3 ? "slide" : "colour neg")
+            text((i == filmChoice ? "▶ " : "  ") + s.name, NSPoint(x: r.minX + u, y: r.minY + 0.4 * u), size: 1.25 * u,
+                 color: i == filmChoice ? amber : .white)
+            text(String(format: "ISO %.0f · %@ · %d exp", s.iso, kind, s.exposures),
+                 NSPoint(x: r.minX + w * 0.42, y: r.minY + 0.55 * u), size: 1.0 * u, color: NSColor(white: 0.75, alpha: 1))
+            text(s.inspiredBy, NSPoint(x: r.minX + 3 * u, y: r.minY + 1.95 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1))
+        }
+        // The rating: push / pull.
+        let s = filmStocks[filmChoice]
+        let ei = s.iso * pow(2, Float(filmPush))
+        let rating = filmPush == 0 ? "box speed" : (filmPush > 0 ? "push +\(filmPush)" : "pull \(filmPush)")
+        let y = panel.maxY - 8.5 * u
+        ratingRect = NSRect(x: panel.minX + u, y: y - 0.5 * u, width: 42 * u, height: 2.6 * u)
+        text(String(format: "◀  rate at EI %.0f  (%@)  ▶", ei, rating), NSPoint(x: panel.minX + 2 * u, y: y), size: 1.3 * u, color: amber)
+        let effect = filmPush > 0 ? "more contrast and grain, deeper shadows, a little fog: for low light"
+            : filmPush < 0 ? "softer contrast, finer grain: for harsh light" : "as the maker intended"
+        text(effect, NSPoint(x: panel.minX + 2 * u, y: y + 1.9 * u), size: 0.9 * u, color: NSColor(white: 0.6, alpha: 1))
+        text("▲▼ stock   ◀▶ push / pull   A / Enter load   B / Esc back", NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u),
+             size: 0.9 * u, color: NSColor(white: 0.6, alpha: 1))
+    }
 
     private func drawHelp(_ u: CGFloat) {
         let panel = bounds.insetBy(dx: bounds.width * 0.06, dy: bounds.height * 0.05)

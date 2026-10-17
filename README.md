@@ -96,6 +96,15 @@ power, 2-10x); it magnifies from the full-size frames. The d-pad chooses a
 frame (the loupe glides to it) and A marks it as a keeper in red grease
 pencil (kept in the roll's marks.json). Nothing pops up when the shutter fires.
 
+## Film
+
+Load film from the menu (or the pad's top button / R): choose a stock and
+rate the roll at box speed, pulled one stop or pushed up to three. The meter
+and the ISO readout follow the rating, and the whole roll is developed for
+it: pushing raises contrast and grain, deepens shadows and adds a little fog;
+pulling softens contrast and fines the grain. The rating is in the roll's
+folder name and each frame's .json.
+
 ## The menu
 
 Esc (keyboard) or + / Menu (pad) opens the game menu: switch between the
