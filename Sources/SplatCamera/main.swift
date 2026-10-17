@@ -41,6 +41,9 @@ let meterWait = Double(option("--meter-wait") ?? "1.5") ?? 1.5
 // --comp STOPS: exposure compensation off the meter for scripted shots (-4 = 4 stops under).
 let comp = Int(option("--comp") ?? "0") ?? 0
 let flyLight = option("--fly").flatMap { Int($0) }
+let focusChoice = option("--focus").flatMap { Float($0) }
+// --turn YAW,PITCH (degrees, right and up): aim the camera for scripted checks.
+let turn = option("--turn").map { $0.split(separator: ",").compactMap { Float($0) } }
 let noShadows = args.contains("--no-shadows")
 args.removeAll { $0 == "--no-shadows" }
 let lightingMode = args.contains("--lighting-mode")
@@ -188,6 +191,11 @@ func configureSession() {
     if let h = house { viewer.lighting.setHouseLights(h) }
     if lightingMode || flyLight != nil { viewer.startLighting() }
     if let k = flyLight { viewer.flyLight(k - 1) }
+    if let m = focusChoice { viewer.body.focusM = m }
+    if let t = turn, t.count == 2 {
+        viewer.camera.yaw -= t[0] * .pi / 180
+        viewer.camera.pitch += t[1] * .pi / 180
+    }
     if openSheet { DispatchQueue.main.async { viewer.openSheet() } }
     // Start with the shutter matched to the scene, as a photographer would.
     viewer.body.meterShutter(sceneLuminance: 0.18)

@@ -168,6 +168,38 @@ float3 film_look(float3 lin, float3 halo, float2 px, uint seed, float lines, con
 
 // ---- viewfinder -----------------------------------------------------------
 
+// The surface a prism looks through to near p: the nearest depth in a small
+// neighbourhood, so a soft (part-transparent) edge moves with its subject
+// instead of each edge pixel taking the background's shift.
+float prism_depth(device const float* f, float2 p, float reach, constant float4* O) {
+    float z = 1e5;
+    for (int dy = -2; dy <= 2; dy++)
+        for (int dx = -2; dx <= 2; dx++)
+            z = min(z, frame_z(f, clamp_px(int2(p + float2(dx, dy) * reach), O), O));
+    return z;
+}
+
+// The lens's image at a fractional position (bilinear, with lateral colour).
+float3 frame_lin_smooth(device const float* f, float2 p, constant float4* O) {
+    float2 t = p - 0.5;
+    float2 i = floor(t), w = t - i;
+    float3 a = frame_lin_ca(f, i + 0.5, O), b = frame_lin_ca(f, i + float2(1.5, 0.5), O);
+    float3 c = frame_lin_ca(f, i + float2(0.5, 1.5), O), d = frame_lin_ca(f, i + 1.5, O);
+    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
+// What a prism shows at p: the image displaced by `shift`, the defocus of the
+// surface it looks through to (depth z). Light through a prism beside an edge
+// comes from what is behind it there, so a sample landing on something much
+// nearer (a focused antenna, for a background pixel) is not its light: it
+// keeps its own place instead.
+float3 prism_sample(device const float* f, float2 p, float2 shift, float z, constant float4* O) {
+    float2 q = p + shift;
+    float zq = frame_z(f, clamp_px(int2(q), O), O);
+    if (zq < z * 0.85) q = p;
+    return frame_lin_smooth(f, q, O);
+}
+
 // The focusing screen, always: the lens's image (its depth of field, light
 // fall-off and colour fringes) on fine-ground glass with a fresnel, a
 // split-prism disc (halves shift apart with defocus) and a microprism collar.
@@ -179,23 +211,27 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
     float r = length(p - c);
     float3 col;
     if (r < R) {
-        // Split image: each half displaced by the defocus at the point it shows.
+        // Split image: each half shows the image displaced by its own defocus.
         float side = p.y < c.y ? 1 : -1;
-        float z = frame_z(f, clamp_px(int2(p), O), O);
+        float z = prism_depth(f, p, 1.5, O);
         float shift = coc_px(z, O) * 0.6 * side;
-        col = frame_lin_ca(f, p + float2(shift, 0), O);
+        col = prism_sample(f, p, float2(shift, 0), z, O);
         // A prism needs a fast lens: it blacks out half when stopped down.
         float dark = saturate((O[2].y - 4.0) / 3.0);
         if (side > 0) col *= 1 - 0.85 * dark;
         if (abs(p.y - c.y) < 0.6) col *= 0.4;
     } else if (r < R * 1.75) {
-        // Microprisms: a fine grid of tiny prisms, each displacing by the defocus.
+        // Microprisms: a fine grid of tiny prisms. Each moves as one, by the
+        // defocus at its centre, so an out-of-focus image breaks up and
+        // shimmers while a focused one sits still.
         float cell = max(3.0, O[0].y / 300);
         float2 g = floor(p / cell);
-        float a = (fmod(g.x + g.y, 4.0) + 0.5) * M_PI_F / 2;
-        float z = frame_z(f, clamp_px(int2(p), O), O);
+        // Each tiny pyramid sends its cell one of six ways (scattered, not in rows).
+        float a = (floor(hash(uint2(g + 4096), 23) * 6) + 0.5) * M_PI_F / 3;
+        float2 centre = (g + 0.5) * cell;
+        float z = prism_depth(f, centre, cell * 0.5, O);
         float shift = coc_px(z, O) * 0.5;
-        col = frame_lin_ca(f, p + shift * float2(cos(a), sin(a)), O);
+        col = prism_sample(f, p, shift * float2(cos(a), sin(a)), z, O);
     } else {
         col = frame_lin_ca(f, p, O);
         // Fine matte: the ground glass's own tooth, still while the image moves.
