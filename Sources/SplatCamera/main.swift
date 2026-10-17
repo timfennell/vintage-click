@@ -186,7 +186,8 @@ func startSession(_ plyPath: String) {
 
 func configureSession() {
     if let ev = sceneEV { viewer.body.sceneEV = ev }
-    if let c = cells { viewer.cellsPerExposure = c }
+    if let c = cells { viewer.cellsOverride = c }
+    if args.contains("--dng") { viewer.negativeOverride = true }
     if let i = lensChoice {
         while viewer.body.lensIndex != i % lensBag.count { viewer.body.nextLens() }
         viewer.resetView()

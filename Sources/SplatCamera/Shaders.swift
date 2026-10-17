@@ -351,6 +351,29 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
     out[idx(p, O)] = uchar4(uchar3(round(col * 255)), 255);
 }
 
+// The digital negative: the same exposure as `develop` reads (lens fall-off,
+// lateral colour, the exposure), as linear light before any film, unclipped:
+// three half floats per pixel, for a DNG. Values past 1 are highlights the
+// print would burn out but the negative keeps.
+kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
+                     constant float4& D [[buffer(3)]], device half* out [[buffer(4)]],
+                     uint2 p [[thread_position_in_grid]]) {
+    uint W = uint(O[0].x), H = uint(O[0].y);
+    if (p.x >= W || p.y >= H) return;
+    float expo = exp2(O[5].w);
+    float2 pc = float2(p) + 0.5, c = O[0].xy * 0.5;
+    float2 q = field(pc, O);
+    float vig = 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
+    float k = O[6].x;
+    float3 lin;
+    lin.r = acc_at(acc, c + (pc - c) * (1 - k), O).r;
+    lin.g = acc_at(acc, pc, O).g;
+    lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
+    lin = max(lin * D.rgb * expo * vig, 0.0);
+    uint i = idx(p, O) * 3;
+    out[i] = half(min(lin.r, 60000.0)); out[i + 1] = half(min(lin.g, 60000.0)); out[i + 2] = half(min(lin.b, 60000.0));
+}
+
 // ---- lights ---------------------------------------------------------------
 
 // Wireframes of the light heads: segments already projected to finder pixels

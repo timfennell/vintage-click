@@ -30,11 +30,18 @@ final class ExposureJob {
     let cells: [SIMD2<Float>]
     var next = 0
     let accum: MTLBuffer
+    /// The photo's size, and whether to keep a digital negative (DNG) too.
+    let size: (w: Int, h: Int)
+    let wantsNegative: Bool
+    /// Linear light, three half floats per pixel, when a negative was asked for.
+    var negative: Data?
     let started = CACurrentMediaTime()
     var outputPath: URL?
 
     init(camera: FlyCamera, body: CameraBody, lighting: LightingPlot, frameNumber: Int,
-         cells: [SIMD2<Float>], accum: MTLBuffer) {
+         cells: [SIMD2<Float>], accum: MTLBuffer, size: (w: Int, h: Int), wantsNegative: Bool) {
+        self.size = size
+        self.wantsNegative = wantsNegative
         self.camera = camera
         self.body = body
         self.lighting = lighting
@@ -57,6 +64,7 @@ final class RenderLoop {
     private let accumulatePSO: MTLComputePipelineState
     private let developPSO: MTLComputePipelineState
     private let relightPSO: MTLComputePipelineState
+    private let negativePSO: MTLComputePipelineState
     // The scan's own colours (relighting reads them; Spirula's are overwritten).
     private let means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
     private let colours: (buf: MTLBuffer, off: Int)
@@ -138,6 +146,7 @@ final class RenderLoop {
         accumulatePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "accumulate")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
+        negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
         shadowPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shadow_vis")!)
         count = model.count
         higherCoeffs = (model.shDegree + 1) * (model.shDegree + 1) - 1
@@ -210,8 +219,8 @@ final class RenderLoop {
         return exposures.filter { $0.body.rollNumber == roll }.map(\.frameNumber)
     }
 
-    func makeAccumulator() -> MTLBuffer? {
-        device.makeBuffer(length: photoSize.w * photoSize.h * 16, options: .storageModePrivate)
+    func makeAccumulator(_ w: Int, _ h: Int) -> MTLBuffer? {
+        device.makeBuffer(length: w * h * 16, options: .storageModePrivate)
     }
 
     func expose(_ job: ExposureJob) {
@@ -380,7 +389,7 @@ final class RenderLoop {
     /// Optics for the shaders at photo size (layout in Shaders.swift).
     private func photoOptics(_ e: ExposureJob, fx: Float) -> [SIMD4<Float>] {
         let b = e.body, l = b.lens, n = b.takingAperture
-        let (w, h) = photoSize
+        let (w, h) = e.size
         return [
             SIMD4(Float(w), Float(h), fx, fx),
             SIMD4(Float(w) / 2, Float(h) / 2, b.metresPerUnit, b.focusM),
@@ -396,14 +405,16 @@ final class RenderLoop {
     /// point (focus plane fixed), add it to the film; develop after the last.
     private func step(_ e: ExposureJob) {
         let b = e.body
-        let (w, h) = photoSize
+        let (w, h) = e.size
         let n = b.takingAperture
         let fx = e.camera.focalPixels(width: w)
         let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
         relight(e.lighting, eye: e.camera.position, body: b, quality: .photo)
         // Axial colour: with it, each sub-pupil carries one channel, focused
         // where that colour focuses (red a little beyond green, blue short).
-        let channel = b.lens.axialCA > 0 ? e.next % 3 : -1
+        // Splitting the samples by colour needs enough of them: with fewer, each
+        // channel's blur comes from different lens points and blotches.
+        let channel = b.lens.axialCA > 0 && e.cells.count >= 64 ? e.next % 3 : -1
         var body = b
         if channel >= 0 {
             body.focusM = 1 / (1 / b.focusM + b.lens.axialCA * Float(1 - channel))
@@ -456,6 +467,7 @@ final class RenderLoop {
         e.next += 1
         let done = e.next == e.cells.count
         var print: MTLBuffer?
+        var negBuf: MTLBuffer?
         if done, let out = device.makeBuffer(length: w * h * 4, options: .storageModeShared) {
             print = out
             // Light through the unclipped centre of the frame sets the scale, per channel.
@@ -473,6 +485,15 @@ final class RenderLoop {
             ce.setBytes(&dv, length: 16, index: 3)
             ce.setBuffer(out, offset: 0, index: 4)
             ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
+            if e.wantsNegative, let neg = device.makeBuffer(length: w * h * 6, options: .storageModeShared) {
+                negBuf = neg
+                ce.setComputePipelineState(negativePSO)
+                ce.setBuffer(e.accum, offset: 0, index: 0)
+                ce.setBytes(&o, length: o.count * 16, index: 1)
+                ce.setBytes(&dv, length: 16, index: 3)
+                ce.setBuffer(neg, offset: 0, index: 4)
+                ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
+            }
         }
         ce.endEncoding()
         cb.commit()
@@ -480,6 +501,7 @@ final class RenderLoop {
         cb.waitUntilCompleted()
         if done {
             finish(e)
+            if let negBuf { e.negative = Data(bytes: negBuf.contents(), count: negBuf.length) }
             if let print, let image = makeImage(print, w, h) {
                 let seconds = CACurrentMediaTime() - e.started
                 DispatchQueue.main.async { [weak self] in self?.onDeveloped?(e, image, seconds) }

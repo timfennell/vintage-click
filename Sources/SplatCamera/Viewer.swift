@@ -8,6 +8,10 @@ import simd
 /// frame on the focusing screen at a film cadence, and fires the shutter. The
 /// mirror blacks out the finder for the exposure; the frame itself is exposed
 /// and developed by the render loop in the background, so you keep shooting.
+private extension Int {
+    var nonZero: Int? { self == 0 ? nil : self }
+}
+
 final class Viewer: NSObject, MTKViewDelegate {
     let width: Int, height: Int
     let device: MTLDevice
@@ -72,7 +76,23 @@ final class Viewer: NSObject, MTKViewDelegate {
     func attachInput(to view: NSView) { input.view = view }
 
     /// Sub-pupils per exposure: more = truer bokeh, longer to develop.
-    var cellsPerExposure = 32
+    /// One run's values from the command line (tests), never saved as preferences.
+    var cellsOverride: Int?
+    var negativeOverride: Bool?
+    var cellsPerExposure: Int {
+        get { cellsOverride ?? max(8, UserDefaults.standard.integer(forKey: "subPupils").nonZero ?? 32) }
+        set { UserDefaults.standard.set(newValue, forKey: "subPupils") }
+    }
+    /// Photos at this many times the finder's size (2: 3240 x 2160 ... 4: 6480 x 4320).
+    var photoScale: Int {
+        get { min(4, max(1, UserDefaults.standard.integer(forKey: "photoScale").nonZero ?? 2)) }
+        set { UserDefaults.standard.set(newValue, forKey: "photoScale") }
+    }
+    /// Keep a digital negative (a high-dynamic-range DNG) with every print.
+    var keepNegative: Bool {
+        get { negativeOverride ?? UserDefaults.standard.bool(forKey: "keepNegative") }
+        set { UserDefaults.standard.set(newValue, forKey: "keepNegative") }
+    }
     var filmFPS: Double = 24
     /// Scripted runs: where the next developed frame goes, and who to tell.
     var scriptedPath: URL?
@@ -848,6 +868,21 @@ final class Viewer: NSObject, MTKViewDelegate {
             .init(title: "Set the scale (measure)…",
                   detail: String(format: "now %.3g m per unit: aim at two points, say how far apart they are", body.metresPerUnit)) {
                 [weak self] in self?.startMeasure() },
+            .init(title: "Photo size: \(width * photoScale) × \(height * photoScale)",
+                  detail: "\(photoScale)× the finder · bigger takes longer to develop (select to change)") { [weak self] in
+                guard let self else { return }
+                self.photoScale = self.photoScale % 4 + 1 == 1 ? 2 : self.photoScale % 4 + 1
+                self.reopenMenu() },
+            .init(title: "Exposure quality: \(cellsPerExposure) lens samples",
+                  detail: "more: truer bokeh, smoother blur, slower; 64+ adds coloured bokeh fringes (select to change)") { [weak self] in
+                guard let self else { return }
+                self.cellsPerExposure = self.cellsPerExposure >= 128 ? 32 : self.cellsPerExposure * 2
+                self.reopenMenu() },
+            .init(title: "Digital negative (DNG): \(keepNegative ? "on" : "off")",
+                  detail: "a high-dynamic-range linear DNG beside each print, for a raw developer") { [weak self] in
+                guard let self else { return }
+                self.keepNegative.toggle()
+                self.reopenMenu() },
             .init(title: "Reset the view", detail: "back to where you started") { [weak self] in
                 guard let self else { return }
                 self.camera = self.home
@@ -885,6 +920,13 @@ final class Viewer: NSObject, MTKViewDelegate {
             self.closeMenu()
         }
         menu.showingFilm = true
+    }
+
+    /// Redraws the menu with fresh values, keeping the selection.
+    private func reopenMenu() {
+        let keep = menu?.selected ?? 0
+        openMenu()
+        menu?.selected = keep
     }
 
     private func closeMenu() {
@@ -982,12 +1024,16 @@ final class Viewer: NSObject, MTKViewDelegate {
             hud?.flash("END OF ROLL — load a new one")
             return
         }
-        guard loop.pendingExposures < Self.maxPending, let accum = loop.makeAccumulator() else {
+        // Big photos take a lot of memory while they develop: fewer at once.
+        let size = (w: width * photoScale, h: height * photoScale)
+        let room = photoScale >= 3 ? 2 : Self.maxPending
+        guard loop.pendingExposures < room, let accum = loop.makeAccumulator(size.w, size.h) else {
             hud?.flash("BUFFER FULL")
             return
         }
         let job = ExposureJob(camera: camera, body: body, lighting: lighting, frameNumber: body.framesShot + 1,
-                              cells: body.cellCentres(cellsPerExposure), accum: accum)
+                              cells: body.cellCentres(cellsPerExposure), accum: accum, size: size,
+                              wantsNegative: keepNegative)
         job.outputPath = scriptedPath
         loop.expose(job)
         body.framesShot += 1
@@ -1015,11 +1061,20 @@ final class Viewer: NSObject, MTKViewDelegate {
             "film": b.stock.name, "iso": b.stock.iso, "rated_ei": b.ratedEI, "push": b.push, "focus_m": b.focusM,
             "exposure_stops": b.exposureStops, "sub_pupils": job.cells.count,
             "metres_per_unit": b.metresPerUnit, "width": image.width, "height": image.height,
+            "negative": job.negative == nil ? "" : url.deletingPathExtension().appendingPathExtension("dng").lastPathComponent,
         ]
+        let negative = job.negative
+        let (nw, nh) = job.size
         // Writing a big PNG takes a moment: off the main thread.
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let rep = NSBitmapImageRep(cgImage: image)
             try? rep.representation(using: .png, properties: [:])?.write(to: url)
+            if let negative {
+                try? DNG.write(negative, width: nw, height: nh, to: url.deletingPathExtension().appendingPathExtension("dng"),
+                               description: "\(b.rollName), frame \(job.frameNumber): linear light before the film",
+                               lens: b.lens.name, iso: b.ratedEI, shutterSeconds: b.shutter.seconds,
+                               fNumber: b.takingAperture, focalMM: b.lens.focalMM)
+            }
             if let json = try? JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]) {
                 try? json.write(to: url.deletingPathExtension().appendingPathExtension("json"))
             }
