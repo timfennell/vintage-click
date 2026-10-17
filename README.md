@@ -151,7 +151,18 @@ take the mouse, Esc to let it go):
 | F / T / Backspace | | add / change head / remove | |
 | G | | house lights (day ... night) | |
 | arrows / Q E / Esc | look | look | choose frame / roll / back |
+| M + arrows | tilt or shift the lens (tilt and shift lenses only) | | |
+| N | lens back square and centred | | |
 | H, U | reset view, up axis | | |
+
+Lens movements: the bendy lens tilts its plane of focus up to 15 degrees
+(hold M and use the arrows, or on a pad hold Y and use the right stick:
+left / right swings the sharp band across the frame, up / down along it);
+the PC lenses shift up to 11 mm (up raises the lens to keep a
+building's verticals straight while showing its top, left / right slides
+sideways). The finder shows the result as you move, and the amount flashes
+on the screen. N (or Y + a click of the right stick) squares the lens up;
+changing lens does too. A quick tap of Y still loads film.
 
 Pad (Xbox / PlayStation / Switch Pro), camera mode:
 
@@ -166,7 +177,7 @@ Pad (Xbox / PlayStation / Switch Pro), camera mode:
 | A / cross | shutter release |
 | B / circle (hold) | depth-of-field preview |
 | X / square | next lens from the bag |
-| Y / triangle | load a new roll (next stock) |
+| Y / triangle | tap: load a new roll; hold + right stick: tilt / shift the lens; hold + R3: square it |
 | R3 | lighting mode |
 | View / Share | light table |
 | Menu | reset the view |

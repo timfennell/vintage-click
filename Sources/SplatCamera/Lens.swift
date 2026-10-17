@@ -232,7 +232,7 @@ let lensCollections: [LensCollection] = [
     LensCollection(name: "Bokeh Monsters", about: "fast glass for melting backgrounds", lenses: bokehMonsters),
     LensCollection(name: "Macro", about: "close focusing, flat field, sharp corners", lenses: macroLenses),
     LensCollection(name: "Exotic", about: "rare vintage and odd optics", lenses: exoticLenses),
-    LensCollection(name: "Toys, Mods & Movements", about: "plastic, reversed, bent and shifted: lenses for breaking the rules", lenses: toysAndMods),
+    LensCollection(name: "Toys & Mods", about: "plastic, reversed, bent and shifted: lenses for breaking the rules", lenses: toysAndMods),
 ]
 
 /// All of them, collection by collection (a lens's index is its place here).

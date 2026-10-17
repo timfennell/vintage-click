@@ -33,8 +33,8 @@ final class GamepadInput {
         var pointer: CGPoint?               // mouse in the window (light table), view points
         var typed = ""                      // characters typed (entry mode: a number and unit)
         var erase = 0                       // backspaces typed (entry mode)
-        var movement = SIMD2<Float>(0, 0)   // M held + arrows: tilt or shift the lens
-        var centreMovement = false          // N: lens back square and centred
+        var movement = SIMD2<Float>(0, 0)   // M + arrows, or Y + right stick: tilt or shift the lens
+        var centreMovement = false          // N, or Y + R3: lens back square and centred
     }
     enum KeyMode { case camera, lighting, sheet, menu, entry }
     /// Which layout the keyboard is in (set by the viewer).
@@ -46,6 +46,9 @@ final class GamepadInput {
     }
 
     private var held: Set<Button> = []
+    /// The pad's top button: a tap loads film; held, the right stick tilts or
+    /// shifts the lens (then letting go loads nothing).
+    private var padYDown = false, padYMoved = false
     private(set) var controllerName: String?
     private var typedText = ""
     private var erased = 0
@@ -140,6 +143,25 @@ final class GamepadInput {
                 (pad.rightThumbstickButton?.isPressed == true, .r3),
             ]
             for (down, b) in map where down { now.insert(b) }
+            if keyMode == .camera {
+                now.remove(.y)
+                let y = pad.buttonY.isPressed
+                if y {
+                    // Hold Y: the right stick moves the lens, R3 squares it.
+                    if s.look != .zero { padYMoved = true }
+                    s.movement = s.look
+                    s.look = .zero
+                    if now.contains(.r3) {
+                        now.remove(.r3)
+                        s.centreMovement = true
+                        padYMoved = true
+                    }
+                } else if padYDown && !padYMoved {
+                    now.insert(.y)      // a tap: film
+                }
+                if y && !padYDown { padYMoved = false }
+                padYDown = y
+            }
         }
         // The keyboard and mouse only count while this app is in front.
         if !NSApplication.shared.isActive {
@@ -149,11 +171,11 @@ final class GamepadInput {
             s.move += SIMD2(k(.keyD) - k(.keyA), k(.keyW) - k(.keyS))
             let arrows = SIMD2(k(.rightArrow) - k(.leftArrow), k(.upArrow) - k(.downArrow))
             if keyMode == .camera && k(.keyM) > 0 {
-                s.movement = arrows
+                s.movement += arrows
             } else {
                 s.look += arrows * 0.6
             }
-            s.centreMovement = keyMode == .camera && k(.keyN) > 0
+            if keyMode == .camera && k(.keyN) > 0 { s.centreMovement = true }
             s.shoulders += k(.spacebar) + k(.keyE) - k(.leftControl) - k(.keyQ)
             s.run = k(.leftShift) + k(.rightShift) > 0
             if rightHeld { s.bHeld = true }
@@ -209,6 +231,7 @@ final class GamepadInput {
         typedText = ""
         erased = 0
         s.move = simd_clamp(s.move, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
+        s.movement = simd_clamp(s.movement, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
         s.pressed = now.subtracting(held)
         held = now
         return s

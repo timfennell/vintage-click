@@ -154,8 +154,9 @@ final class MenuOverlay: NSView {
             ("fire the shutter", "bottom (A)", "left click"),
             ("depth-of-field preview", "hold right (B)", "hold right click"),
             ("camera bag (change lens)", "left (X)", "B, or 1 - 9 in the collection"),
-            ("load film (stock, push / pull)", "top (Y)", "R"),
-            ("tilt / shift lens movements", "", "hold M + arrows · N squares"),
+            ("load film (stock, push / pull)", "tap top (Y)", "R"),
+            ("tilt / shift the lens", "hold Y + right stick", "hold M + arrows"),
+            ("square the lens up again", "hold Y + click R3", "N"),
         ]),
         ("LIGHTING", [
             ("lighting mode on / off", "R3", "L"),
@@ -221,14 +222,30 @@ final class MenuOverlay: NSView {
             let mounted = before + i == mountedLens
             text((i == lensChoice ? "▶ " : "  ") + l.name + (mounted ? "  ●" : ""), NSPoint(x: r.minX + u, y: r.minY + 0.4 * u),
                  size: 1.2 * u, color: i == lensChoice ? amber : .white)
-            let kind = l.projection == .circularFisheye ? "circular fisheye" : l.projection == .fisheye ? "fisheye" : "\(l.blades == 0 ? "round" : "\(l.blades)-blade") iris"
+            var kind = l.projection == .circularFisheye ? "circular fisheye" : l.projection == .fisheye ? "fisheye" : "\(l.blades == 0 ? "round" : "\(l.blades)-blade") iris"
             let close = l.minFocusM < 1 ? String(format: "%.0f cm", l.minFocusM * 100) : String(format: "%.1f m", l.minFocusM)
+            switch l.movement {
+            case .tilt(let most): kind += String(format: " · tilts %.0f°", most)
+            case .shift(let most): kind += String(format: " · shifts %.0f mm", most)
+            case .none: break
+            }
             text("\(kind) · close \(close)", NSPoint(x: r.minX + w * 0.5, y: r.minY + 0.55 * u), size: 0.95 * u,
                  color: NSColor(white: 0.72, alpha: 1))
             text(l.inspiredBy, NSPoint(x: r.minX + 3 * u, y: r.minY + 1.95 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1))
         }
         text("◀▶ collection   ▲▼ lens   A / Enter / click again: mount   B / Esc back      ● on the camera",
              NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u), size: 0.9 * u, color: NSColor(white: 0.6, alpha: 1))
+        if shelf.lenses.indices.contains(lensChoice) {
+            let how: String?
+            switch shelf.lenses[lensChoice].movement {
+            case .tilt: how = "tilt it on the camera: hold Y + right stick, or hold M + arrows · Y + R3 or N squares it"
+            case .shift: how = "shift it on the camera: hold Y + right stick, or hold M + arrows · Y + R3 or N centres it"
+            case .none: how = nil
+            }
+            if let how {
+                text(how, NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 4.2 * u), size: 0.9 * u, color: amber)
+            }
+        }
     }
 
     /// Loading a roll: the stocks in the bag, and how to rate the roll.

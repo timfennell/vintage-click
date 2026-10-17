@@ -1036,7 +1036,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         guard lensBag.indices.contains(i), i != body.lensIndex else { return }
         body.chooseLens(i)
         camera.focalMM = body.lens.focalMM
-        hud?.flash(body.lens.name.uppercased())
+        switch body.lens.movement {
+        case .tilt: hud?.flash(body.lens.name.uppercased() + " · TILT: HOLD Y + RIGHT STICK (M + ARROWS)")
+        case .shift: hud?.flash(body.lens.name.uppercased() + " · SHIFT: HOLD Y + RIGHT STICK (M + ARROWS)")
+        case .none: hud?.flash(body.lens.name.uppercased())
+        }
     }
 
     /// Straight to loading a roll (the pad's top button, R, or the menu).

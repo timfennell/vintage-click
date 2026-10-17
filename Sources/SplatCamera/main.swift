@@ -55,10 +55,10 @@ let noShadows = args.contains("--no-shadows")
 args.removeAll { $0 == "--no-shadows" }
 // --menu / --controls: open with the game menu or the controls guide up (for checks).
 let startMenu = args.contains("--menu"), startControls = args.contains("--controls")
-let startFilm = args.contains("--film-menu")
+let startFilm = args.contains("--film-menu"), startLenses = args.contains("--lens-menu")
 let measureDemo = args.contains("--measure-demo")
 args.removeAll { $0 == "--measure-demo" }
-args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" }
+args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" || $0 == "--lens-menu" }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -228,6 +228,7 @@ func configureSession() {
         if startMenu { viewer.openMenu() }
         if startControls { viewer.showControls() }
         if startFilm { viewer.openFilm() }
+        if startLenses { viewer.openLenses() }
         if measureDemo { viewer.measureDemo() }
     }
     if let t = turn, t.count == 2 {
