@@ -108,8 +108,6 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var statsLine = ""
     /// Render speed above the frame: only when asked for (--stats).
     static let showStats = CommandLine.arguments.contains("--stats")
-    private var lastNote = ""
-    private var noteUntil: Double = 0
     var onStats: ((String) -> Void)?
 
     // Scripted benchmark: orbit for `benchFrames` finder renders, then report.
@@ -1330,13 +1328,6 @@ final class Viewer: NSObject, MTKViewDelegate {
         if pending > 0 { modes.append("DEVELOPING \(pending)") }
         i.mode = modes.joined(separator: "  ")
         if Self.showStats { i.stats = statsLine }
-        i.stops = b.lens.apertureStops.map { $0 < 10 ? (($0 * 10).rounded() / 10 == $0.rounded() ? String(Int($0.rounded())) : String(format: "%.1f", $0)) : String(Int($0)) }
-        i.stopIndex = min(b.apertureIndex, max(0, i.stops.count - 1))
-        // What is mounted, loaded and how fast you go: a moment after it changes.
-        let now = CACurrentMediaTime()
-        let what = "\(i.lens)  ·  \(i.stock)"
-        if what != lastNote { lastNote = what; noteUntil = now + 3.5 }
-        if now < noteUntil { i.note = what }
         i.mirrorUp = mirrorUp
         i.measure = measureInfo()
         if mode == .lighting {
