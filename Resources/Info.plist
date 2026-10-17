@@ -22,14 +22,5 @@
             <key>LSHandlerRank</key><string>Alternate</string>
         </dict>
     </array>
-    <key>CFBundleDocumentTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleTypeName</key><string>Gaussian splat scan</string>
-            <key>CFBundleTypeExtensions</key><array><string>ply</string></array>
-            <key>CFBundleTypeRole</key><string>Viewer</string>
-            <key>LSHandlerRank</key><string>Alternate</string>
-        </dict>
-    </array>
 </dict>
 </plist>

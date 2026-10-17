@@ -90,9 +90,13 @@ func quit(_ code: Int32 = 0) -> Never {
     viewer?.loop.shutdown()
     UserDefaults.standard.synchronize()
     fflush(stdout)
+    // Profiling reports at teardown; with the render thread stopped it is safe then.
+    if ProcessInfo.processInfo.environment["SS_PROFILE"] != nil { exit(code) }
     _exit(code)
 }
 
+// AppKit would treat leftover arguments ("15" after --ev) as documents to open.
+UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO"])
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
@@ -329,10 +333,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { quit() }
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-        // A path given on the command line arrives here too: it starts below, with its flags.
-        if let p = cliPath, URL(fileURLWithPath: p).standardizedFileURL == URL(fileURLWithPath: filename).standardizedFileURL {
-            return true
-        }
+        // Started from a shell with a scene: that scene (and its flags) is the one;
+        // AppKit also hands over command-line words as files, which are not.
+        if cliPath != nil { return true }
         guard !opened else { relaunch(with: filename); return true }
         opened = true
         DispatchQueue.main.async { open(filename) }
