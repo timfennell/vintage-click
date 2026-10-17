@@ -159,8 +159,30 @@ private let exoticLenses: [Lens] = [
 ]
 
 /// The camera bag, in collections. Names are made up; `inspiredBy` says what each plays.
+private let screwMount: [Lens] = [
+    Lens(name: "Itabashi Takuma 28mm f/3.5 SC", inspiredBy: "the multi-coated M42 screw-mount 28: crisp, flare-resistant wide",
+         focalMM: 28, maxAperture: 3.5, minAperture: 16, blades: 6, bladeRotation: 0,
+         catsEye: 0.3, soapBubble: 0, vignette: 0.5, minFocusM: 0.4, lateralCA: 0.0018, axialCA: 0.01),
+    Lens(name: "Itabashi Takuma 50mm f/1.4 SC", inspiredBy: "the 1972 multi-coated screw-mount fifty with thoriated glass (later yellows warm)",
+         focalMM: 50, maxAperture: 1.4, minAperture: 16, blades: 6, bladeRotation: 0,
+         catsEye: 0.6, soapBubble: 0.05, vignette: 0.6, minFocusM: 0.45, lateralCA: 0.001, axialCA: 0.04),
+    Lens(name: "Itabashi Takuma 55mm f/1.8 SC", inspiredBy: "the everyday screw-mount kit normal: gentle, smooth rendering",
+         focalMM: 55, maxAperture: 1.8, minAperture: 16, blades: 6, bladeRotation: 0,
+         catsEye: 0.5, soapBubble: 0, vignette: 0.55, minFocusM: 0.45, lateralCA: 0.001, axialCA: 0.03),
+    Lens(name: "Itabashi Takuma 85mm f/1.8 SC", inspiredBy: "the screw-mount portrait 85: soft wide open, sharp by f/4",
+         focalMM: 85, maxAperture: 1.8, minAperture: 22, blades: 6, bladeRotation: 0,
+         catsEye: 0.45, soapBubble: 0, vignette: 0.55, minFocusM: 0.85, lateralCA: 0.001, axialCA: 0.035),
+    Lens(name: "Itabashi Takuma 135mm f/3.5 SC", inspiredBy: "the light, cheap, much-loved screw-mount 135",
+         focalMM: 135, maxAperture: 3.5, minAperture: 22, blades: 6, bladeRotation: 0,
+         catsEye: 0.25, soapBubble: 0, vignette: 0.4, minFocusM: 1.5, lateralCA: 0.0012, axialCA: 0.02),
+    Lens(name: "Itabashi Macro-Takuma 50mm f/4 SC", inspiredBy: "the screw-mount 1:2 macro fifty",
+         focalMM: 50, maxAperture: 4, minAperture: 22, blades: 6, bladeRotation: 0,
+         catsEye: 0.2, soapBubble: 0, vignette: 0.35, minFocusM: 0.23, lateralCA: 0.0008, axialCA: 0.01),
+]
+
 let lensCollections: [LensCollection] = [
     LensCollection(name: "Field Assignment", about: "the magazine photographer's prime kit of the 70s and 80s", lenses: fieldAssignment),
+    LensCollection(name: "Screw-Mount Classics", about: "the multi-coated M42 primes of the early 70s", lenses: screwMount),
     LensCollection(name: "Bokeh Monsters", about: "fast glass for melting backgrounds", lenses: bokehMonsters),
     LensCollection(name: "Macro", about: "close focusing, flat field, sharp corners", lenses: macroLenses),
     LensCollection(name: "Exotic", about: "rare vintage and odd optics", lenses: exoticLenses),
