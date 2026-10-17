@@ -18,6 +18,8 @@
 //   O[6] = (lateral colour at the corner, axial colour, circular fisheye's image radius px (0: none),
 //           mirror lens's central obstruction in aperture radii)
 //   O[7] = finder only: where the image sits in the window (origin px, scale, corner radius px)
+//   O[8] = (oval stop's width over height, 0 = round)
+// (cx, cy) is the optical axis: the frame's centre, unless the lens is shifted.
 // Film (FilmStock.packed): F[0..2] crosstalk rows, F[3] = (balance, b&w),
 //   F[4] = (b&w mix, saturation), F[5] = (contrast, black lift, shoulder, grain),
 //   F[6] = (halation, tint), F[7] = (iso, grain size, toe, colour infrared)
@@ -77,14 +79,14 @@ float coc_px(float z, constant float4* O) {
 
 // Where in the field a pixel is: (0,0) centre, length 1 at the frame corner.
 float2 field(float2 p, constant float4* O) {
-    float2 half_size = O[0].xy * 0.5;
-    return (p - half_size) / length(half_size);
+    // From the optical axis (off centre on a shifted lens), 1 at a corner's distance.
+    return (p - O[1].xy) / length(O[0].xy * 0.5);
 }
 
 // Lateral colour: red and blue imaged at slightly different magnifications,
 // so their fringes grow toward the corners. Each channel read at its own place.
 float3 frame_lin_ca(device const float* f, float2 p, constant float4* O) {
-    float2 c = O[0].xy * 0.5;
+    float2 c = O[1].xy;
     float k = O[6].x;
     float3 out;
     out.r = to_lin(frame_rgb(f, clamp_px(int2(c + (p - c) * (1 - k)), O), O)).r;
@@ -112,15 +114,10 @@ float pupil(float2 l, float2 q, constant float4* O, float cell = 0) {
     float open = O[2].z / O[2].y;   // current radius in wide-open radii
     float soap = O[3].y;
     float rim = (1 + soap * pow(r, 6)) / (1 + soap * 0.25);
-    if (cell <= 0) return length(l * open + O[3].x * q) > 1 ? 0 : rim;
-    // A sub-pupil stands for a patch of lens `cell` radii across, not a point:
-    // the barrel cuts off the part of it outside, so the corners darken smoothly
-    // instead of in one ring per sample. Measured against what the stop alone
-    // lets through, so the centre of the frame is untouched.
-    float h = cell * open;
-    float through = 1 - smoothstep(-h, h, length(l * open + O[3].x * q) - 1);
-    float stop = 1 - smoothstep(-h, h, length(l * open) - 1);
-    return rim * min(1.0, through / max(stop, 1e-4));
+    l.x *= O[8].x > 0 ? O[8].x : 1.0;    // an oval stop, narrower across
+    // Sub-pupils (cell > 0) are cut by the barrel in the render itself, splat by splat.
+    if (cell > 0) return rim;
+    return length(l * open + O[3].x * q) > 1 ? 0 : rim;
 }
 
 // Vogel sunflower point k of n over the unit disc.
@@ -324,7 +321,7 @@ kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buff
 // Adds one tile of one sub-pupil's render to the exposure (exposures render
 // in finder-sized tiles, so a big scene's photo needs no more memory than the
 // finder). L[0] = (lens point, weight, reset), L[1] = (colour mask: which of
-// r g b this sub-pupil carries, its patch radius in aperture radii),
+// r g b this sub-pupil carries, 1: the render has cut it by the barrel),
 // L[2] = (tile origin, tile size) in the photo.
 kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
                        device float4* acc [[buffer(2)]], constant float4* L [[buffer(3)]],
@@ -356,7 +353,7 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
-    float2 pc = float2(p) + 0.5, c = O[0].xy * 0.5;
+    float2 pc = float2(p) + 0.5, c = O[1].xy;
     float2 q = field(pc, O);
     float vig = 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
     // Lateral colour: each channel from its own magnification. Light lost to
@@ -393,7 +390,7 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
-    float2 pc = float2(p) + 0.5, c = O[0].xy * 0.5;
+    float2 pc = float2(p) + 0.5, c = O[1].xy;
     float2 q = field(pc, O);
     float vig = 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
     float k = O[6].x;

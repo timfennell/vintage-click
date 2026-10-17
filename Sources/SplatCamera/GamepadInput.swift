@@ -33,6 +33,8 @@ final class GamepadInput {
         var pointer: CGPoint?               // mouse in the window (light table), view points
         var typed = ""                      // characters typed (entry mode: a number and unit)
         var erase = 0                       // backspaces typed (entry mode)
+        var movement = SIMD2<Float>(0, 0)   // M held + arrows: tilt or shift the lens
+        var centreMovement = false          // N: lens back square and centred
     }
     enum KeyMode { case camera, lighting, sheet, menu, entry }
     /// Which layout the keyboard is in (set by the viewer).
@@ -145,7 +147,13 @@ final class GamepadInput {
         } else if let kb = GCKeyboard.coalesced?.keyboardInput {
             func k(_ c: GCKeyCode) -> Float { kb.button(forKeyCode: c)?.isPressed == true ? 1 : 0 }
             s.move += SIMD2(k(.keyD) - k(.keyA), k(.keyW) - k(.keyS))
-            s.look += SIMD2(k(.rightArrow) - k(.leftArrow), k(.upArrow) - k(.downArrow)) * 0.6
+            let arrows = SIMD2(k(.rightArrow) - k(.leftArrow), k(.upArrow) - k(.downArrow))
+            if keyMode == .camera && k(.keyM) > 0 {
+                s.movement = arrows
+            } else {
+                s.look += arrows * 0.6
+            }
+            s.centreMovement = keyMode == .camera && k(.keyN) > 0
             s.shoulders += k(.spacebar) + k(.keyE) - k(.leftControl) - k(.keyQ)
             s.run = k(.leftShift) + k(.rightShift) > 0
             if rightHeld { s.bHeld = true }

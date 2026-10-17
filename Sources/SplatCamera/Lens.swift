@@ -28,7 +28,18 @@ struct Lens {
     /// Spherical aberration: how much nearer the rim of the open aperture
     /// focuses, in dioptres (a soft-focus lens's glow; it fades stopped down).
     var sphericalAberration: Float = 0
+    /// An oval stop's width over its height (an anamorphic-look insert): tall oval bokeh.
+    var squeeze: Float = 1
+    /// Field curvature: how far the image surface bends off the film at the
+    /// frame's corner, mm, for radial and tangential detail. Tangential far
+    /// from radial smears off-axis blur round the centre: a Petzval's swirl.
+    var curvatureRadial: Float = 0
+    var curvatureTangential: Float = 0
+    var movement = Movement.none
     var collection = ""
+
+    /// What the lens can do besides focus: tilt its focus plane (degrees) or shift its axis (mm).
+    enum Movement { case none, tilt(Float), shift(Float) }
 
     var isFisheye: Bool { projection != .rectilinear }
 
@@ -107,7 +118,8 @@ private let bokehMonsters: [Lens] = [
          catsEye: 0.25, soapBubble: 0, vignette: 0.25, minFocusM: 2.5, lateralCA: 0.0002, axialCA: 0.01),
     Lens(name: "Krasnogorsk Solnce 58mm f/2", inspiredBy: "Soviet Biotar-type swirly normal",
          focalMM: 58, maxAperture: 2, minAperture: 16, blades: 0, bladeRotation: 0,
-         catsEye: 0.9, soapBubble: 0.2, vignette: 0.45, minFocusM: 0.5, lateralCA: 0.0009, axialCA: 0.035),
+         catsEye: 0.9, soapBubble: 0.2, vignette: 0.45, minFocusM: 0.5, lateralCA: 0.0009, axialCA: 0.035,
+         curvatureRadial: 0.1, curvatureTangential: 0.45),
     Lens(name: "Görlitz Triplan 100mm f/2.8", inspiredBy: "triplet with soap-bubble bokeh",
          focalMM: 100, maxAperture: 2.8, minAperture: 22, blades: 15, bladeRotation: 0,
          catsEye: 0.35, soapBubble: 1.6, vignette: 0.30, minFocusM: 1.0, lateralCA: 0.001, axialCA: 0.03),
@@ -147,7 +159,7 @@ private let exoticLenses: [Lens] = [
     Lens(name: "Vienna Petzval 85mm f/2.2", inspiredBy: "19th-century Petzval portrait design: wild swirl",
          focalMM: 85, maxAperture: 2.2, minAperture: 16, blades: 0, bladeRotation: 0,
          catsEye: 0.95, soapBubble: 0.3, vignette: 0.65, minFocusM: 0.75, lateralCA: 0.0012, axialCA: 0.04,
-         sphericalAberration: 0.05),
+         sphericalAberration: 0.05, curvatureRadial: 0.3, curvatureTangential: 2.0),
     Lens(name: "Ohi Reflex-Kor 500mm f/8", inspiredBy: "catadioptric mirror lens: ring-shaped bokeh",
          focalMM: 500, maxAperture: 8, minAperture: 8, blades: 0, bladeRotation: 0,
          catsEye: 0.1, soapBubble: 0.2, vignette: 0.3, minFocusM: 4.0, lateralCA: 0.0001, axialCA: 0,
@@ -180,12 +192,44 @@ private let screwMount: [Lens] = [
          catsEye: 0.2, soapBubble: 0, vignette: 0.35, minFocusM: 0.23, lateralCA: 0.0008, axialCA: 0.01),
 ]
 
+private let toysAndMods: [Lens] = [
+    Lens(name: "Leningrad LK-A Minitor 32mm f/2.8", inspiredBy: "the Leningrad snapshot compact's 32 mm: dark corners, soft edges, punchy middle",
+         focalMM: 32, maxAperture: 2.8, minAperture: 16, blades: 0, bladeRotation: 0,
+         catsEye: 0.35, soapBubble: 0.1, vignette: 0.95, minFocusM: 0.8, lateralCA: 0.002, axialCA: 0.02,
+         curvatureRadial: 0.35, curvatureTangential: 0.6),
+    Lens(name: "Kowloon Hoga 60mm f/8 Plastic", inspiredBy: "the Hong Kong plastic toy camera's single meniscus: a sharp-ish centre in a smeared, dark frame",
+         focalMM: 60, maxAperture: 8, minAperture: 11, blades: 0, bladeRotation: 0,
+         catsEye: 0.2, soapBubble: 0, vignette: 1.0, minFocusM: 1.0, lateralCA: 0.0035, axialCA: 0.05,
+         sphericalAberration: 0.15, curvatureRadial: 2.0, curvatureTangential: 3.0),
+    Lens(name: "Krasnogorsk Solnce 58mm f/2 · Reversed Front", inspiredBy: "the Biotar-type Soviet fifty with its front element turned round: a sharp centre in a whirlpool",
+         focalMM: 58, maxAperture: 2, minAperture: 16, blades: 0, bladeRotation: 0,
+         catsEye: 0.9, soapBubble: 0.3, vignette: 0.6, minFocusM: 0.5, lateralCA: 0.0018, axialCA: 0.05,
+         sphericalAberration: 0.3, curvatureRadial: 0.5, curvatureTangential: 5.0),
+    Lens(name: "Krasnogorsk Solnce 58mm f/2 · Anamorfake", inspiredBy: "the same Soviet fifty with an oval insert at the stop: tall oval bokeh, a widescreen look",
+         focalMM: 58, maxAperture: 2, minAperture: 16, blades: 0, bladeRotation: 0,
+         catsEye: 0.9, soapBubble: 0.25, vignette: 0.5, minFocusM: 0.5, lateralCA: 0.0009, axialCA: 0.035,
+         squeeze: 0.5, curvatureRadial: 0.1, curvatureTangential: 0.45),
+    Lens(name: "Burnside Bendy 50mm f/2.5", inspiredBy: "the bendy tilting lens: steer a sharp sweet spot anywhere, the rest melts away",
+         focalMM: 50, maxAperture: 2.5, minAperture: 22, blades: 0, bladeRotation: 0,
+         catsEye: 0.3, soapBubble: 0.1, vignette: 0.45, minFocusM: 0.45, lateralCA: 0.0015, axialCA: 0.04,
+         sphericalAberration: 0.15, curvatureRadial: 1.2, curvatureTangential: 1.6, movement: .tilt(15)),
+    Lens(name: "Ohi PC-Kor 35mm f/3.5", inspiredBy: "the first perspective-control lens for 35 mm (1962): shift 11 mm to keep buildings straight",
+         focalMM: 35, maxAperture: 3.5, minAperture: 32, blades: 6, bladeRotation: 0,
+         catsEye: 0.12, soapBubble: 0, vignette: 0.2, minFocusM: 0.3, lateralCA: 0.0012, axialCA: 0.006,
+         movement: .shift(11)),
+    Lens(name: "Ohi PC-Kor 28mm f/3.5", inspiredBy: "the wider shift lens (1975-83) for architecture and landscape",
+         focalMM: 28, maxAperture: 3.5, minAperture: 22, blades: 7, bladeRotation: 0,
+         catsEye: 0.12, soapBubble: 0, vignette: 0.22, minFocusM: 0.3, lateralCA: 0.0014, axialCA: 0.006,
+         movement: .shift(11)),
+]
+
 let lensCollections: [LensCollection] = [
     LensCollection(name: "Field Assignment", about: "the magazine photographer's prime kit of the 70s and 80s", lenses: fieldAssignment),
     LensCollection(name: "Screw-Mount Classics", about: "the multi-coated M42 primes of the early 70s", lenses: screwMount),
     LensCollection(name: "Bokeh Monsters", about: "fast glass for melting backgrounds", lenses: bokehMonsters),
     LensCollection(name: "Macro", about: "close focusing, flat field, sharp corners", lenses: macroLenses),
     LensCollection(name: "Exotic", about: "rare vintage and odd optics", lenses: exoticLenses),
+    LensCollection(name: "Toys, Mods & Movements", about: "plastic, reversed, bent and shifted: lenses for breaking the rules", lenses: toysAndMods),
 ]
 
 /// All of them, collection by collection (a lens's index is its place here).

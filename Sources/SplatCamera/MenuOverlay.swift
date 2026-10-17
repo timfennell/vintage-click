@@ -155,6 +155,7 @@ final class MenuOverlay: NSView {
             ("depth-of-field preview", "hold right (B)", "hold right click"),
             ("camera bag (change lens)", "left (X)", "B, or 1 - 9 in the collection"),
             ("load film (stock, push / pull)", "top (Y)", "R"),
+            ("tilt / shift lens movements", "", "hold M + arrows · N squares"),
         ]),
         ("LIGHTING", [
             ("lighting mode on / off", "R3", "L"),

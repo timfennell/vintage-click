@@ -302,7 +302,10 @@ final class Viewer: NSObject, MTKViewDelegate {
             let fisheye = body.lens.isFisheye
             loop.requestFinder(FinderJob(
                 view: carried.viewMatrix, position: carried.position, fx: fx,
-                lens: lensOn && !fisheye ? body.lensParams(fNumber: n, focalPx: fx, cells: 1, table: table(body, n)) : nil,
+                lens: lensOn && !fisheye ? body.lensParams(
+                    fNumber: n, focalPx: fx, cells: 1, table: table(body, n),
+                    axis: SIMD2(Float(width), Float(height)) / 2 + body.axisOffset(width: width),
+                    fieldRadius: simd_length(SIMD2(Float(width), Float(height))) / 2) : nil,
                 body: body, lighting: lighting, fisheye: fisheye))
         }
 
@@ -377,7 +380,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let b = job.body, l = b.lens
         var o: [SIMD4<Float>] = [
             SIMD4(Float(width), Float(height), job.fx, job.fx),
-            SIMD4(Float(width) / 2, Float(height) / 2, b.metresPerUnit, b.focusM),
+            SIMD4<Float>(lowHalf: SIMD2(Float(width), Float(height)) / 2 + b.axisOffset(width: width), highHalf: SIMD2(b.metresPerUnit, b.focusM)),
             SIMD4(l.focalMM / 1000, b.viewingAperture, l.maxAperture, Float(l.blades)),
             SIMD4(l.catsEye, l.soapBubble, l.bladeRotation, l.vignette),
             loop.background,
@@ -386,6 +389,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                   b.exposureStops),
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(height) / 2 : 0, l.obstruction),
             Self.finderInset(width: width, height: height),
+            SIMD4(l.squeeze, 0, 0, 0),
         ]
         if job.fromLight != nil {
             o[5].x = 0          // no focusing aids
@@ -557,6 +561,19 @@ final class Viewer: NSObject, MTKViewDelegate {
             // The ring's grease and detents: a soft tick every so far of turn.
             focusTurned += abs(log(body.focusM / wasFocus))
             if focusTurned > 0.12 { focusTurned = 0; Sounds.shared.play(.focus, volume: 0.35) }
+            // M + arrows tilt or shift a lens that can; N squares it up again.
+            if s.movement != .zero {
+                if body.move(s.movement * dt) {
+                    hud?.flash(movementLabel)
+                } else {
+                    hud?.flash("THIS LENS DOES NOT TILT OR SHIFT")
+                }
+            }
+            if s.centreMovement && (body.tilt != .zero || body.shift != .zero) {
+                body.tilt = .zero
+                body.shift = .zero
+                hud?.flash(movementLabel)
+            }
             // Number keys: that lens of the mounted lens's collection.
             if let d = s.digit, d >= 1, let shelf = lensCollections.firstIndex(where: { $0.name == body.lens.collection }) {
                 let start = lensCollections.prefix(shelf).reduce(0) { $0 + $1.lenses.count }
@@ -1005,6 +1022,14 @@ final class Viewer: NSObject, MTKViewDelegate {
             self?.closeMenu()
         }
         menu.showingLenses = true
+    }
+
+    private var movementLabel: String {
+        switch body.lens.movement {
+        case .tilt: return String(format: "TILT %+.1f° ACROSS  %+.1f° UP", body.tilt.x, body.tilt.y)
+        case .shift: return String(format: "SHIFT %+.1f MM RIGHT  %+.1f MM UP", body.shift.x, body.shift.y)
+        case .none: return ""
+        }
     }
 
     private func mount(_ i: Int) {

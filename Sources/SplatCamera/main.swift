@@ -43,6 +43,12 @@ let meterWait = Double(option("--meter-wait") ?? "1.5") ?? 1.5
 let comp = Int(option("--comp") ?? "0") ?? 0
 let flyLight = option("--fly").flatMap { Int($0) }
 let focusChoice = option("--focus").flatMap { Float($0) }
+// --tilt X,Y (degrees) / --shift X,Y (mm, right and up): lens movements, for tests.
+func pair(_ name: String) -> SIMD2<Float>? {
+    guard let v = option(name)?.split(separator: ",").compactMap({ Float($0) }), v.count == 2 else { return nil }
+    return SIMD2(v[0], v[1])
+}
+let tiltChoice = pair("--tilt"), shiftChoice = pair("--shift")
 // --turn YAW,PITCH (degrees, right and up): aim the camera for scripted checks.
 let turn = option("--turn").map { $0.split(separator: ",").compactMap { Float($0) } }
 let noShadows = args.contains("--no-shadows")
@@ -216,6 +222,8 @@ func configureSession() {
     if lightingMode || flyLight != nil { viewer.startLighting() }
     if let k = flyLight { viewer.flyLight(k - 1) }
     if let m = focusChoice { viewer.body.focusM = m }
+    if let t = tiltChoice { viewer.body.tilt = t }
+    if let t = shiftChoice { viewer.body.shift = t }
     DispatchQueue.main.async {
         if startMenu { viewer.openMenu() }
         if startControls { viewer.showControls() }

@@ -387,8 +387,10 @@ final class RenderLoop {
         setLens(job.lens)
         setCameraModel(job.fisheye)
         let t0 = CACurrentMediaTime()
+        // A shifted lens moves the optical axis (never when seeing from a light).
+        let axis = job.fromLight == nil ? job.body.axisOffset(width: finderSize.w) : .zero
         let ok = render(finderSlots[slot].index, view: job.view, fx: job.fx,
-                        cx: Float(finderSize.w) / 2, cy: Float(finderSize.h) / 2)
+                        cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y)
         setCameraModel(false)
         let ms = (CACurrentMediaTime() - t0) * 1000
         guard ok else { return }
@@ -404,12 +406,14 @@ final class RenderLoop {
         let (w, h) = e.size
         return [
             SIMD4(Float(w), Float(h), fx, fx),
-            SIMD4(Float(w) / 2, Float(h) / 2, b.metresPerUnit, b.focusM),
+            SIMD4<Float>(lowHalf: SIMD2(Float(w), Float(h)) / 2 + b.axisOffset(width: w), highHalf: SIMD2(b.metresPerUnit, b.focusM)),
             SIMD4(l.focalMM / 1000, n, l.maxAperture, Float(l.blades)),
             SIMD4(l.catsEye, l.soapBubble, l.bladeRotation, l.vignette),
             background,
             SIMD4(0, 1, Float(b.rollNumber * 100 + e.frameNumber), b.exposureStops),
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(h) / 2 : 0, l.obstruction),
+            SIMD4(0, 0, 0, 0),
+            SIMD4(l.squeeze, 0, 0, 0),
         ]
     }
 
@@ -426,7 +430,7 @@ final class RenderLoop {
         // where that colour focuses (red a little beyond green, blue short).
         // Splitting the samples by colour needs enough of them: with fewer, each
         // channel's blur comes from different lens points and blotches.
-        let channel = b.lens.axialCA > 0 && e.cells.count >= 64 ? e.next % 3 : -1
+        let channel = b.splitsColour(cells: e.cells.count) ? e.next % 3 : -1
         let c = e.cells[e.next]
         var body = b
         var dioptres = 1 / b.focusM
@@ -438,29 +442,36 @@ final class RenderLoop {
         body.focusM = 1 / dioptres
         let invFocus = body.metresPerUnit / body.focusM
         // A fisheye has no meaningful depth of field to sample: one look, its own camera.
-        setLens(b.lens.isFisheye ? nil : body.lensParams(fNumber: n, focalPx: fx, cells: e.cells.count, table: nil))
         setCameraModel(b.lens.isFisheye)
         defer { setCameraModel(false) }
 
-        let d = c * radiusUnits
+        // The lens point, in scene units (an oval stop narrows it across).
+        let d = SIMD2(c.x * b.lens.squeeze, c.y) * radiusUnits
+        let axis = SIMD2(Float(w), Float(h)) / 2 + b.axisOffset(width: w)
         var vm = e.camera.viewMatrix
         vm[3] -= d.x
         vm[7] -= d.y
         var o = photoOptics(e, fx: fx)
         // Each sub-pupil's share of the aperture, as a radius (a colour's
         // sub-pupils are a third as many, so each covers more).
-        let share = sqrt(Float(channel < 0 ? 1 : 3) / Float(e.cells.count)) * 1.2
-        let mask: SIMD4<Float> = channel < 0 ? [1, 1, 1, share]
-            : (channel == 0 ? [1, 0, 0, share] : (channel == 1 ? [0, 1, 0, share] : [0, 0, 1, share]))
+        let share = sqrt(Float(channel < 0 ? 1 : 3) / Float(e.cells.count))
+        let mask: SIMD4<Float> = channel < 0 ? [1, 1, 1, 1]
+            : (channel == 0 ? [1, 0, 0, 1] : (channel == 1 ? [0, 1, 0, 1] : [0, 0, 1, 1]))
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         let (tw, th) = finderSize
         // The photo in finder-sized tiles: each a render with the principal
         // point moved so it sees its part of the frame.
         for y0 in stride(from: 0, to: h, by: th) {
             for x0 in stride(from: 0, to: w, by: tw) {
+                // The field is measured from the optical axis, wherever this tile is.
+                let origin = SIMD2(Float(x0), Float(y0))
+                setLens(b.lens.isFisheye ? nil : body.lensParams(
+                    fNumber: n, focalPx: fx, cells: channel < 0 ? e.cells.count : e.cells.count / 3,
+                    table: nil, axis: axis - origin,
+                    fieldRadius: simd_length(SIMD2(Float(w), Float(h))) / 2, cell: d, patch: share))
                 guard render(photoSlot.index, view: vm, fx: fx,
-                             cx: Float(w) / 2 + fx * d.x * invFocus - Float(x0),
-                             cy: Float(h) / 2 + fx * d.y * invFocus - Float(y0)),
+                             cx: axis.x + fx * d.x * invFocus - Float(x0),
+                             cy: axis.y + fx * d.y * invFocus - Float(y0)),
                       let tcb = queue.makeCommandBuffer(), let te = tcb.makeComputeCommandEncoder() else {
                     finish(e)
                     return

@@ -41,6 +41,10 @@ struct CameraBody {
     var framesShot = 0
     var rollNumber = 1
     var dofPreview = false
+    /// Lens movements: a tilt lens's tilt (degrees: x turns the focus plane
+    /// across the frame, y up and down), a shift lens's shift (mm, right and up).
+    var tilt = SIMD2<Float>(0, 0)
+    var shift = SIMD2<Float>(0, 0)
 
     var metresPerUnit: Float = 1
     var sceneEV: Float = 12             // brightness the scan was captured at (EV at ISO 100)
@@ -96,7 +100,28 @@ struct CameraBody {
         let stops = lens.apertureStops
         apertureIndex = stops.enumerated().min(by: { abs($0.1 - n) < abs($1.1 - n) })!.offset
         focusM = max(focusM, lens.minFocusM)
+        tilt = .zero
+        shift = .zero
     }
+
+    /// Tilts or shifts the lens by `v` (stick or arrows, per second, times dt),
+    /// up to how far it goes. False when the lens has no movements.
+    mutating func move(_ v: SIMD2<Float>) -> Bool {
+        switch lens.movement {
+        case .none: return false
+        case .tilt(let most):
+            tilt += v * most * 0.6
+            if simd_length(tilt) > most { tilt *= most / simd_length(tilt) }
+        case .shift(let most):
+            shift += v * most * 0.6
+            if simd_length(shift) > most { shift *= most / simd_length(shift) }
+        }
+        return true
+    }
+
+    /// Where a shifted lens puts the optical axis, from the frame's centre, in
+    /// pixels of an image `width` wide (shifting up moves the scene down the frame).
+    func axisOffset(width: Int) -> SIMD2<Float> { SIMD2(-shift.x, shift.y) * Float(width) / 36 }
     /// A fresh roll of this stock, rated at box speed + `push` stops.
     mutating func loadRoll(stock index: Int, push p: Int) {
         stockIndex = index
@@ -145,26 +170,76 @@ struct CameraBody {
         return rows
     }
 
+    /// `n` lens points of equal area in rings over the unit disc, the outer ring
+    /// on the rim. (A sunflower spiral leaves its outermost points at uneven
+    /// distances from the rim: with few of them, rim-bright bokeh came out beaded.)
+    func ringCells(_ n: Int, turn: Float) -> [SIMD2<Float>] {
+        let rings = max(1, Int((Float(n) / .pi).squareRoot().rounded()))
+        let radii = (0..<rings).map { (Float($0) + 0.5) / Float(rings) }
+        let total = radii.reduce(0, +)
+        var counts = radii.map { max(1, Int((Float(n) * $0 / total).rounded())) }
+        counts[rings - 1] = max(1, counts[rings - 1] + n - counts.reduce(0, +))
+        var out: [SIMD2<Float>] = []
+        for (i, r) in radii.enumerated() {
+            let a0 = turn + Float(i) * 2.39996323
+            for j in 0..<counts[i] {
+                let a = a0 + 2 * .pi * Float(j) / Float(counts[i])
+                out.append(SIMD2(r * cos(a), r * sin(a)))
+            }
+        }
+        return Array(out.prefix(n))
+    }
+
+    /// Whether an exposure of `cells` sub-pupils splits them by colour (axial colour needs enough of them).
+    func splitsColour(cells: Int) -> Bool { lens.axialCA > 0 && cells >= 64 }
+
     /// Lens parameters for one render. `cells` > 1: a sub-pupil of that many,
     /// blurred by only its own spread (the shutter); 1: the whole pupil (finder).
-    func lensParams(fNumber n: Float, focalPx: Float, cells: Int, table: [SIMD4<Float>]?) -> [SIMD4<Float>] {
+    /// `axis`: the optical axis in this render's pixels, `fieldRadius`: the
+    /// frame's half-diagonal in them, `cell`: the sub-pupil's lens point (scene
+    /// units), `patch`: the radius of lens it stands for (aperture radii).
+    func lensParams(fNumber n: Float, focalPx: Float, cells: Int, table: [SIMD4<Float>]?,
+                    axis: SIMD2<Float>, fieldRadius: Float, cell: SIMD2<Float> = .zero,
+                    patch: Float = 0) -> [SIMD4<Float>] {
         let radiusUnits = lens.focalMM / 1000 / n / 2 / metresPerUnit
         let invFocus = metresPerUnit / focusM
         // Blur capped where it would only cost speed (a quarter of the frame height).
         let maxSigma = focalPx * 0.25
         var p: [SIMD4<Float>] = [
             SIMD4(1, invFocus, radiusUnits, cells == 1 && table != nil ? 1 : 0),
-            SIMD4(1 / (4 * Float(cells)), 0, 0, maxSigma),
+            // Each sub-pupil blurs by its share of the aperture, a little more
+            // than a disc's own spread (r^2 / 4) so neighbours close the gaps.
+            SIMD4(1 / (2 * Float(cells)), 1, 0, maxSigma),
         ]
         p += table ?? []
+        p += [SIMD4<Float>](repeating: .zero, count: Self.tableSize - (table?.count ?? 0))
+        // The image surface off the film by d mm moves focus by d / f^2 dioptres.
+        let f = lens.focalMM / 1000
+        let perMM = 0.001 / (f * f) * metresPerUnit
+        let halfDiagonalMM: Float = 21.63
+        let deg = Float.pi / 180
+        p.append(SIMD4(tan(tilt.x * deg) * halfDiagonalMM * perMM, -tan(tilt.y * deg) * halfDiagonalMM * perMM,
+                       lens.curvatureRadial * perMM, lens.curvatureTangential * perMM))
+        // Rim focus shift for a sub-pupil (the render widens rim cells to match).
+        let open = lens.maxAperture / n
+        let rim = cells > 1 ? lens.sphericalAberration * open * open * metresPerUnit : 0
+        p.append(SIMD4(cell.x, cell.y, lens.squeeze, rim))
+        p.append(SIMD4(axis.x, axis.y, fieldRadius, 0))
+        // Sub-pupils: the barrel cuts each one's patch of lens where it is on the
+        // frame (in the render, so a cat's eye has a clean edge, not a row of cells).
+        p.append(SIMD4(lens.catsEye, open, cells > 1 ? patch : 0, 0))
         return p
     }
 
     /// The shutter's sub-pupils: centres (in aperture radii) spread evenly over
     /// the aperture shape, as gs_render's lens_samples does.
+    /// With axial colour each sub-pupil carries one channel (every third):
+    /// each channel then gets a whole set of its own, turned a little.
     func cellCentres(_ k: Int) -> [SIMD2<Float>] {
-        (0..<k).map { i in
-            var v = vogel(i, k)
+        let split = splitsColour(cells: k)
+        let sets = split ? (0..<3).map { c in ringCells((k - c + 2) / 3, turn: Float(c) * 2.1) } : [ringCells(k, turn: 0)]
+        return (0..<k).map { i in
+            var v = split ? sets[i % 3][i / 3] : sets[0][i]
             if lens.blades >= 3 {
                 let b = Float(lens.blades)
                 let seg = 2 * Float.pi / b
