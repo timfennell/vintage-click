@@ -229,16 +229,15 @@ float3 prism_sample(device const float* f, float2 p, float2 shift, float z, cons
 // The focusing screen, always: the lens's image (its depth of field, light
 // fall-off and colour fringes) on fine-ground glass with a fresnel, a
 // split-prism disc (halves shift apart with defocus) and a microprism collar.
-fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(0)]],
-                           constant float4* O [[buffer(1)]], constant float4* F [[buffer(2)]]) {
-    // The finder: the screen's image, a rounded-corner window in a black surround.
-    float2 p = (in.pos.xy - O[7].xy) / O[7].z;
+// The finder: the screen's image, a rounded-corner window in a black surround (sRGB).
+float3 finder_base(float2 pos, device const float* f, constant float4* O) {
+    float2 p = (pos - O[7].xy) / O[7].z;
     float2 halfSize = O[0].xy * 0.5;
     float2 dq = abs(p - halfSize) - (halfSize - O[7].w);
     float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;   // < 0 inside
     if (edge > 1.0) {
-        float g = 0.022 + 0.01 * value_noise(in.pos.xy / 3.0, 31);        // the surround's black
-        return float4(g, g, g * 1.05, 1);
+        float g = 0.022 + 0.01 * value_noise(pos / 3.0, 31);              // the surround's black
+        return float3(g, g, g * 1.05);
     }
     float2 c = O[0].xy * 0.5;
     float R = O[5].x;
@@ -286,7 +285,62 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
     // The window's edge: a soft dark lip, then the surround.
     col *= smoothstep(0.0, O[7].w * 0.9, -edge) * 0.25 + 0.75;
     float3 outc = to_srgb(col);
-    return float4(mix(outc, float3(0.022), saturate(edge + 0.5)), 1);
+    return mix(outc, float3(0.022), saturate(edge + 0.5));
+}
+
+// The meter, seen through the eyepiece. Its scale is light projected beside
+// the image (as framelines are): soft, with a faint bloom and colour
+// fringes, as bright as the light the scene sends in. The needle is a dark
+// wire in front, its shadow faint on the scale. M[0] = the scale's texture
+// rect (px), M[1] = needle pivot and tip (px), M[2] = (on, u px, -, -).
+float3 meter_light(float3 outc, float2 pos, device const float* f, constant float4* O,
+                   constant float4* M, texture2d<float> plate) {
+    constexpr sampler sm(filter::linear, address::clamp_to_zero);
+    float u = M[2].y;
+    float4 R = M[0];
+    float3 lin = to_lin(outc);
+    float2 lo = R.xy - 2.5 * u, hi = R.xy + R.zw + 2.5 * u;
+    float shade = 0;
+    if (all(pos > lo) && all(pos < hi)) {
+        // How much light reaches the scale: what the scene sends to the screen's edge.
+        float L = 0;
+        for (uint k = 0; k < 6; k++) {
+            uint2 sp = uint2(O[0].x * 0.08, O[0].y * (0.15 + 0.14 * float(k)));
+            L += dot(to_lin(frame_rgb(f, sp, O)), float3(0.2126, 0.7152, 0.0722));
+        }
+        float I = min(1.6, (0.25 + 1.3 * L / 6) * O[5].y);
+        float3 core = 0, glow = 0;
+        for (uint k = 0; k < 12; k++) {
+            float2 o = vogel(k, 12);
+            float2 a = (pos + o * 1.4 - R.xy) / R.zw;
+            float2 ca = float2(0.7, 0) / R.zw;
+            core += float3(plate.sample(sm, a + ca).r, plate.sample(sm, a).g, plate.sample(sm, a - ca).b);
+            glow += plate.sample(sm, (pos + o * 0.9 * u - R.xy) / R.zw).rgb;
+        }
+        float3 light = to_lin(saturate(core / 12)) + 0.35 * to_lin(saturate(glow / 12));
+        lin += light * I;
+        shade = plate.sample(sm, (pos - R.xy) / R.zw).a;
+    }
+    // The needle, and its shadow on the scale.
+    float2 a = M[1].xy, b = M[1].zw;
+    float2 ab = b - a;
+    float t = saturate(dot(pos - a, ab) / dot(ab, ab));
+    float d = length(pos - (a + t * ab));
+    float w = max(0.7, 0.12 * u);
+    lin *= 1 - 0.85 * (1 - smoothstep(w - 1.6, w + 1.6, d));     // a little out of focus
+    float2 off = float2(0.25, 0.3) * u;
+    float t2 = saturate(dot(pos - off - a, ab) / dot(ab, ab));
+    float d2 = length(pos - off - (a + t2 * ab));
+    lin *= 1 - 0.3 * shade * (1 - smoothstep(w, w + 0.5 * u, d2));
+    return to_srgb(lin);
+}
+
+fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(0)]],
+                           constant float4* O [[buffer(1)]], constant float4* F [[buffer(2)]],
+                           constant float4* M [[buffer(3)]], texture2d<float> plate [[texture(0)]]) {
+    float3 outc = finder_base(in.pos.xy, f, O);
+    if (M[2].x > 0) outc = meter_light(outc, in.pos.xy, f, O, M, plate);
+    return float4(outc, 1);
 }
 
 // What is under the finder's crosshair: the nearest surface's ray depth (scene

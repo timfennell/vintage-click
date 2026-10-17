@@ -352,6 +352,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         enc.setFragmentBuffer(frame.buf, offset: frame.off, index: 0)
         enc.setFragmentBytes(&o, length: o.count * 16, index: 1)
         enc.setFragmentBytes(&f, length: f.count * 16, index: 2)
+        var m = meterUniforms()
+        enc.setFragmentBytes(&m, length: m.count * 16, index: 3)
+        enc.setFragmentTexture(meterTexture ?? blankTexture, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         drawWireframes(enc, frame: frame, optics: &o)
         enc.endEncoding()
@@ -435,6 +438,54 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// inset in the black surround, room below for the LED readouts. The HUD
     /// lays out against the same rectangle.
     static let finderImage = (x: CGFloat(0.09), y: CGFloat(0.045), scale: CGFloat(0.82))
+
+    // MARK: the meter in the finder
+
+    private var meterTexture: MTLTexture?
+    private var meterKey: ViewfinderHUD.MeterShape?
+    private lazy var blankTexture: MTLTexture = {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
+        return device.makeTexture(descriptor: d)!
+    }()
+
+    /// The meter for the finder's shader: where its scale and needle are, in
+    /// drawable pixels, and its scale drawn (again only when it changes).
+    private func meterUniforms() -> [SIMD4<Float>] {
+        guard let hud, let shape = hud.meterShape, shape.bounds.width > 0 else { return [.zero, .zero, .zero] }
+        let sx = CGFloat(width) / shape.bounds.width, sy = CGFloat(height) / shape.bounds.height
+        let pr = shape.plateRect
+        var still = shape
+        still.tip = .zero
+        if meterKey != still || meterTexture == nil {
+            meterKey = still
+            meterTexture = Self.drawMeterTexture(shape, sx: sx, sy: sy, device: device)
+        }
+        func px(_ p: NSPoint) -> SIMD2<Float> { SIMD2(Float(p.x * sx), Float(p.y * sy)) }
+        return [SIMD4(Float(pr.minX * sx), Float(pr.minY * sy), Float(pr.width * sx), Float(pr.height * sy)),
+                SIMD4(lowHalf: px(shape.pivot), highHalf: px(shape.tip)),
+                SIMD4(1, Float(shape.u * sy), 0, 0)]
+    }
+
+    private static func drawMeterTexture(_ shape: ViewfinderHUD.MeterShape, sx: CGFloat, sy: CGFloat,
+                                         device: MTLDevice) -> MTLTexture? {
+        let pr = shape.plateRect
+        let w = max(1, Int((pr.width * sx).rounded(.up))), h = max(1, Int((pr.height * sy).rounded(.up)))
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        // Flipped, in the HUD's points: the HUD draws the scale as it lays it out.
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: sx, y: -sy)
+        ctx.translateBy(x: -pr.minX, y: -pr.minY)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        ViewfinderHUD.drawPlate(shape)
+        NSGraphicsContext.restoreGraphicsState()
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+        guard let tex = device.makeTexture(descriptor: d), let data = ctx.data else { return nil }
+        tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: w * 4)
+        return tex
+    }
 
     static func finderInset(width: Int, height: Int) -> SIMD4<Float> {
         let f = finderImage

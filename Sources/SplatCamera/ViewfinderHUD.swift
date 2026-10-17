@@ -78,11 +78,12 @@ final class ViewfinderHUD: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         // Mirror up: nothing reaches the finder, not even the readouts.
-        if info.mirrorUp { return }
+        if info.mirrorUp { meterShape = nil; return }
         let img = imageRect
         let u = img.height / 50
 
         if let beam = info.beam {
+            meterShape = nil
             drawBeam(beam, in: img, u: u)
         } else {
             drawMeter(img, u: u)
@@ -248,69 +249,40 @@ final class ViewfinderHUD: NSView {
 
     // MARK: the meter
 
-    /// The shutter-speed card on the left edge, the needle swinging in to the
-    /// speed the meter wants, the green tab at the speed set.
-    private func drawMeter(_ img: NSRect, u: CGFloat) {
-        let speeds = shutterSpeeds
-        let n = speeds.count
+    /// Where the meter is, for the finder's shader to show it through the
+    /// eyepiece: its scale as soft projected light, the needle a dark wire in
+    /// front with a faint shadow. In this view's points.
+    struct MeterShape: Equatable {
+        var card: NSRect            // the printed plate
+        var pivot: NSPoint          // the needle's pivot (off the plate, outside the frame)
+        var tip: NSPoint
+        var u: CGFloat
+        var shutterIndex: Int
+        var bounds: NSSize
+        /// The plate's texture covers the card and the set-speed tab beside it.
+        var plateRect: NSRect { NSRect(x: card.minX, y: card.minY, width: card.width + 2 * u, height: card.height) }
+    }
+    private(set) var meterShape: MeterShape?
+
+    private static func meterLayout(_ img: NSRect, u: CGFloat) -> NSRect {
         let cardW = 3.6 * u, cardH = img.height * 0.66
-        let card = NSRect(x: img.minX - cardW * 0.62, y: img.midY - cardH / 2, width: cardW, height: cardH)
+        return NSRect(x: img.minX - cardW * 0.62, y: img.midY - cardH / 2, width: cardW, height: cardH)
+    }
+
+    /// Fastest at the top: the height of a (fractional) speed index on the card.
+    private static func speedY(_ index: CGFloat, card: NSRect, u: CGFloat) -> CGFloat {
+        let n = shutterSpeeds.count
         let cap = 2.0 * u
-        let scaleTop = card.minY + cap, step = (cardH - 2 * cap) / CGFloat(n)
-        // Fastest at the top. Position for a (fractional) speed index.
-        func y(_ index: CGFloat) -> CGFloat { scaleTop + (CGFloat(n - 1) - index + 0.5) * step }
+        let step = (card.height - 2 * cap) / CGFloat(n)
+        return card.minY + cap + (CGFloat(n - 1) - index + 0.5) * step
+    }
 
-        // The scale is printed on a clear plate at the screen's edge: milky
-        // where it is frosted so the print reads, the scene faint through it,
-        // the ends tinted red, its edge catching the light.
-        let plate = NSBezierPath(roundedRect: card, xRadius: 0.5 * u, yRadius: 0.5 * u)
-        NSGraphicsContext.saveGraphicsState()
-        plate.addClip()
-        NSGradient(colors: [NSColor(white: 0.97, alpha: 0.62), NSColor(white: 0.90, alpha: 0.50),
-                            NSColor(white: 0.96, alpha: 0.60)])?.draw(in: card, angle: 90)
-        let red = NSColor(calibratedRed: 0.86, green: 0.22, blue: 0.14, alpha: 1)
-        red.withAlphaComponent(0.55).setFill()
-        NSRect(x: card.minX, y: card.minY, width: cardW, height: cap).fill()
-        NSRect(x: card.minX, y: card.maxY - cap, width: cardW, height: cap).fill()
-        // A sheen along the plate, as glass has.
-        NSGradient(colors: [NSColor(white: 1, alpha: 0.0), NSColor(white: 1, alpha: 0.22), NSColor(white: 1, alpha: 0.0)])?
-            .draw(in: NSRect(x: card.minX, y: card.minY, width: cardW * 0.45, height: cardH), angle: 0)
-        NSGraphicsContext.restoreGraphicsState()
-        plate.lineWidth = max(1, 0.12 * u)
-        NSColor(white: 1, alpha: 0.45).setStroke()
-        plate.stroke()
-        let inner = NSBezierPath(roundedRect: card.insetBy(dx: 0.12 * u, dy: 0.12 * u), xRadius: 0.4 * u, yRadius: 0.4 * u)
-        inner.lineWidth = max(1, 0.08 * u)
-        NSColor(white: 0, alpha: 0.25).setStroke()
-        inner.stroke()
-        let capAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 1.1 * u, weight: .bold),
-                                                       .foregroundColor: NSColor(white: 1, alpha: 0.9)]
-        let m = NSAttributedString(string: "M", attributes: capAttrs)
-        m.draw(at: NSPoint(x: card.midX - m.size().width / 2, y: card.maxY - cap + (cap - m.size().height) / 2))
-        for (i, s) in speeds.enumerated() {
-            let slow = s.seconds >= 1.0 / 30
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: min(step * 0.6, cardW * 0.3), weight: .medium),
-                .foregroundColor: slow ? red.withAlphaComponent(0.9) : NSColor(white: 0.08, alpha: 0.85),
-            ]
-            let str = NSAttributedString(string: s.label, attributes: attrs)
-            let sz = str.size()
-            str.draw(at: NSPoint(x: card.maxX - sz.width - 0.35 * u, y: y(CGFloat(i)) - sz.height / 2))
-        }
-        // The green tab: the speed you set.
+    /// The needle swings (it has mass) to the speed the meter wants at this
+    /// aperture; the finder's shader draws it and the plate.
+    private func drawMeter(_ img: NSRect, u: CGFloat) {
+        let n = shutterSpeeds.count
+        let card = Self.meterLayout(img, u: u)
         let set = CGFloat(info.shutterIndex)
-        NSColor(calibratedRed: 0.15, green: 0.62, blue: 0.48, alpha: 0.95).setFill()
-        let tab = NSBezierPath()
-        let ty = y(set)
-        tab.move(to: NSPoint(x: card.maxX - 0.2 * u, y: ty - 0.45 * step))
-        tab.line(to: NSPoint(x: card.maxX + 1.4 * u, y: ty - 0.25 * step))
-        tab.line(to: NSPoint(x: card.maxX + 1.4 * u, y: ty + 0.25 * step))
-        tab.line(to: NSPoint(x: card.maxX - 0.2 * u, y: ty + 0.45 * step))
-        tab.close()
-        tab.fill()
-
-        // The needle: the speed the meter wants at this aperture (+ over = faster).
-        // It has mass, and swings past the ends of the card when far off.
         let want = max(-1.5, min(CGFloat(n) + 0.5, set + CGFloat(info.meterStops)))
         let now = CACurrentMediaTime()
         let dt = CGFloat(min(0.05, now - lastDraw))
@@ -318,22 +290,61 @@ final class ViewfinderHUD: NSView {
         let k: CGFloat = 60, damp: CGFloat = 11
         needleSpeed += (k * (want - needle) - damp * needleSpeed) * dt
         needle += needleSpeed * dt
-        let pivot = NSPoint(x: card.minX - 9 * u, y: card.midY)
-        let tip = NSPoint(x: card.maxX + 2.2 * u, y: y(needle))
-        let path = NSBezierPath()
-        path.move(to: pivot)
-        path.line(to: tip)
-        path.lineWidth = max(1.6, 0.26 * u)
-        let ctx = NSGraphicsContext.current?.cgContext
-        ctx?.saveGState()
-        ctx?.setShadow(offset: CGSize(width: 0, height: 1), blur: 2, color: NSColor.black.withAlphaComponent(0.5).cgColor)
-        NSColor(white: 0.04, alpha: 0.95).setStroke()
-        path.stroke()
-        ctx?.restoreGState()
+        meterShape = MeterShape(card: card, pivot: NSPoint(x: card.minX - 9 * u, y: card.midY),
+                                tip: NSPoint(x: card.maxX + 2.2 * u, y: Self.speedY(needle, card: card, u: u)),
+                                u: u, shutterIndex: info.shutterIndex, bounds: bounds.size)
         // Keep animating while it is still swinging.
         if abs(needleSpeed) > 0.01 || abs(want - needle) > 0.01 {
             DispatchQueue.main.async { [weak self] in self?.needsDisplay = true }
         }
+    }
+
+    /// The scale as projected light (as framelines are in a finder): rgb the
+    /// light's colour, alpha how much. A faint bar, speeds and ticks in warm
+    /// cream, slow speeds and the ends in red, the set speed's tab in green.
+    /// Drawn in this view's points into the current (flipped) context.
+    static func drawPlate(_ m: MeterShape) {
+        let card = m.card, u = m.u
+        let cap = 2.0 * u
+        let cream = NSColor(calibratedRed: 1.0, green: 0.90, blue: 0.78, alpha: 1)
+        let red = NSColor(calibratedRed: 1.0, green: 0.40, blue: 0.28, alpha: 1)
+        let bar = NSBezierPath(roundedRect: card, xRadius: 0.5 * u, yRadius: 0.5 * u)
+        cream.withAlphaComponent(0.16).setFill()
+        bar.fill()
+        red.withAlphaComponent(0.75).setFill()
+        NSBezierPath(roundedRect: NSRect(x: card.minX, y: card.minY, width: card.width, height: cap * 0.8),
+                     xRadius: 0.4 * u, yRadius: 0.4 * u).fill()
+        NSBezierPath(roundedRect: NSRect(x: card.minX, y: card.maxY - cap * 0.8, width: card.width, height: cap * 0.8),
+                     xRadius: 0.4 * u, yRadius: 0.4 * u).fill()
+        let mAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 1.0 * u, weight: .semibold),
+                                                     .foregroundColor: NSColor(white: 0.0, alpha: 0.55)]
+        let mark = NSAttributedString(string: "M", attributes: mAttrs)
+        mark.draw(at: NSPoint(x: card.midX - mark.size().width / 2, y: card.maxY - cap * 0.8 + (cap * 0.8 - mark.size().height) / 2))
+        let step = (card.height - 2 * cap) / CGFloat(shutterSpeeds.count)
+        for (i, sp) in shutterSpeeds.enumerated() {
+            let slow = sp.seconds >= 1.0 / 30
+            let y = speedY(CGFloat(i), card: card, u: u)
+            let size = min(step * 0.58, card.width * 0.25)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont(name: "Futura-Medium", size: size) ?? NSFont.systemFont(ofSize: size, weight: .medium),
+                .foregroundColor: slow ? red : cream,
+            ]
+            let str = NSAttributedString(string: sp.label, attributes: attrs)
+            let sz = str.size()
+            str.draw(at: NSPoint(x: card.maxX - sz.width - 0.35 * u, y: y - sz.height / 2))
+            (slow ? red : cream).withAlphaComponent(0.8).setFill()
+            NSRect(x: card.minX + 0.12 * u, y: y - 0.06 * u, width: 0.38 * u, height: 0.12 * u).fill()
+        }
+        // The green tab: the speed you set.
+        NSColor(calibratedRed: 0.45, green: 0.95, blue: 0.70, alpha: 0.9).setFill()
+        let tab = NSBezierPath()
+        let ty = speedY(CGFloat(m.shutterIndex), card: card, u: u)
+        tab.move(to: NSPoint(x: card.maxX - 0.2 * u, y: ty - 0.45 * step))
+        tab.line(to: NSPoint(x: card.maxX + 1.4 * u, y: ty - 0.25 * step))
+        tab.line(to: NSPoint(x: card.maxX + 1.4 * u, y: ty + 0.25 * step))
+        tab.line(to: NSPoint(x: card.maxX - 0.2 * u, y: ty + 0.45 * step))
+        tab.close()
+        tab.fill()
     }
 
     // MARK: flying a light
