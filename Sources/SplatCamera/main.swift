@@ -98,6 +98,9 @@ if let i = args.firstIndex(of: "--photometry"), i + 1 < args.count {
     quit()
 }
 
+// Your camera's recorded sounds (the folder is made, with a README, if missing).
+_ = Sounds.shared
+
 // Trace the light heads' optics in the background while the scan loads.
 for head in lightKit.indices { DispatchQueue.global(qos: .userInitiated).async { _ = Photometry.tablesFor(head) } }
 

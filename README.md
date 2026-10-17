@@ -113,6 +113,17 @@ it: pushing raises contrast and grain, deepens shadows and adds a little fog;
 pulling softens contrast and fines the grain. The rating is in the roll's
 folder name and each frame's .json.
 
+## Sounds
+
+The camera plays your own recordings: put them in
+`~/Library/Application Support/Splat Camera/Sounds` (menu > Camera sounds
+opens it; a README there lists the names), one sound per file, several
+takes each: `shutter-1.wav`, `advance-1.wav` ... `advance-8.wav`, and
+optionally `shutter-open-*` + `shutter-close-*` (slow speeds come apart by
+the exposure time), `mirror-*`, `rewind-*`, `back-*`, `aperture-*`,
+`focus-*`. Each event plays a random take, never the same twice running,
+slightly varied in speed and level. Menu > Reload sounds picks up changes.
+
 ## The menu
 
 Esc (keyboard) or + / Menu (pad) opens the game menu: switch between the

@@ -233,7 +233,10 @@ final class MenuOverlay: NSView {
     /// Loading a roll: the stocks in the bag, and how to rate the roll.
     private func drawFilm(_ u: CGFloat) {
         let rowH = 3.3 * u
-        let w = min(bounds.width * 0.7, 70 * u), h = CGFloat(filmStocks.count) * rowH + 15 * u
+        let shown = min(filmStocks.count, 9)
+        // Scroll so the choice stays in view.
+        let first = max(0, min(filmStocks.count - shown, filmChoice - shown / 2))
+        let w = min(bounds.width * 0.7, 70 * u), h = CGFloat(shown) * rowH + 15 * u
         let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
         NSColor(white: 0.08, alpha: 0.96).setFill()
         NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).fill()
@@ -241,8 +244,14 @@ final class MenuOverlay: NSView {
         text("the roll in the camera is rewound and put away", NSPoint(x: panel.minX + 15 * u, y: panel.minY + 1.9 * u),
              size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
         filmRects = []
+        if first > 0 { text("▲ more", NSPoint(x: panel.maxX - 9 * u, y: panel.minY + 3.6 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1)) }
+        if first + shown < filmStocks.count {
+            text("▼ more", NSPoint(x: panel.maxX - 9 * u, y: panel.minY + 5 * u + CGFloat(shown) * rowH), size: 0.8 * u,
+                 color: NSColor(white: 0.5, alpha: 1))
+        }
         for (i, s) in filmStocks.enumerated() {
-            let r = NSRect(x: panel.minX + u, y: panel.minY + 5 * u + CGFloat(i) * rowH, width: w - 2 * u, height: rowH - 0.4 * u)
+            guard i >= first && i < first + shown else { filmRects.append(.zero); continue }
+            let r = NSRect(x: panel.minX + u, y: panel.minY + 5 * u + CGFloat(i - first) * rowH, width: w - 2 * u, height: rowH - 0.4 * u)
             filmRects.append(r)
             if i == filmChoice {
                 amber.withAlphaComponent(0.18).setFill()

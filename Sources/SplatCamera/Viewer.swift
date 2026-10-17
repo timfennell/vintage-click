@@ -62,6 +62,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     var onSwitchKind: (() -> Void)?
     private var menuOpen = false
     private var menuStick: Float = 0
+    private var focusTurned: Float = 0
     private var filmStickX: Float = 0
 
     /// What the controls are doing: the camera, placing lights, or the contact sheet.
@@ -539,17 +540,23 @@ final class Viewer: NSObject, MTKViewDelegate {
             sheetInput(s, dt: dt)
             return
         case .camera:
+            let stop = body.apertureIndex
             if p.contains(.left) { body.changeAperture(-1) }
             if p.contains(.right) { body.changeAperture(1) }
+            if body.apertureIndex != stop { Sounds.shared.play(.aperture, volume: 0.6) }
             if p.contains(.up) { body.changeShutter(1) }
             if p.contains(.down) { body.changeShutter(-1) }
             if p.contains(.x) { openLenses() }
             if p.contains(.y) { openFilm() }
             if p.contains(.l3) { changeGait(gait == Self.gaits.count - 1 ? -gait : 1) }
             body.dofPreview = s.bHeld
+            let wasFocus = body.focusM
             body.turnFocus(s.triggers, dt: dt)
             // The wheel is the focus ring: away from you focuses farther.
             if s.wheel != 0 { body.focusM = max(body.lens.minFocusM, min(200, body.focusM * exp(s.wheel * 0.03))) }
+            // The ring's grease and detents: a soft tick every so far of turn.
+            focusTurned += abs(log(body.focusM / wasFocus))
+            if focusTurned > 0.12 { focusTurned = 0; Sounds.shared.play(.focus, volume: 0.35) }
             // Number keys: that lens of the mounted lens's collection.
             if let d = s.digit, d >= 1, let shelf = lensCollections.firstIndex(where: { $0.name == body.lens.collection }) {
                 let start = lensCollections.prefix(shelf).reduce(0) { $0 + $1.lenses.count }
@@ -971,6 +978,13 @@ final class Viewer: NSObject, MTKViewDelegate {
                 self?.appActions?.chooseRolls()
                 self?.openMenu()
             },
+            .init(title: "Camera sounds…", detail: "your recordings: shutter, film advance and more (opens the folder)") { [weak self] in
+                NSWorkspace.shared.open(Sounds.folder)
+                self?.closeMenu() },
+            .init(title: "Reload sounds", detail: "after adding or changing recordings") { [weak self] in
+                Sounds.shared.reload()
+                self?.hud?.flash("SOUNDS RELOADED")
+                self?.closeMenu() },
             .init(title: "Quit", detail: "") { [weak self] in self?.appActions?.quit() },
         ]
         menu.items = items
@@ -1008,6 +1022,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.filmPush = body.push
         menu.onLoadFilm = { [weak self] stock, push in
             guard let self else { return }
+            if self.body.framesShot > 0 { Sounds.shared.play(.rewind) }
+            Sounds.shared.play(.back, after: self.body.framesShot > 0 ? 2.5 : 0)
             self.body.loadRoll(stock: stock, push: push)
             self.body.meterShutter(sceneLuminance: self.meterLum)
             self.hud?.flash("LOADED \(self.body.rollName.uppercased())")
@@ -1143,6 +1159,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                               wantsNegative: keepNegative)
         job.outputPath = scriptedPath
         loop.expose(job)
+        Sounds.shared.fire(shutterSeconds: body.shutter.seconds)
         body.framesShot += 1
         // Mirror travel (~1/15 s round trip) plus the shutter time.
         mirrorUpUntil = CACurrentMediaTime() + 0.07 + Double(body.shutter.seconds)
