@@ -248,6 +248,11 @@ func configureSession() {
     view.addSubview(menu)
     viewer.menu = menu
     viewer.sceneIsPlace = inside
+    // The session is named for the scan: its folder when the file has a generic name.
+    let scanPath = (currentScene?.path ?? cliPath ?? "scene") as NSString
+    let stem = (scanPath.lastPathComponent as NSString).deletingPathExtension
+    viewer.sceneName = ["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
+        ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem
     viewer.onScaleSet = { scale in
         // Remember it with the file, so it opens this size next time.
         let path = currentScene?.path ?? cliPath
@@ -296,8 +301,9 @@ func configureSession() {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait + Double(k)) {
                 if wait > 1.5 { viewer.meterNow() }
                 if comp != 0 { viewer.body.changeShutter(-comp) }
+                // "-": file it as the game does (date / session / roll).
                 let url = URL(fileURLWithPath: p)
-                viewer.scriptedPath = burst == 1 ? url
+                viewer.scriptedPath = p == "-" ? nil : burst == 1 ? url
                     : url.deletingPathExtension().appendingPathExtension("\(k + 1).png")
                 viewer.releaseShutter()
                 viewer.scriptedPath = nil

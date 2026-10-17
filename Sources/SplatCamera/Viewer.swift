@@ -159,7 +159,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         print(String(format: "Scene scale: %.4g m per unit (subject radius %.2f m); photos %dx%d",
                      body.metresPerUnit, radius * body.metresPerUnit, photo.0, photo.1))
         // A new session loads a new roll after the ones already in the darkroom.
-        body.rollNumber = (ContactSheetView.scanRolls().map(\.number).max() ?? 0) + 1
+        body.rollNumber = 1
         loop.onFinderRendered = { [weak self] ms in self?.record(renderMs: ms) }
         loop.onDeveloped = { [weak self] job, image, seconds in self?.developed(job, image, seconds) }
         resetView()
@@ -285,7 +285,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                 present(cb, drawable)
                 cb.commit()
             }
-            sheet?.pending = (body.rollNumber, loop.pendingFrames(roll: body.rollNumber))
+            sheet?.pending = (rollFolder(body), loop.pendingFrames(roll: body.rollNumber))
             return
         }
 
@@ -821,6 +821,24 @@ final class Viewer: NSObject, MTKViewDelegate {
         return info
     }
 
+    // MARK: where pictures go
+
+    /// This sitting's folder: the day, then the time it began and the scene
+    /// ("2026-10-17/09.14 Skate park"). Made when the first frame is saved.
+    var sceneName = "scene"
+    private lazy var sessionFolder: URL = {
+        let now = Date()
+        let day = DateFormatter(), time = DateFormatter()
+        day.dateFormat = "yyyy-MM-dd"
+        time.dateFormat = "HH.mm"
+        return ContactSheetView.root.appendingPathComponent(day.string(from: now))
+            .appendingPathComponent("\(time.string(from: now)) \(sceneName)")
+    }()
+
+    func rollFolder(_ b: CameraBody) -> URL {
+        sessionFolder.appendingPathComponent(String(format: "Roll %02d - %@", b.rollNumber, b.rollName))
+    }
+
     // MARK: the menu
 
     private var modeName: String {
@@ -980,8 +998,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     func openSheet() {
         guard let sheet else { return }
         mode = .sheet
-        sheet.reload(showRoll: body.rollNumber)
-        sheet.pending = (body.rollNumber, loop.pendingFrames(roll: body.rollNumber))
+        sheet.reload(showRoll: rollFolder(body))
+        sheet.pending = (rollFolder(body), loop.pendingFrames(roll: body.rollNumber))
         sheet.isHidden = false
         hud?.isHidden = true
     }
@@ -1049,8 +1067,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         if let p = job.outputPath {
             url = p
         } else {
-            let dir = ContactSheetView.root
-                .appendingPathComponent(String(format: "Roll %02d - %@", b.rollNumber, b.rollName))
+            let dir = rollFolder(b)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             url = dir.appendingPathComponent(String(format: "frame-%02d.png", job.frameNumber))
         }

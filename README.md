@@ -70,8 +70,11 @@ lens's pupil sets the bokeh: blade count, cat's-eye clipping by the barrel
 (strong on the swirly Volna), and rim-bright soap bubbles. Then the stock
 develops it: exposure from aperture, shutter and ISO against the scene's EV
 (`--ev`, default 12), a characteristic curve, colour crosstalk, halation and
-grain. Frames land in `~/Pictures/Splat Camera/Roll NN - <stock>/` with a
-JSON of how each was taken.
+grain. Frames are filed by day, sitting and roll in the rolls folder
+(`~/Pictures/Splat Camera` unless chosen in the menu or File menu):
+`2026-10-17/09.14 Skate park/Roll 01 - Portrait 400/frame-01.png`, each with
+a JSON of how it was taken and, with Digital negative on, a
+high-dynamic-range DNG (linear light before the film, 16-bit float).
 
 Scans carry no scale. When choosing a scan the app guesses from its shape
 (an object on the rig, about 60 cm, or a place to stand in, about 30 m), and

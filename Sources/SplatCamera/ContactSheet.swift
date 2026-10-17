@@ -11,13 +11,15 @@ final class ContactSheetView: NSView {
         let stock: String
         let dir: URL
         var frames: [URL]
+        /// Which day and sitting it is from ("2026-10-17 · 09.14 Skate park"), if filed so.
+        var session: String
     }
 
     var rolls: [Roll] = []
     var rollIndex = 0
     var selected = 0
     /// Frames shot on the current roll that are still in the darkroom.
-    var pending: (roll: Int, frames: [Int]) = (0, [])
+    var pending: (roll: URL?, frames: [Int]) = (nil, [])
 
     // The loupe: where it sits (view points) and how much it magnifies.
     private(set) var loupeCentre: CGPoint?
@@ -38,34 +40,50 @@ final class ContactSheetView: NSView {
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Splat Camera")
     }
 
-    /// Rolls on disk, oldest first ("Roll 03 - Portrait 400/frame-07.png").
+    /// Rolls on disk, oldest first: filed as date / session / roll
+    /// ("2026-10-17/09.14 Skate park/Roll 01 - Portrait 400/frame-07.png"),
+    /// plus older rolls kept straight in the folder.
     static func scanRolls() -> [Roll] {
         let fm = FileManager.default
-        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
-        var rolls: [Roll] = []
-        for d in dirs {
+        func children(_ u: URL) -> [URL] {
+            ((try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
+                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }
+        func roll(_ d: URL, session: String) -> Roll? {
             let name = d.lastPathComponent
-            guard name.hasPrefix("Roll "), let n = Int(name.dropFirst(5).prefix(2)) else { continue }
+            guard name.hasPrefix("Roll "), let n = Int(name.dropFirst(5).prefix(2)) else { return nil }
             let stock = name.components(separatedBy: " - ").dropFirst().joined(separator: " - ")
             let frames = ((try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil)) ?? [])
                 .filter { $0.pathExtension == "png" && $0.lastPathComponent.hasPrefix("frame-") }
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
-            rolls.append(Roll(number: n, stock: stock, dir: d, frames: frames))
+            return Roll(number: n, stock: stock, dir: d, frames: frames, session: session)
         }
-        return rolls.sorted { $0.number < $1.number }
+        var rolls: [Roll] = []
+        for top in children(root) {
+            if let r = roll(top, session: "") { rolls.append(r); continue }
+            // A day, then its sittings, then their rolls.
+            for sitting in children(top) {
+                for d in children(sitting) {
+                    if let r = roll(d, session: "\(top.lastPathComponent) · \(sitting.lastPathComponent)") { rolls.append(r) }
+                }
+            }
+        }
+        // Older loose rolls first, then by day and sitting (folder names sort in time).
+        return rolls.sorted { ($0.session, $0.number) < ($1.session, $1.number) }
     }
 
-    func reload(showRoll number: Int?) {
-        let keep = roll?.number
+    func reload(showRoll dir: URL?) {
+        let keep = roll?.dir
         rolls = Self.scanRolls()
-        if let n = number ?? keep, let i = rolls.firstIndex(where: { $0.number == n }) {
+        if let d = (dir ?? keep)?.standardizedFileURL, let i = rolls.firstIndex(where: { $0.dir.standardizedFileURL == d }) {
             rollIndex = i
         } else {
             rollIndex = max(0, rolls.count - 1)
         }
         loadMarks()
         // Open on the newest frame, with the loupe over it.
-        if number != nil {
+        if dir != nil {
             selected = max(0, frameCount - 1)
             centreLoupeOnSelection()
         }
@@ -200,7 +218,7 @@ final class ContactSheetView: NSView {
     private func drawStrips(_ L: Layout, roll: Roll, fine: Bool, near: CGPoint?) {
         let edge = NSColor(calibratedRed: 1.0, green: 0.62, blue: 0.2, alpha: 0.9)
         let stockName = roll.stock.uppercased()
-        let pend = pending.roll == roll.number ? pending.frames : []
+        let pend = pending.roll?.standardizedFileURL == roll.dir.standardizedFileURL ? pending.frames : []
         for (s, strip) in L.strips.enumerated() {
             NSColor(white: 0.05, alpha: 1).setFill()
             strip.fill()
@@ -297,8 +315,9 @@ final class ContactSheetView: NSView {
         NSColor(white: 0.55, alpha: 0.9).setStroke()
         rim.stroke()
 
-        let hint = String(format: "Roll %d of %d · %@ · loupe %.0f×      sticks: loupe   L2/R2: power   d-pad: frame   A: mark   L1/R1: roll   B: back",
-                          roll.number, rolls.count, roll.stock, loupePower)
+        let where_ = roll.session.isEmpty ? "" : roll.session + " · "
+        let hint = String(format: "%@Roll %d (%d of %d) · %@ · loupe %.0f×      sticks: loupe   L2/R2: power   d-pad: frame   A: mark   L1/R1: roll   B: back",
+                          where_, roll.number, rollIndex + 1, rolls.count, roll.stock, loupePower)
         label(hint, at: NSPoint(x: b.midX - 330, y: b.height - 20), size: 11.5, color: NSColor(white: 0.15, alpha: 1))
     }
 
