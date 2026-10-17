@@ -97,7 +97,7 @@ float3 frame_lin_ca(device const float* f, float2 p, constant float4* O) {
 // field position q: 0 outside the blades or clipped by the barrel, else the
 // soap-bubble rim weighting. Stopping down shrinks the aperture inside the fixed
 // barrel, so cat's eyes round up at small apertures as on a real lens.
-float pupil(float2 l, float2 q, constant float4* O) {
+float pupil(float2 l, float2 q, constant float4* O, float cell = 0) {
     float r = length(l);
     float blades = O[2].w;
     if (blades >= 3) {
@@ -110,9 +110,17 @@ float pupil(float2 l, float2 q, constant float4* O) {
     }
     if (r < O[6].w) return 0;       // a mirror lens's secondary mirror
     float open = O[2].z / O[2].y;   // current radius in wide-open radii
-    if (length(l * open + O[3].x * q) > 1) return 0;
     float soap = O[3].y;
-    return (1 + soap * pow(r, 6)) / (1 + soap * 0.25);
+    float rim = (1 + soap * pow(r, 6)) / (1 + soap * 0.25);
+    if (cell <= 0) return length(l * open + O[3].x * q) > 1 ? 0 : rim;
+    // A sub-pupil stands for a patch of lens `cell` radii across, not a point:
+    // the barrel cuts off the part of it outside, so the corners darken smoothly
+    // instead of in one ring per sample. Measured against what the stop alone
+    // lets through, so the centre of the frame is untouched.
+    float h = cell * open;
+    float through = 1 - smoothstep(-h, h, length(l * open + O[3].x * q) - 1);
+    float stop = 1 - smoothstep(-h, h, length(l * open) - 1);
+    return rim * min(1.0, through / max(stop, 1e-4));
 }
 
 // Vogel sunflower point k of n over the unit disc.
@@ -316,7 +324,8 @@ kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buff
 // Adds one tile of one sub-pupil's render to the exposure (exposures render
 // in finder-sized tiles, so a big scene's photo needs no more memory than the
 // finder). L[0] = (lens point, weight, reset), L[1] = (colour mask: which of
-// r g b this sub-pupil carries, -), L[2] = (tile origin, tile size) in the photo.
+// r g b this sub-pupil carries, its patch radius in aperture radii),
+// L[2] = (tile origin, tile size) in the photo.
 kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
                        device float4* acc [[buffer(2)]], constant float4* L [[buffer(3)]],
                        uint2 g [[thread_position_in_grid]]) {
@@ -326,7 +335,7 @@ kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [
     uint n = tw * th, j = g.y * tw + g.x;
     float3 c = float3(f[3 * j], f[3 * j + 1], f[3 * j + 2]) + f[3 * n + j] * O[4].rgb;
     uint i = idx(p, O);
-    float w = pupil(L[0].xy, field(float2(p) + 0.5, O), O) * L[0].z;
+    float w = pupil(L[0].xy, field(float2(p) + 0.5, O), O, L[1].w) * L[0].z;
     float4 prev = L[0].w > 0.5 ? float4(0) : acc[i];
     acc[i] = prev + float4(to_lin(c) * L[1].rgb * w, w);
 }

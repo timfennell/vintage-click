@@ -447,8 +447,11 @@ final class RenderLoop {
         vm[3] -= d.x
         vm[7] -= d.y
         var o = photoOptics(e, fx: fx)
-        let mask: SIMD4<Float> = channel < 0 ? [1, 1, 1, 0]
-            : (channel == 0 ? [1, 0, 0, 0] : (channel == 1 ? [0, 1, 0, 0] : [0, 0, 1, 0]))
+        // Each sub-pupil's share of the aperture, as a radius (a colour's
+        // sub-pupils are a third as many, so each covers more).
+        let share = sqrt(Float(channel < 0 ? 1 : 3) / Float(e.cells.count)) * 1.2
+        let mask: SIMD4<Float> = channel < 0 ? [1, 1, 1, share]
+            : (channel == 0 ? [1, 0, 0, share] : (channel == 1 ? [0, 1, 0, share] : [0, 0, 1, share]))
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         let (tw, th) = finderSize
         // The photo in finder-sized tiles: each a render with the principal
