@@ -465,7 +465,7 @@ final class ContactSheetView: NSView {
             NSImage(cgImage: seen, size: NSSize(width: 2 * R, height: 2 * R))
                 .draw(in: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R))
         }
-        loupeReticle(c, R)
+        loupeScale(c, R)
         // Specks on the loupe's own glass, and its flare off the rim.
         var lr = Grit(seed: 77)
         for _ in 0..<7 {
@@ -520,55 +520,88 @@ final class ContactSheetView: NSView {
         return p
     }
 
-    /// The power, read inside the optic: a scale printed on the glass along the
-    /// bottom, and a fine needle swinging up to it from below the field.
-    private func loupeReticle(_ c: CGPoint, _ R: CGFloat) {
-        let pivot = NSPoint(x: c.x, y: c.y + R * 1.02)
-        let rr = R * 0.5
-        func angle(_ p: CGFloat) -> CGFloat {
-            let t = (log(p) - log(2)) / (log(10) - log(2))
-            return -.pi / 2 - 0.62 + 1.24 * max(0, min(1, t))     // up, from left to right
-        }
-        let ink = NSColor(white: 0.06, alpha: 0.8)
-        let halo = NSShadow()
-        halo.shadowColor = NSColor(white: 1, alpha: 0.35)
-        halo.shadowBlurRadius = 1.5
-        halo.shadowOffset = .zero
-        NSGraphicsContext.saveGraphicsState()
-        halo.set()
-        let arc = NSBezierPath()
-        arc.appendArc(withCenter: pivot, radius: rr, startAngle: angle(2) * 180 / .pi, endAngle: angle(10) * 180 / .pi)
-        arc.lineWidth = 1
-        ink.setStroke()
-        arc.stroke()
+    /// The power, read inside the optic: a clear plate curving along the
+    /// barrel's inner edge with the powers engraved in it (frosted marks that
+    /// catch the light), and a pointer on the barrel's ring reaching in over
+    /// it at the knob's own angle, so it moves exactly as the knob does.
+    private func loupeScale(_ c: CGPoint, _ R: CGFloat) {
+        let a0 = Self.tabAngle(2), a1 = Self.tabAngle(10)
+        let lo = min(a0, a1) - 0.1, hi = max(a0, a1) + 0.1
+        let r0 = R * 0.80, r1 = R * 0.985
+        // The plate: an arc of clear acrylic, faintly milky, its edges catching light.
+        let plate = NSBezierPath()
+        plate.appendArc(withCenter: c, radius: r1, startAngle: lo * 180 / .pi, endAngle: hi * 180 / .pi)
+        plate.appendArc(withCenter: c, radius: r0, startAngle: hi * 180 / .pi, endAngle: lo * 180 / .pi, clockwise: true)
+        plate.close()
+        NSColor(calibratedRed: 0.92, green: 0.95, blue: 1.0, alpha: 0.16).setFill()
+        plate.fill()
+        plate.lineWidth = 1.2
+        NSColor(white: 1, alpha: 0.45).setStroke()
+        plate.stroke()
+        let inner = NSBezierPath()
+        inner.appendArc(withCenter: c, radius: r0 + 1.5, startAngle: lo * 180 / .pi, endAngle: hi * 180 / .pi)
+        inner.lineWidth = 0.8
+        NSColor(white: 0, alpha: 0.3).setStroke()
+        inner.stroke()
+        // Engraved: frosted white with a dark edge where the cut catches shadow.
+        let cut = NSShadow()
+        cut.shadowColor = NSColor(white: 0, alpha: 0.6)
+        cut.shadowBlurRadius = 0.8
+        cut.shadowOffset = NSSize(width: 0.6, height: 0.8)
+        let frost = NSColor(white: 0.97, alpha: 0.85)
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont(name: "Futura-Medium", size: R * 0.045) ?? NSFont.systemFont(ofSize: R * 0.045),
-            .foregroundColor: ink,
+            .font: NSFont(name: "Futura-Medium", size: R * 0.05) ?? NSFont.systemFont(ofSize: R * 0.05),
+            .foregroundColor: frost, .shadow: cut,
         ]
+        NSGraphicsContext.saveGraphicsState()
+        cut.set()
         for p in stride(from: 2.0, through: 10.0, by: 0.5) {
-            let a = angle(CGFloat(p))
+            let a = Self.tabAngle(CGFloat(p))
             let major = [2.0, 3, 4, 6, 8, 10].contains(p)
             let t = NSBezierPath()
-            t.move(to: NSPoint(x: pivot.x + cos(a) * rr, y: pivot.y + sin(a) * rr))
-            t.line(to: NSPoint(x: pivot.x + cos(a) * (rr + R * (major ? 0.04 : 0.022)), y: pivot.y + sin(a) * (rr + R * (major ? 0.04 : 0.022))))
-            t.lineWidth = major ? 1.1 : 0.7
+            t.move(to: NSPoint(x: c.x + cos(a) * r1 * 0.995, y: c.y + sin(a) * r1 * 0.995))
+            t.line(to: NSPoint(x: c.x + cos(a) * (r1 - R * (major ? 0.06 : 0.035)), y: c.y + sin(a) * (r1 - R * (major ? 0.06 : 0.035))))
+            t.lineWidth = major ? 1.3 : 0.8
+            frost.setStroke()
             t.stroke()
             if major {
                 let str = NSAttributedString(string: p == 10 ? "10×" : "\(Int(p))", attributes: attrs)
                 let sz = str.size()
-                let q = NSPoint(x: pivot.x + cos(a) * (rr + R * 0.075), y: pivot.y + sin(a) * (rr + R * 0.075))
-                str.draw(at: NSPoint(x: q.x - sz.width / 2, y: q.y - sz.height / 2))
+                let rr = r0 + R * 0.05
+                NSGraphicsContext.saveGraphicsState()
+                let tr = NSAffineTransform()
+                tr.translateX(by: c.x + cos(a) * rr, yBy: c.y + sin(a) * rr)
+                tr.rotate(byRadians: a - .pi / 2)
+                tr.concat()
+                str.draw(at: NSPoint(x: -sz.width / 2, y: -sz.height / 2))
+                NSGraphicsContext.restoreGraphicsState()
             }
         }
-        // The needle: fine, dark, from below the field to just past the scale.
-        let a = angle(loupePower)
-        let needle = NSBezierPath()
-        needle.move(to: NSPoint(x: pivot.x + cos(a) * R * 0.2, y: pivot.y + sin(a) * R * 0.2))
-        needle.line(to: NSPoint(x: pivot.x + cos(a) * (rr + R * 0.035), y: pivot.y + sin(a) * (rr + R * 0.035)))
-        needle.lineWidth = 1.3
-        NSColor(white: 0.02, alpha: 0.9).setStroke()
-        needle.stroke()
         NSGraphicsContext.restoreGraphicsState()
+        // The pointer: a fine tapered blade on the barrel ring, pointing in.
+        let a = knobAngle
+        let d = NSPoint(x: cos(a), y: sin(a)), n = NSPoint(x: -sin(a), y: cos(a))
+        let base = R * 1.0, tip = r0 + R * 0.02
+        let blade = NSBezierPath()
+        blade.move(to: NSPoint(x: c.x + d.x * base + n.x * R * 0.018, y: c.y + d.y * base + n.y * R * 0.018))
+        blade.line(to: NSPoint(x: c.x + d.x * tip, y: c.y + d.y * tip))
+        blade.line(to: NSPoint(x: c.x + d.x * base - n.x * R * 0.018, y: c.y + d.y * base - n.y * R * 0.018))
+        blade.close()
+        let drop = NSShadow()
+        drop.shadowColor = NSColor(white: 0, alpha: 0.45)
+        drop.shadowBlurRadius = 2.5
+        drop.shadowOffset = NSSize(width: 1.5, height: 2)
+        NSGraphicsContext.saveGraphicsState()
+        drop.set()
+        NSColor(white: 0.05, alpha: 1).setFill()
+        blade.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        let edge = NSBezierPath()
+        edge.move(to: NSPoint(x: c.x + d.x * base + n.x * R * 0.018, y: c.y + d.y * base + n.y * R * 0.018))
+        edge.line(to: NSPoint(x: c.x + d.x * tip, y: c.y + d.y * tip))
+        edge.lineWidth = 0.8
+        Self.brass.withAlphaComponent(0.7).setStroke()
+        edge.stroke()
     }
 
     /// The knob's place round the barrel for a power (radians, y down), the
