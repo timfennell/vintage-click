@@ -17,6 +17,7 @@ struct FinderJob {
     var lens: [SIMD4<Float>]?
     var body: CameraBody
     var lighting: LightingPlot
+    var fromLight: Int? = nil       // seen from this light's head, not the camera
 }
 
 /// One exposure on its way through the camera: the scene as it was when the
@@ -227,12 +228,15 @@ final class RenderLoop {
             SIMD4(Float(plot.lights.count), Float(count), Float(higherCoeffs), 0.25),
             SIMD4(plot.ambientTint, 0),
         ]
-        var lt: [SIMD4<Float>] = plot.lights.flatMap {
-            $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV)
-        }
-        if g + lt == lastRelight { return }
-        lastRelight = g + lt
+        let packs = plot.lights.map { $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV, up: plot.up) }
+        var lt: [SIMD4<Float>] = packs.flatMap(\.head)
+        let tables: [SIMD4<Float>] = packs.flatMap(\.table)
+        if g + lt + [SIMD4(plot.lights.map(\.spot).reduce(0, +), 0, 0, 0)] == lastRelight { return }
+        lastRelight = g + lt + [SIMD4(plot.lights.map(\.spot).reduce(0, +), 0, 0, 0)]
         if lt.isEmpty { lt = [SIMD4<Float>](repeating: .zero, count: 4) }
+        let tableBuf = tables.isEmpty
+            ? device.makeBuffer(length: 16, options: .storageModeShared)
+            : tables.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }
         guard let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return }
         ce.setComputePipelineState(relightPSO)
         ce.setBuffer(means, offset: 0, index: 0)
@@ -241,6 +245,7 @@ final class RenderLoop {
         ce.setBuffer(colours.buf, offset: colours.off, index: 3)
         ce.setBytes(&g, length: g.count * 16, index: 4)
         ce.setBytes(&lt, length: lt.count * 16, index: 5)
+        ce.setBuffer(tableBuf, offset: 0, index: 6)
         ce.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         ce.endEncoding()

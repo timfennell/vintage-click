@@ -12,8 +12,10 @@ import simd
 ///   left click shutter · right button (hold) depth-of-field preview
 ///   wheel focus ring · [ ] aperture · - = shutter speed · 1-8 lens from the bag
 ///   R new roll (reload) · L lighting · Tab light table · H reset view · U up axis
-/// Lighting: F add a light · left click take / place · Backspace remove ·
-///   T change head · [ ] choose · - = dimmer · wheel flood / spot · G house lights
+/// Lighting: 1-9 fly that light (its own view; the same keys move and aim it),
+///   0 or ` back to the camera's view · F add a light · Backspace remove ·
+///   T change head · [ ] previous / next light · - = dimmer · wheel flood / spot ·
+///   G house lights
 /// Light table: the mouse is the loupe · wheel its power · click marks a keeper ·
 ///   arrows choose · Q / E roll · Tab or Esc back
 final class GamepadInput {
@@ -26,7 +28,7 @@ final class GamepadInput {
         var pressed: Set<Button> = []   // pressed since the last poll
         var mouseLook = SIMD2<Float>(0, 0)  // mouse travel since the last poll (points, + right / up)
         var wheel: Float = 0                // wheel travel since the last poll (+ away from you)
-        var lensSlot: Int?                  // number key: that lens from the bag
+        var digit: Int?                     // number key pressed: 1-9, or 0 (also `)
         var run = false                     // Shift held
         var pointer: CGPoint?               // mouse in the window (light table), view points
     }
@@ -145,7 +147,7 @@ final class GamepadInput {
             case .camera:
                 keys += [(.keyR, .y), (.keyG, .l3)]
             case .lighting:
-                keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .b), (.keyG, .l3), (.keyE, .a)]
+                keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .menu), (.keyG, .l3)]
             case .sheet:
                 keys += [(.leftArrow, .left), (.rightArrow, .right), (.upArrow, .up), (.downArrow, .down),
                          (.keyQ, .l1), (.keyE, .r1), (.escape, .b), (.returnOrEnter, .a)]
@@ -153,8 +155,9 @@ final class GamepadInput {
                 s.shoulders = 0
             }
             for (code, b) in keys where k(code) > 0 { now.insert(b) }
-            let slots: [GCKeyCode] = [.one, .two, .three, .four, .five, .six, .seven, .eight]
-            for (n, code) in slots.enumerated() where k(code) > 0 && !heldSlots.contains(n) { s.lensSlot = n }
+            let slots: [GCKeyCode] = [.zero, .one, .two, .three, .four, .five, .six, .seven, .eight, .nine,
+                                      .graveAccentAndTilde]
+            for (n, code) in slots.enumerated() where k(code) > 0 && !heldSlots.contains(n) { s.digit = n % 10 }
             heldSlots = Set(slots.enumerated().filter { k($0.1) > 0 }.map(\.0))
             if k(.escape) > 0 { capture(false) }
             if leftClick { now.insert(.a) }

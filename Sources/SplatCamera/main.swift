@@ -35,6 +35,8 @@ let openSheet = args.contains("--sheet")
 args.removeAll { $0 == "--sheet" }
 // --house night|dusk|...: the scan's own light to start with.
 let house = option("--house")
+let meterWait = Double(option("--meter-wait") ?? "1.5") ?? 1.5
+let flyLight = option("--fly").flatMap { Int($0) }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -44,6 +46,36 @@ args.removeAll { $0 == "--pinhole" }
 // Play at a film cadence (18-24 fps feels like film); the bench runs uncapped.
 let filmFPS = bench > 0 ? 0 : Double(option("--fps") ?? "24") ?? 24
 let plyPath = args.first ?? NSString(string: "~/Desktop/bee/bee-final.ply").expandingTildeInPath
+
+// --photometry OUT.csv: trace every head, print its beams, write the curves, quit.
+if let i = args.firstIndex(of: "--photometry"), i + 1 < args.count {
+    var csv = "head,setting,theta_deg,green_cd,red_cd,blue_cd\n"
+    for (h, kit) in lightKit.enumerated() {
+        let t0 = CACurrentMediaTime()
+        let tables = Photometry.tablesFor(h)
+        print(String(format: "%@ (traced in %.1f s)", kit.name, CACurrentMediaTime() - t0))
+        for (name, spot) in [("flood", Float(0)), ("mid", 0.5), ("spot", 1)] {
+            let b = Photometry.table(head: h, spot: spot)
+            let centre = b.centre, peak = b.peak
+            print(String(format: "  %-5@ peak %7.0f cd  centre/peak %.2f  hot %4.1f°  beam %4.1f°  field %4.1f°",
+                         name, peak, centre / max(peak, 1), b.angle(at: 0.9), b.angle(at: 0.5), b.angle(at: 0.1)))
+            for t in 0..<BeamTable.thetaBins {
+                var g: Float = 0, r: Float = 0, bl: Float = 0
+                for p in 0..<BeamTable.phiBins {
+                    let v = b.cd[t * BeamTable.phiBins + p] / Float(BeamTable.phiBins)
+                    r += v.x; g += v.y; bl += v.z
+                }
+                csv += "\(kit.name),\(name),\(BeamTable.theta(Float(t)) * 180 / .pi),\(g),\(r),\(bl)\n"
+            }
+        }
+        _ = tables
+    }
+    try? csv.write(toFile: args[i + 1], atomically: true, encoding: .utf8)
+    exit(0)
+}
+
+// Trace the light heads' optics in the background while the scan loads.
+for head in lightKit.indices { DispatchQueue.global(qos: .userInitiated).async { _ = Photometry.tablesFor(head) } }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
@@ -90,7 +122,8 @@ if let i = filmChoice { viewer.body.stockIndex = i % filmStocks.count }
 if pinhole { viewer.setBenchLens(false) }
 if demoLights { viewer.demoLights() }
 if let h = house { viewer.lighting.setHouseLights(h) }
-if lightingMode { viewer.startLighting() }
+if lightingMode || flyLight != nil { viewer.startLighting() }
+if let k = flyLight { viewer.flyLight(k - 1) }
 if openSheet { DispatchQueue.main.async { viewer.openSheet() } }
 // Start with the shutter matched to the scene, as a photographer would.
 viewer.body.meterShutter(sceneLuminance: 0.18)
@@ -145,8 +178,11 @@ if let p = shootPath {
         saved += 1
         if saved == burst { exit(0) }
     }
+    // Let the finder run a while, so the meter has read the scene.
+    let wait = meterWait
     for k in 0..<burst {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5 + Double(k)) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait + Double(k)) {
+            if wait > 1.5 { viewer.meterNow() }
             let url = URL(fileURLWithPath: p)
             viewer.scriptedPath = burst == 1 ? url
                 : url.deletingPathExtension().appendingPathExtension("\(k + 1).png")

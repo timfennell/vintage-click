@@ -43,26 +43,23 @@ struct PlacedLight {
 
     var kit: LightHead { lightKit[head] }
 
-    var beamAngle: Float { kit.floodAngle + (kit.spotAngle - kit.floodAngle) * spot }
+    /// Where the light goes, from the head's traced optics at this spot/flood setting.
+    var beam: BeamTable { Photometry.table(head: head, spot: spot) }
+    /// Full angles (degrees) where the beam falls to 90% (hot), 50% (beam) and 10% (field).
+    var beamAngle: Float { beam.angle(at: 0.5) }
 
-    /// Peak intensity (candela): the same light squeezed into a narrower beam.
-    var candela: Float {
-        let half = beamAngle * .pi / 360
-        let solid = 2 * Float.pi * (1 - cos(half * 1.25))     // to the soft edge
-        return kit.lumens / solid * exp2(dimmerStops)
-    }
-
-    /// For the relight kernel (Shaders.swift, `relight`): relative to the
-    /// illuminance the scan was captured at, 2.5 * 2^EV lux at ISO 100.
-    func packed(metresPerUnit: Float, sceneEV: Float) -> [SIMD4<Float>] {
-        let half = beamAngle * .pi / 360
+    /// For the relight kernel (Shaders.swift, `relight`): four float4s, then the
+    /// beam table. Intensities are relative to the illuminance the scan was
+    /// captured at, 2.5 * 2^EV lux at ISO 100.
+    func packed(metresPerUnit: Float, sceneEV: Float, up: SIMD3<Float>) -> (head: [SIMD4<Float>], table: [SIMD4<Float>]) {
         let eRef = 2.5 * exp2(sceneEV)
-        return [
-            SIMD4(position, kit.kind == .softlight ? 1 : 0),
-            SIMD4(simd_normalize(aim), candela / eRef),
+        let (f, r, _) = frame(up: up)
+        return ([
+            SIMD4(position, 0),
+            SIMD4(f, exp2(dimmerStops) / eRef),
             SIMD4(tungsten, kit.shine),
-            SIMD4(cos(half * 0.6), cos(min(half * 1.5, .pi * 0.499)), metresPerUnit, 0),
-        ]
+            SIMD4(r, metresPerUnit),
+        ], beam.cd.map { SIMD4($0, 0) })
     }
 
     /// The light's own axes: forward along the aim, up as close to world up as it goes.
@@ -146,6 +143,7 @@ struct LightingPlot {
     var selected = 0
     var carrying = false
     var kitChoice = 1               // what the next light added will be
+    var up = SIMD3<Float>(0, -1, 0)     // the world's up, for the heads' yokes
 
     /// The scan's own light, from full day down to moonlight, as a share of
     /// the light it was captured in (sun at EV 15 is ~80,000 lux): twilight

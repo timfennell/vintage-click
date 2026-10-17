@@ -309,8 +309,9 @@ fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[b
 // straight into the renderer's buffer (render with the higher bands off).
 //   G[0] = (camera position, house lights)   G[1] = (lights, N, K higher coeffs, shine colour)
 //   G[2] = (house lights' colour, -)
-//   per light, 4 float4s (PlacedLight.packed): (pos, softlight), (aim, peak cd / E_ref),
-//   (colour, shine), (cos inner, cos outer, metres per unit, -)
+//   per light, 4 float4s (PlacedLight.packed): (pos, -), (aim, dimmer / E_ref),
+//   (colour, shine), (right, metres per unit); and its beam table B (candela per
+//   colour; 32 bins off axis with edges at 90 (t/32)^1.3 degrees, x 8 around it).
 constant float C0 = 0.28209479177387814;
 constant float C1 = 0.4886025119029199;
 
@@ -342,6 +343,7 @@ float3 lin_to_srgb3(float3 c) { c = max(c, 0.0); return float3(lin_to_srgb(c.r),
 kernel void relight(device const float* means [[buffer(0)]], device const float* dc0 [[buffer(1)]],
                     device const float* sh0 [[buffer(2)]], device float* out_dc [[buffer(3)]],
                     constant float4* G [[buffer(4)]], constant float4* LT [[buffer(5)]],
+                    device const float4* BT [[buffer(6)]],
                     uint i [[thread_position_in_grid]]) {
     uint N = uint(G[1].y), K = uint(G[1].z), nl = uint(G[1].x);
     if (i >= N) return;
@@ -361,13 +363,23 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         float3 d = L[0].xyz - mean;
         float dist_m = max(length(d) * L[3].z, 1e-3);
         float3 ldir = d / max(length(d), 1e-9);
-        // Beam: full inside the inner cone, soft edge out to the outer.
-        float ca = dot(-ldir, L[1].xyz);
-        float profile = saturate((ca - L[3].y) / max(L[3].x - L[3].y, 1e-4));
-        profile = profile * profile * (3 - 2 * profile);
-        float e = L[1].w * profile / (dist_m * dist_m);
+        // The head's traced beam, by angle off its axis and around it.
+        float3 w = -ldir, aim = L[1].xyz, right = L[3].xyz, upl = cross(right, aim);
+        float ct = dot(w, aim);
+        if (ct <= 0) continue;
+        float th = acos(min(ct, 1.0));
+        float ph = atan2(abs(dot(w, upl)), abs(dot(w, right)));
+        float tb = clamp(pow(th / (M_PI_F / 2), 1 / 1.3) * 32.0 - 0.5, 0.0, 31.0);
+        float pb = clamp(ph / (M_PI_F / 2) * 8.0 - 0.5, 0.0, 7.0);
+        int t0 = min(int(tb), 30), p0 = min(int(pb), 6);
+        float ft = tb - t0, fp = pb - p0;
+        device const float4* B = BT + l * 256;
+        float3 cd = mix(mix(B[t0 * 8 + p0].rgb, B[t0 * 8 + p0 + 1].rgb, fp),
+                        mix(B[(t0 + 1) * 8 + p0].rgb, B[(t0 + 1) * 8 + p0 + 1].rgb, fp), ft);
+        float3 e3 = cd * L[1].w / (dist_m * dist_m);
+        float e = dot(e3, float3(0.2126, 0.7152, 0.0722));
         if (e <= 0) continue;
-        float3 col = L[2].rgb;
+        float3 col = L[2].rgb * (e3 / e);
         // Diffuse: the broad colour seen from the light's side.
         float3 diff = max(base + (K >= 3 ? sh_sum(-ldir, sh, K, 0, 3) : 0.0), 0.0);
         lin += srgb_to_lin3(diff) * e * col;

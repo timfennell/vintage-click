@@ -41,6 +41,9 @@ final class Viewer: NSObject, MTKViewDelegate {
     enum Mode { case camera, lighting, sheet }
     private(set) var mode = Mode.camera
     var lighting = LightingPlot()
+    /// The light being flown (seen from), if any, and the view from its lens.
+    private(set) var pov: Int?
+    private var lightCam = FlyCamera()
     private var lastPointer: CGPoint?
     /// Keyboard and mouse share the pad's input (the view takes the mouse).
     func attachInput(to view: NSView) { input.view = view }
@@ -239,13 +242,20 @@ final class Viewer: NSObject, MTKViewDelegate {
             return
         }
 
-        // Ask for the next finder frame of where the camera is now.
+        // Ask for the next finder frame: from the camera, or from the light being flown
+        // (a plain wide view down its beam: no lens to speak of, no focusing screen).
         let n = body.viewingAperture
-        let fx = camera.focalPixels(width: width)
-        loop.requestFinder(FinderJob(
-            view: camera.viewMatrix, position: camera.position, fx: fx,
-            lens: lensOn ? body.lensParams(fNumber: n, focalPx: fx, cells: 1, table: table(body, n)) : nil,
-            body: body, lighting: lighting))
+        if pov != nil {
+            loop.requestFinder(FinderJob(
+                view: lightCam.viewMatrix, position: lightCam.position, fx: lightCam.focalPixels(width: width),
+                lens: nil, body: body, lighting: lighting, fromLight: pov))
+        } else {
+            let fx = camera.focalPixels(width: width)
+            loop.requestFinder(FinderJob(
+                view: camera.viewMatrix, position: camera.position, fx: fx,
+                lens: lensOn ? body.lensParams(fNumber: n, focalPx: fx, cells: 1, table: table(body, n)) : nil,
+                body: body, lighting: lighting))
+        }
 
         guard let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let cb = queue.makeCommandBuffer() else { return }
@@ -304,7 +314,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// Optics for the focusing screen (layout in Shaders.swift).
     private func finderOptics(_ job: FinderJob, seed: UInt32) -> [SIMD4<Float>] {
         let b = job.body, l = b.lens
-        return [
+        var o: [SIMD4<Float>] = [
             SIMD4(Float(width), Float(height), job.fx, job.fx),
             SIMD4(Float(width) / 2, Float(height) / 2, b.metresPerUnit, b.focusM),
             SIMD4(l.focalMM / 1000, b.viewingAperture, l.maxAperture, Float(l.blades)),
@@ -315,6 +325,44 @@ final class Viewer: NSObject, MTKViewDelegate {
                   b.exposureStops),
             SIMD4(l.lateralCA, l.axialCA, 0, 0),
         ]
+        if job.fromLight != nil {
+            o[5].x = 0          // no focusing aids
+            o[6].x = 0          // no lens colour
+            o[3].w = 0
+            o[2].y = l.maxAperture
+        }
+        return o
+    }
+
+    /// The camera on its tripod, for seeing where it is from a light.
+    private func cameraWireframe(_ scale: Float) -> [(SIMD3<Float>, SIMD3<Float>)] {
+        let s = 1 / scale
+        let p = camera.position, f = camera.forward, r = camera.right, u = -camera.down
+        let w = 0.14 * s, h = 0.09 * s, d = 0.07 * s
+        var segs: [(SIMD3<Float>, SIMD3<Float>)] = []
+        let c: [(Float, Float, Float)] = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+                                          (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+        let v = c.map { p + r * ($0.0 * w / 2) + u * ($0.1 * h / 2) + f * ($0.2 * d / 2) }
+        for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)] {
+            segs.append((v[a], v[b]))
+        }
+        // The lens, and where it looks.
+        let lc = p + f * (d / 2)
+        for k in 0..<12 {
+            let a0 = Float(k) / 12 * 2 * .pi, a1 = Float(k + 1) / 12 * 2 * .pi
+            let e0: SIMD3<Float> = (r * cos(a0) + u * sin(a0)) * (h * 0.4)
+            let e1: SIMD3<Float> = (r * cos(a1) + u * sin(a1)) * (h * 0.4)
+            segs.append((lc + e0, lc + e1))
+        }
+        segs.append((lc, lc + f * (body.focusM / scale)))
+        // Tripod legs down to the ground, about 1.5 m.
+        for a in [0.0, 2.1, 4.2] as [Float] {
+            let top: SIMD3<Float> = p - u * (h / 2)
+            let spread: SIMD3<Float> = (r * cos(a) + f * sin(a)) * (0.35 * s)
+            let foot: SIMD3<Float> = p - u * (1.5 * s) + spread
+            segs.append((top, foot))
+        }
+        return segs
     }
 
     /// The light heads as wireframes on the screen, over the frame they belong to.
@@ -322,20 +370,25 @@ final class Viewer: NSObject, MTKViewDelegate {
                                 frame: (buf: MTLBuffer, off: Int, slot: Int, job: FinderJob),
                                 optics o: inout [SIMD4<Float>]) {
         let plot = frame.job.lighting
-        guard !plot.lights.isEmpty else { return }
         let V = frame.job.view, fx = frame.job.fx
         let scale = frame.job.body.metresPerUnit
+        var shapes: [(segs: [(SIMD3<Float>, SIMD3<Float>)], chosen: Bool)] = []
         let focusUnits = frame.job.body.focusM / scale
+        for (i, light) in plot.lights.enumerated() where i != frame.job.fromLight {
+            let chosen = mode == .lighting && i == plot.selected && frame.job.fromLight == nil
+            let target = simd_distance(light.position, camera.position + camera.forward * focusUnits)
+            shapes.append((light.wireframe(up: camera.up, metresPerUnit: scale, beamTo: chosen ? target : nil), chosen))
+        }
+        // Seen from a light, the camera is there too.
+        if frame.job.fromLight != nil { shapes.append((cameraWireframe(scale), true)) }
+        guard !shapes.isEmpty else { return }
         func cam(_ p: SIMD3<Float>) -> SIMD3<Float> {
             SIMD3(V[0] * p.x + V[1] * p.y + V[2] * p.z + V[3],
                   V[4] * p.x + V[5] * p.y + V[6] * p.z + V[7],
                   V[8] * p.x + V[9] * p.y + V[10] * p.z + V[11])
         }
         let near = 0.02 / scale
-        for (i, light) in plot.lights.enumerated() {
-            let chosen = mode == .lighting && i == plot.selected
-            let target = simd_distance(light.position, camera.position + camera.forward * focusUnits)
-            let segs = light.wireframe(up: camera.up, metresPerUnit: scale, beamTo: chosen ? target : nil)
+        for (segs, chosen) in shapes {
             var verts: [SIMD4<Float>] = []
             for (a, b) in segs {
                 var pa = cam(a), pb = cam(b)
@@ -411,70 +464,98 @@ final class Viewer: NSObject, MTKViewDelegate {
             body.turnFocus(s.triggers, dt: dt)
             // The wheel is the focus ring: away from you focuses farther.
             if s.wheel != 0 { body.focusM = max(body.lens.minFocusM, min(200, body.focusM * exp(s.wheel * 0.03))) }
-            if let slot = s.lensSlot, slot < lensBag.count { body.chooseLens(slot) }
+            if let d = s.digit, d >= 1, d <= lensBag.count { body.chooseLens(d - 1) }
         case .lighting:
             lightingInput(s, dt: dt)
             body.dofPreview = false
         }
-        if p.contains(.menu) { camera = home }
+        if mode == .camera && p.contains(.menu) { camera = home }
         if p.contains(.view) { openSheet() }
         if p.contains(.r3) {
             mode = mode == .lighting ? .camera : .lighting
-            lighting.carrying = false
+            pov = nil
         }
-        camera.turn(s.mouseLook)
-        let pace = camera.moveSpeed
-        if s.run { camera.moveSpeed = pace * 3 }
-        camera.update(FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0), dt: dt)
-        camera.moveSpeed = pace
+        // The controls drive whichever you are looking through: the camera or a light.
+        let input = FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0)
+        lighting.up = camera.up
+        if let i = pov, lighting.lights.indices.contains(i) {
+            lightCam.turn(s.mouseLook)
+            let pace = lightCam.moveSpeed
+            if s.run { lightCam.moveSpeed = pace * 3 }
+            lightCam.update(input, dt: dt)
+            lightCam.moveSpeed = pace
+            lighting.lights[i].position = lightCam.position
+            lighting.lights[i].aim = lightCam.forward
+        } else {
+            camera.turn(s.mouseLook)
+            let pace = camera.moveSpeed
+            if s.run { camera.moveSpeed = pace * 3 }
+            camera.update(input, dt: dt)
+            camera.moveSpeed = pace
+        }
         camera.focalMM = body.lens.focalMM
-        if lighting.carrying, lighting.lights.indices.contains(lighting.selected) {
-            carry(&lighting.lights[lighting.selected])
-        }
         if mode == .camera && p.contains(.a) { releaseShutter() }
     }
 
-    /// Placing lights: walk them into position, aim them where you look.
+    /// Lighting: choose a light and you see from it, down its beam, and the
+    /// same controls fly and aim it. The camera waits where you left it.
     private func lightingInput(_ s: GamepadInput.State, dt: Float) {
         let p = s.pressed
         var plot = lighting
+        let n = plot.lights.count
         if p.contains(.x) {
-            plot.lights.append(PlacedLight(head: plot.kitChoice, position: camera.position, aim: camera.forward))
-            plot.selected = plot.lights.count - 1
-            plot.carrying = true
+            // A new head where you are looking from, aimed the same way.
+            let from = pov.map { _ in lightCam } ?? camera
+            plot.lights.append(PlacedLight(head: plot.kitChoice, position: from.position, aim: from.forward))
+            lighting = plot
+            fly(plot.lights.count - 1)
+            plot = lighting
         }
+        if let d = s.digit {
+            if d == 0 { pov = nil } else if d <= plot.lights.count { fly(d - 1); plot = lighting }
+        }
+        if n > 0 {
+            if p.contains(.left) { fly(((pov ?? plot.selected) + n - 1) % n); plot = lighting }
+            if p.contains(.right) { fly(((pov ?? plot.selected) + 1) % n); plot = lighting }
+        }
+        if p.contains(.b) { pov = nil }
         if p.contains(.y) {
             plot.kitChoice = (plot.kitChoice + 1) % lightKit.count
-            if plot.lights.indices.contains(plot.selected) { plot.lights[plot.selected].head = plot.kitChoice }
+            if let i = pov { plot.lights[i].head = plot.kitChoice }
         }
-        if !plot.lights.isEmpty {
-            if p.contains(.left) { plot.selected = (plot.selected + plot.lights.count - 1) % plot.lights.count; plot.carrying = false }
-            if p.contains(.right) { plot.selected = (plot.selected + 1) % plot.lights.count; plot.carrying = false }
-            plot.selected = min(plot.selected, plot.lights.count - 1)
-            if p.contains(.a) { plot.carrying.toggle() }
-            if p.contains(.b) {
-                plot.lights.remove(at: plot.selected)
-                plot.selected = max(0, plot.selected - 1)
-                plot.carrying = false
-            }
-            if !plot.lights.isEmpty {
-                var l = plot.lights[plot.selected]
+        if let i = pov, plot.lights.indices.contains(i) {
+            if p.contains(.menu) {
+                plot.lights.remove(at: i)
+                plot.selected = max(0, i - 1)
+                pov = nil
+            } else {
+                var l = plot.lights[i]
                 if p.contains(.up) { l.dimmerStops = min(0, l.dimmerStops + 0.5) }
                 if p.contains(.down) { l.dimmerStops = max(-4, l.dimmerStops - 0.5) }
                 l.spot = max(0, min(1, l.spot + s.triggers * dt * 0.8 + s.wheel * 0.01))
-                plot.lights[plot.selected] = l
+                plot.lights[i] = l
             }
         }
         if p.contains(.l3) { plot.cycleHouseLights() }
         lighting = plot
     }
 
-    /// A light in hand: held out in front, aimed at the point you are focused on.
-    private func carry(_ l: inout PlacedLight) {
-        let focusUnits = body.focusM / body.metresPerUnit
-        let target = camera.position + camera.forward * focusUnits
-        l.position = camera.position + camera.forward * focusUnits * 0.35
-        l.aim = simd_normalize(target - l.position)
+    func flyLight(_ i: Int) { fly(i) }
+
+    /// Sets the shutter speed by the finder's meter (scripted runs).
+    func meterNow() { body.meterShutter(sceneLuminance: meterLum) }
+
+    /// Climbs into light `i`: the view from its lens, looking down the beam.
+    private func fly(_ i: Int) {
+        guard lighting.lights.indices.contains(i) else { return }
+        let l = lighting.lights[i]
+        lighting.selected = i
+        pov = i
+        lightCam = FlyCamera()
+        lightCam.up = camera.up
+        lightCam.focalMM = 28
+        lightCam.moveSpeed = inside ? 1.4 / body.metresPerUnit : radius * 0.6
+        lightCam.lookAt(l.position + l.aim, from: l.position)
     }
 
     /// A classic setup for scripted runs: a hard Fresnel key high at 45 degrees,
@@ -625,15 +706,33 @@ final class Viewer: NSObject, MTKViewDelegate {
         i.mirrorUp = mirrorUp
         if mode == .lighting {
             var lines = lighting.lights.enumerated().map { k, l -> String in
-                let mark = k == lighting.selected ? (lighting.carrying ? "▶ in hand" : "▶") : " "
+                let mark = k == pov ? "◉" : " "
                 return String(format: "%@ %d %@  beam %.0f°  %@", mark, k + 1, l.kit.name, l.beamAngle,
                               l.dimmerStops == 0 ? "full" : String(format: "%+.1f stop", l.dimmerStops))
             }
-            lines.append(String(format: "House lights: %@ (%.1f%%)   ·   next light: %@", lighting.ambientName,
+            lines.append(String(format: "House lights: %@ (%.2f%%)   ·   next light: %@", lighting.ambientName,
                                 lighting.ambient * 100, lightKit[lighting.kitChoice].name))
-            lines.append("Pad: X add · A take/place · B remove · Y head · ◀▶ choose · ▲▼ dimmer · L2/R2 flood/spot · L3 house lights · R3 done")
-            lines.append("Keys: F add · click / E take/place · Backspace remove · T head · [ ] choose · - = dimmer · wheel flood/spot · G house lights · L done")
+            if pov != nil {
+                lines.append("Flying the light: WASD / sticks move it, mouse / right stick aims it · wheel or L2/R2 flood/spot · - = or ▲▼ dimmer · T / Y head")
+                lines.append("Backspace / Menu remove · 0 or B back to the camera · 1-9 or ◀▶ another light · F / X add one · G / L3 house lights · L / R3 done")
+            } else {
+                lines.append("1-9 or ◀▶ fly a light from its own view · F / X add one at your view · G / L3 house lights")
+                lines.append("L / R3 back to the camera controls")
+            }
             i.lines = lines
+            if let k = pov, lighting.lights.indices.contains(k) {
+                let l = lighting.lights[k]
+                let beam = l.beam
+                let toRad: Float = .pi / 360
+                // On screen: tan(angle) over tan(half the view), half the width. The
+                // light's view is 28 mm on 36 mm film: tan(half view) = 18 / 28.
+                func r(_ a: Float) -> CGFloat {
+                    let ratio: Float = tan(min(a, 1.4)) / (18 / 28)
+                    return CGFloat(ratio * 0.5)
+                }
+                i.beam = (r(beam.angle(at: 0.9) * toRad), r(beam.angle(at: 0.5) * toRad), r(beam.angle(at: 0.1) * toRad))
+                i.title = "LIGHT \(k + 1) · \(l.kit.name)"
+            }
         }
         hud.info = i
     }

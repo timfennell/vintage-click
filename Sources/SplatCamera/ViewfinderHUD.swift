@@ -17,6 +17,10 @@ final class ViewfinderHUD: NSView {
         var stats = ""
         var mirrorUp = false
         var lines: [String] = []        // lighting plot, shown while placing lights
+        /// Seen from a light: its beam's hot centre, edge and falloff, as radii
+        /// in fractions of the view's width.
+        var beam: (hot: CGFloat, edge: CGFloat, falloff: CGFloat)?
+        var title = ""                  // big label: which light you are flying
     }
     var info = Info() { didSet { needsDisplay = true } }
 
@@ -82,6 +86,24 @@ final class ViewfinderHUD: NSView {
             text(line, at: NSPoint(x: 2 * u, y: 5 * u + CGFloat(k) * 1.5 * u), size: 1.0 * u,
                  color: k < info.lines.count - 3 ? led : NSColor.white.withAlphaComponent(0.8),
                  width: b.width * 0.9)
+        }
+        if let beam = info.beam {
+            let c = NSPoint(x: b.midX, y: b.midY)
+            for (r, alpha, dash) in [(beam.hot, 0.5, false), (beam.edge, 0.9, false), (beam.falloff, 0.6, true)] {
+                let rad = r * b.width
+                let path = NSBezierPath(ovalIn: NSRect(x: c.x - rad, y: c.y - rad, width: 2 * rad, height: 2 * rad))
+                path.lineWidth = 1.5
+                if dash { path.setLineDash([8, 6], count: 2, phase: 0) }
+                led.withAlphaComponent(alpha).setStroke()
+                path.stroke()
+            }
+            let cross = NSBezierPath()
+            cross.move(to: NSPoint(x: c.x - 10, y: c.y)); cross.line(to: NSPoint(x: c.x + 10, y: c.y))
+            cross.move(to: NSPoint(x: c.x, y: c.y - 10)); cross.line(to: NSPoint(x: c.x, y: c.y + 10))
+            cross.stroke()
+            text(info.title, at: NSPoint(x: b.midX, y: b.maxY - 7 * u), size: 1.5 * u, color: led,
+                 align: .center, width: b.width)
+            return
         }
         drawMeter(in: NSRect(x: b.maxX - 4.5 * u, y: b.midY - 14 * u, width: 2.5 * u, height: 28 * u), u: u)
     }
