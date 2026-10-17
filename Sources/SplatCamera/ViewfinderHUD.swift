@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 
 /// What the finder shows around the image, the way a late-70s SLR did:
 /// a shutter-speed card on the left edge with a meter needle swinging in from
@@ -50,6 +51,18 @@ final class ViewfinderHUD: NSView {
     }
 
     override var isFlipped: Bool { true }
+
+    /// Seen through the eyepiece: the readouts get the same gentle pincushion
+    /// as everything else on the screen (the finder's shader bends the rest;
+    /// same formula, EYEPIECE_K there).
+    private static let eyepieceK: CGFloat = 0.018
+    private static let warp: CIWarpKernel? = CIWarpKernel(source: """
+        kernel vec2 eyepiece(vec2 c, float k) {
+            vec2 d = destCoord() - c;
+            return c + d * (1.0 - k * dot(d, d) / dot(c, c));
+        }
+        """)
+    private lazy var ci = CIContext(options: [.cacheIntermediates: false])
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     private let ledRed = NSColor(calibratedRed: 1.0, green: 0.12, blue: 0.10, alpha: 1)
@@ -89,6 +102,31 @@ final class ViewfinderHUD: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let scale = window?.backingScaleFactor ?? 2
+        let w = Int(bounds.width * scale), h = Int(bounds.height * scale)
+        guard let warp = Self.warp, w > 0, h > 0,
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            drawContent()
+            return
+        }
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: scale, y: -scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        drawContent()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let flat = ctx.makeImage() else { return }
+        let img = CIImage(cgImage: flat)
+        let bent = warp.apply(extent: img.extent, roiCallback: { _, r in r.insetBy(dx: -80, dy: -80) }, image: img,
+                              arguments: [CIVector(x: CGFloat(w) / 2, y: CGFloat(h) / 2), Self.eyepieceK])
+        if let bent, let out = ci.createCGImage(bent, from: img.extent) {
+            NSImage(cgImage: out, size: bounds.size).draw(in: bounds)
+        }
+    }
+
+    private func drawContent() {
         // Mirror up: nothing reaches the finder, not even the readouts.
         if info.mirrorUp { meterShape = nil; return }
         let img = imageRect
@@ -110,7 +148,7 @@ final class ViewfinderHUD: NSView {
         }
         // Above the frame, lit as the meter's scale is: what is mounted, how fast
         // you go, what is loaded.
-        let top = img.minY - 1.85 * u
+        let top = img.minY - 2.15 * u
         text("\(info.lens)  ·  \(info.stock)", at: NSPoint(x: img.minX + 0.5 * u, y: max(2, top)), size: 0.95 * u,
              color: NSColor(calibratedRed: 1, green: 0.90, blue: 0.76, alpha: 0.9), width: img.width * 0.7)
         if !info.stats.isEmpty {

@@ -229,11 +229,30 @@ float3 prism_sample(device const float* f, float2 p, float2 shift, float z, cons
 // The focusing screen, always: the lens's image (its depth of field, light
 // fall-off and colour fringes) on fine-ground glass with a fresnel, a
 // split-prism disc (halves shift apart with defocus) and a microprism collar.
+// The eyepiece is not perfect: what sits on the screen (the window's edge,
+// the meter, the wireframes) is seen with a little pincushion, a touch more
+// in red than in blue. `pos` in window pixels; returns where to look on the
+// screen for what the eye sees at `pos`. The scene's own image is the lens's
+// business and is left alone.
+constant float EYEPIECE_K = 0.018, EYEPIECE_CA = 0.0035;
+float2 eyepiece(float2 pos, constant float4* O, float k) {
+    float2 c = O[0].xy * 0.5;
+    float2 d = pos - c;
+    return c + d * (1 - k * dot(d, d) / dot(c, c));
+}
+float2 eyepiece_forward(float2 pos, constant float4* O, float k) {
+    float2 c = O[0].xy * 0.5;
+    float2 d = pos - c;
+    return c + d * (1 + k * dot(d, d) / dot(c, c));
+}
+
 // The finder: the screen's image, a rounded-corner window in a black surround (sRGB).
 float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     float2 p = (pos - O[7].xy) / O[7].z;
     float2 halfSize = O[0].xy * 0.5;
-    float2 dq = abs(p - halfSize) - (halfSize - O[7].w);
+    // The window's edge as the eyepiece shows it.
+    float2 pe = (eyepiece(pos, O, EYEPIECE_K) - O[7].xy) / O[7].z;
+    float2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
     float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;   // < 0 inside
     if (edge > 1.0) {
         float g = 0.022 + 0.01 * value_noise(pos / 3.0, 31);              // the surround's black
@@ -339,7 +358,13 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
                            constant float4* O [[buffer(1)]], constant float4* F [[buffer(2)]],
                            constant float4* M [[buffer(3)]], texture2d<float> plate [[texture(0)]]) {
     float3 outc = finder_base(in.pos.xy, f, O);
-    if (M[2].x > 0) outc = meter_light(outc, in.pos.xy, f, O, M, plate);
+    if (M[2].x > 0) {
+        // The meter through the eyepiece: each colour from its own place.
+        float3 r = meter_light(outc, eyepiece(in.pos.xy, O, EYEPIECE_K + EYEPIECE_CA), f, O, M, plate);
+        float3 g = meter_light(outc, eyepiece(in.pos.xy, O, EYEPIECE_K), f, O, M, plate);
+        float3 b = meter_light(outc, eyepiece(in.pos.xy, O, EYEPIECE_K - EYEPIECE_CA), f, O, M, plate);
+        outc = float3(r.r, g.g, b.b);
+    }
     return float4(outc, 1);
 }
 
@@ -520,6 +545,7 @@ vertex LineOut wire_vertex(uint vid [[vertex_id]], device const float4* v [[buff
     float side = (k == 2 || k == 3 || k == 5) ? 1.0 : -1.0;
     float hw = W.x;
     float2 w = (far ? b + d * hw : a - d * hw) + n * side * hw;
+    w = eyepiece_forward(w, O, EYEPIECE_K);
     LineOut o;
     o.pos = float4(w.x / O[0].x * 2 - 1, 1 - w.y / O[0].y * 2, 0, 1);   // the window is the frame's size
     float4 p = far ? p1 : p0;
