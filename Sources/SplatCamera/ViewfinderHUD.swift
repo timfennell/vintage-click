@@ -266,7 +266,8 @@ final class ViewfinderHUD: NSView {
 
     private static func meterLayout(_ img: NSRect, u: CGFloat) -> NSRect {
         let cardW = 3.6 * u, cardH = img.height * 0.66
-        return NSRect(x: img.minX - cardW * 0.62, y: img.midY - cardH / 2, width: cardW, height: cardH)
+        // Inside the frame, just in from its left edge (the needle swings in from outside).
+        return NSRect(x: img.minX + 1.0 * u, y: img.midY - cardH / 2, width: cardW, height: cardH)
     }
 
     /// Fastest at the top: the height of a (fractional) speed index on the card.
@@ -290,8 +291,13 @@ final class ViewfinderHUD: NSView {
         let k: CGFloat = 60, damp: CGFloat = 11
         needleSpeed += (k * (want - needle) - damp * needleSpeed) * dt
         needle += needleSpeed * dt
-        meterShape = MeterShape(card: card, pivot: NSPoint(x: card.minX - 9 * u, y: card.midY),
-                                tip: NSPoint(x: card.maxX + 2.2 * u, y: Self.speedY(needle, card: card, u: u)),
+        // The needle aims through the reading's tick (ticks point at the pivot),
+        // and reaches past the plate.
+        let pivot = NSPoint(x: card.minX - 9 * u, y: card.midY)
+        let aim = NSPoint(x: card.minX + 0.1 * u, y: Self.speedY(needle, card: card, u: u))
+        let reach = (card.maxX + 2.2 * u - pivot.x) / (aim.x - pivot.x)
+        meterShape = MeterShape(card: card, pivot: pivot,
+                                tip: NSPoint(x: pivot.x + (aim.x - pivot.x) * reach, y: pivot.y + (aim.y - pivot.y) * reach),
                                 u: u, shutterIndex: info.shutterIndex, bounds: bounds.size)
         // Keep animating while it is still swinging.
         if abs(needleSpeed) > 0.01 || abs(want - needle) > 0.01 {
@@ -332,8 +338,16 @@ final class ViewfinderHUD: NSView {
             let str = NSAttributedString(string: sp.label, attributes: attrs)
             let sz = str.size()
             str.draw(at: NSPoint(x: card.maxX - sz.width - 0.35 * u, y: y - sz.height / 2))
-            (slow ? red : cream).withAlphaComponent(0.8).setFill()
-            NSRect(x: card.minX + 0.12 * u, y: y - 0.06 * u, width: 0.38 * u, height: 0.12 * u).fill()
+            // A tick at each speed, along the needle's line when it points there.
+            let p0 = NSPoint(x: card.minX + 0.1 * u, y: y)
+            let dx = p0.x - m.pivot.x, dy = p0.y - m.pivot.y
+            let len = (dx * dx + dy * dy).squareRoot()
+            let tick = NSBezierPath()
+            tick.move(to: p0)
+            tick.line(to: NSPoint(x: p0.x + dx / len * 0.9 * u, y: p0.y + dy / len * 0.9 * u))
+            tick.lineWidth = 0.13 * u
+            (slow ? red : cream).withAlphaComponent(0.85).setStroke()
+            tick.stroke()
         }
         // The green tab: the speed you set.
         NSColor(calibratedRed: 0.45, green: 0.95, blue: 0.70, alpha: 0.9).setFill()

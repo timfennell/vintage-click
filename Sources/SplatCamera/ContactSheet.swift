@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import CoreImage
 
 /// The only place pictures are seen: each roll laid out on a light table in
 /// strips of six (rebate, sprocket holes, edge print), looked at through a
@@ -226,18 +227,27 @@ final class ContactSheetView: NSView {
         // 2 mm in from the edge; the frame from 5.5 to 29.5 across.
         let mm = L.frames[0].height / 24
         for (s, strip) in L.strips.enumerated() {
-            NSColor(white: 0.05, alpha: 1).setFill()
-            strip.fill()
-            // Sprocket holes: the light table shows through them.
-            NSColor(calibratedRed: 0.93, green: 0.95, blue: 0.98, alpha: 1).setFill()
+            // Laid down by hand: never quite square, never quite in line.
+            var rng = Grit(seed: UInt64(roll.number * 131 + s * 17 + 5))
+            NSGraphicsContext.saveGraphicsState()
+            let lay = NSAffineTransform()
+            lay.translateX(by: strip.midX + rng.signed() * 1.5, yBy: strip.midY + rng.signed() * 1.2)
+            lay.rotate(byDegrees: rng.signed() * 0.35)
+            lay.translateX(by: -strip.midX, yBy: -strip.midY)
+            lay.concat()
+            // The base, punched: the light table shows through the sprocket holes.
+            let film = NSBezierPath(rect: strip)
+            film.windingRule = .evenOdd
             var hx = strip.minX + 1.2 * mm
             while hx < strip.maxX - 2 * mm {
                 for hy in [strip.minY + 2.0 * mm, strip.maxY - 4.8 * mm] {
-                    NSBezierPath(roundedRect: NSRect(x: hx, y: hy, width: 1.98 * mm, height: 2.79 * mm),
-                                 xRadius: 0.5 * mm, yRadius: 0.5 * mm).fill()
+                    film.append(NSBezierPath(roundedRect: NSRect(x: hx, y: hy, width: 1.98 * mm, height: 2.79 * mm),
+                                             xRadius: 0.5 * mm, yRadius: 0.5 * mm))
                 }
                 hx += 4.75 * mm
             }
+            NSColor(white: 0.05, alpha: 1).setFill()
+            film.fill()
             // Outer margins (2 mm): the stock name along the top, frame numbers,
             // half-frame marks and a DX-style bar code along the bottom.
             let top = strip.minY + 0.35 * mm, bottom = strip.maxY - 1.75 * mm
@@ -279,28 +289,72 @@ final class ContactSheetView: NSView {
                 }
                 img?.draw(in: fr, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             }
+            // Dust printed in with the pictures: white specks, now and then a hair.
+            NSColor(white: 0.92, alpha: 0.7).setFill()
+            for _ in 0..<(10 + rng.int(14)) {
+                let p = NSPoint(x: strip.minX + rng.unit() * strip.width, y: strip.minY + rng.unit() * strip.height)
+                let r = (0.08 + 0.25 * rng.unit() * rng.unit()) * mm
+                NSBezierPath(ovalIn: NSRect(x: p.x - r, y: p.y - r * (0.6 + 0.4 * rng.unit()), width: 2 * r, height: 1.6 * r)).fill()
+            }
+            if rng.unit() < 0.4 {
+                hair(from: NSPoint(x: strip.minX + rng.unit() * strip.width, y: strip.minY + rng.unit() * strip.height),
+                     length: (3 + 6 * rng.unit()) * mm, width: 0.07 * mm, color: NSColor(white: 0.9, alpha: 0.55), rng: &rng)
+            }
+            for k in 0..<6 where marks.contains(s * 6 + k) {
+                greasePencil(around: L.frames[s * 6 + k], seed: UInt64(s * 6 + k), mm: mm)
+            }
+            if selected / 6 == s, selected < L.frames.count {
+                let sel = NSBezierPath(rect: L.frames[selected].insetBy(dx: -2, dy: -2))
+                sel.lineWidth = 1.5
+                sel.setLineDash([6, 4], count: 2, phase: 0)
+                NSColor(white: 0.1, alpha: 0.8).setStroke()
+                sel.stroke()
+            }
+            NSGraphicsContext.restoreGraphicsState()
         }
-        for i in marks where i < L.frames.count {
-            let box = NSBezierPath(roundedRect: L.frames[i].insetBy(dx: -4, dy: -4), xRadius: 6, yRadius: 6)
-            box.lineWidth = 3.5
-            NSColor(calibratedRed: 0.85, green: 0.08, blue: 0.06, alpha: 0.85).setStroke()
-            box.stroke()
+    }
+
+    /// A keeper, ringed in red china marker: wobbly, waxy, gone over twice.
+    private func greasePencil(around fr: NSRect, seed: UInt64, mm: CGFloat) {
+        var rng = Grit(seed: seed &* 7919 &+ 3)
+        let box = fr.insetBy(dx: -1.6 * mm, dy: -1.6 * mm)
+        for pass in 0..<2 {
+            let path = NSBezierPath()
+            let corners = [NSPoint(x: box.minX, y: box.minY), NSPoint(x: box.maxX, y: box.minY),
+                           NSPoint(x: box.maxX, y: box.maxY), NSPoint(x: box.minX, y: box.maxY)]
+            func jitter(_ p: NSPoint) -> NSPoint { NSPoint(x: p.x + rng.signed() * 1.2 * mm, y: p.y + rng.signed() * 1.2 * mm) }
+            let start = jitter(corners[0])
+            path.move(to: start)
+            for k in 1...4 {
+                let a = corners[(k - 1) % 4], b = corners[k % 4]
+                let mid = NSPoint(x: (a.x + b.x) / 2 + rng.signed() * 0.8 * mm, y: (a.y + b.y) / 2 + rng.signed() * 0.8 * mm)
+                path.curve(to: k == 4 ? NSPoint(x: start.x + 2 * mm, y: start.y + rng.signed() * mm) : jitter(b),
+                           controlPoint1: mid, controlPoint2: mid)
+            }
+            path.lineWidth = (pass == 0 ? 0.9 : 0.6) * mm
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            NSColor(calibratedRed: 0.80, green: 0.08, blue: 0.07, alpha: pass == 0 ? 0.72 : 0.5).setStroke()
+            path.stroke()
         }
-        if selected < L.frames.count {
-            let sel = NSBezierPath(rect: L.frames[selected].insetBy(dx: -2, dy: -2))
-            sel.lineWidth = 1.5
-            sel.setLineDash([6, 4], count: 2, phase: 0)
-            NSColor(white: 0.1, alpha: 0.8).setStroke()
-            sel.stroke()
-        }
+    }
+
+    private func hair(from p: NSPoint, length: CGFloat, width: CGFloat, color: NSColor, rng: inout Grit) {
+        let path = NSBezierPath()
+        path.move(to: p)
+        let a = rng.unit() * 2 * .pi
+        let end = NSPoint(x: p.x + cos(a) * length, y: p.y + sin(a) * length)
+        path.curve(to: end, controlPoint1: NSPoint(x: p.x + rng.signed() * length, y: p.y + rng.signed() * length),
+                   controlPoint2: NSPoint(x: end.x + rng.signed() * length * 0.6, y: end.y + rng.signed() * length * 0.6))
+        path.lineWidth = width
+        color.setStroke()
+        path.stroke()
     }
 
     override func draw(_ dirtyRect: NSRect) {
         let b = bounds
-        // The light table: an even cool glow, a little darker at the edges.
-        NSGradient(colors: [NSColor(calibratedRed: 0.95, green: 0.97, blue: 1.0, alpha: 1),
-                            NSColor(calibratedRed: 0.80, green: 0.83, blue: 0.88, alpha: 1)])?
-            .draw(in: NSBezierPath(rect: b), relativeCenterPosition: .zero)
+        // The light table: tubes behind a worn diffuser, dust and lint on the glass.
+        if let table = tableImage() { NSImage(cgImage: table, size: b.size).draw(in: b) }
         guard let roll else {
             label("No rolls developed yet.", at: NSPoint(x: b.midX - 110, y: b.midY), size: 18,
                   color: NSColor(white: 0.2, alpha: 1))
@@ -314,14 +368,20 @@ final class ContactSheetView: NSView {
         let R = b.height * 0.2
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)).addClip()
-        NSColor(calibratedRed: 0.97, green: 0.98, blue: 1.0, alpha: 1).setFill()
-        b.fill()
-        let t = NSAffineTransform()
-        t.translateX(by: c.x, yBy: c.y)
-        t.scale(by: loupePower)
-        t.translateX(by: -c.x, yBy: -c.y)
-        t.concat()
-        drawStrips(L, roll: roll, fine: true, near: c)
+        if let seen = loupeView(L, roll: roll, centre: c, radius: R) {
+            NSImage(cgImage: seen, size: NSSize(width: 2 * R, height: 2 * R))
+                .draw(in: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R))
+        }
+        // Specks on the loupe's own glass, and its flare off the rim.
+        var lr = Grit(seed: 77)
+        for _ in 0..<7 {
+            let a = lr.unit() * 2 * .pi, d = R * (0.2 + 0.75 * lr.unit()), r = R * (0.006 + 0.012 * lr.unit())
+            NSColor(white: 0.2, alpha: 0.18).setFill()
+            NSBezierPath(ovalIn: NSRect(x: c.x + cos(a) * d - r, y: c.y + sin(a) * d - r, width: 2 * r, height: 2 * r)).fill()
+        }
+        NSGradient(colors: [NSColor(white: 1, alpha: 0.10), NSColor(white: 1, alpha: 0)])?
+            .draw(fromCenter: NSPoint(x: c.x - R * 0.45, y: c.y - R * 0.5), radius: 0,
+                  toCenter: NSPoint(x: c.x - R * 0.45, y: c.y - R * 0.5), radius: R * 0.5, options: [])
         NSGraphicsContext.restoreGraphicsState()
         // Lens edge falloff and the black barrel.
         NSGraphicsContext.saveGraphicsState()
@@ -360,6 +420,140 @@ final class ContactSheetView: NSView {
         NSAttributedString(string: s, attributes: attrs).draw(at: p)
     }
 
+    // MARK: the table and the loupe, as things
+
+    private var tableCache: (size: NSSize, image: CGImage)?
+
+    /// The light table's glow: fluorescent tubes behind a diffuser (bands),
+    /// warmer and cooler patches, darker corners, then dust, lint and fine
+    /// scratches on the glass. Made once per size.
+    private func tableImage() -> CGImage? {
+        let size = bounds.size
+        if let t = tableCache, t.size == size { return t.image }
+        let w = max(1, Int(size.width)), h = max(1, Int(size.height))
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        var rng = Grit(seed: 2024)
+        // Low-frequency mottle from a coarse random grid, smoothly interpolated.
+        let gw = 9, gh = 7
+        let grid: [Float] = (0..<(gw * gh)).map { _ in Float(rng.signed()) }
+        func mottle(_ x: Float, _ y: Float) -> Float {
+            let fx = x * Float(gw - 1), fy = y * Float(gh - 1)
+            let ix = min(gw - 2, Int(fx)), iy = min(gh - 2, Int(fy))
+            let tx = fx - Float(ix), ty = fy - Float(iy)
+            let sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty)
+            let a: Float = grid[iy * gw + ix], b: Float = grid[iy * gw + ix + 1]
+            let c: Float = grid[(iy + 1) * gw + ix], d: Float = grid[(iy + 1) * gw + ix + 1]
+            let top: Float = a + (b - a) * sx
+            let low: Float = c + (d - c) * sx
+            return top + (low - top) * sy
+        }
+        for y in 0..<h {
+            let v = Float(y) / Float(h)
+            for x in 0..<w {
+                let u = Float(x) / Float(w)
+                let dx = u - 0.5, dy = v - 0.5
+                var lum: Float = 0.93
+                lum += 0.035 * cos(u * 2 * .pi * 3.5 + 0.7)          // the tubes
+                lum += 0.03 * mottle(u, v)
+                lum *= 1 - 0.32 * (dx * dx + dy * dy) * 2
+                lum += Float(Int(rng.next() % 1000)) / 1000 * 0.012 - 0.006
+                let warm = 0.012 * mottle(1 - v, u)
+                let i = (y * w + x) * 4
+                px[i] = UInt8(max(0, min(255, (lum + warm) * 255)))
+                px[i + 1] = UInt8(max(0, min(255, (lum + 0.004) * 255)))
+                px[i + 2] = UInt8(max(0, min(255, (lum - warm + 0.03) * 255)))
+            }
+        }
+        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        for _ in 0..<260 {
+            let r = 0.4 + 1.6 * rng.unit() * rng.unit()
+            NSColor(white: 0.25, alpha: 0.12 + 0.35 * rng.unit()).setFill()
+            NSBezierPath(ovalIn: NSRect(x: rng.unit() * CGFloat(w), y: rng.unit() * CGFloat(h), width: 2 * r,
+                                        height: 2 * r * (0.6 + 0.4 * rng.unit()))).fill()
+        }
+        for _ in 0..<7 {
+            hair(from: NSPoint(x: rng.unit() * CGFloat(w), y: rng.unit() * CGFloat(h)), length: 10 + 30 * rng.unit(),
+                 width: 0.6, color: NSColor(white: 0.3, alpha: 0.3), rng: &rng)
+        }
+        for _ in 0..<10 {
+            let p = NSPoint(x: rng.unit() * CGFloat(w), y: rng.unit() * CGFloat(h))
+            let a = rng.unit() * .pi, len = 40 + 200 * rng.unit()
+            let path = NSBezierPath()
+            path.move(to: p)
+            path.line(to: NSPoint(x: p.x + cos(a) * len, y: p.y + sin(a) * len))
+            path.lineWidth = 0.5
+            NSColor(white: rng.unit() < 0.5 ? 1 : 0.4, alpha: 0.12).setStroke()
+            path.stroke()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        guard let img = ctx.makeImage() else { return nil }
+        tableCache = (size, img)
+        return img
+    }
+
+    private lazy var ci = CIContext(options: [.cacheIntermediates: false])
+
+    /// What the loupe sees: the table under it magnified, through a simple
+    /// lens. Pincushion toward the rim, colour fringes growing outward, the
+    /// edge going soft, the light falling off.
+    private func loupeView(_ L: Layout, roll: Roll, centre c: CGPoint, radius R: CGFloat) -> CGImage? {
+        let scale = window?.backingScaleFactor ?? 2
+        let side = Int(2 * R * scale)
+        guard side > 8, let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.translateBy(x: 0, y: CGFloat(side))
+        ctx.scaleBy(x: scale, y: -scale)
+        ctx.translateBy(x: -(c.x - R), y: -(c.y - R))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        let t = NSAffineTransform()
+        t.translateX(by: c.x, yBy: c.y)
+        t.scale(by: loupePower)
+        t.translateX(by: -c.x, yBy: -c.y)
+        t.concat()
+        if let table = tableImage() { NSImage(cgImage: table, size: bounds.size).draw(in: bounds) }
+        drawStrips(L, roll: roll, fine: true, near: c)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let raw = ctx.makeImage() else { return nil }
+        let img = CIImage(cgImage: raw)
+        let mid = CIVector(x: CGFloat(side) / 2, y: CGFloat(side) / 2)
+        let half = CGFloat(side) / 2
+        // Pincushion: the rim magnified more than the middle.
+        let bent = img.applyingFilter("CIBumpDistortion", parameters: [
+            kCIInputCenterKey: mid, kCIInputRadiusKey: half * 1.15, kCIInputScaleKey: -0.14,
+        ]).cropped(to: img.extent)
+        // Lateral colour: red a touch bigger than green, blue a touch smaller.
+        func channel(_ m: (CGFloat, CGFloat, CGFloat), _ k: CGFloat) -> CIImage {
+            let only = bent.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: m.0, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: m.1, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: m.2, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+            ])
+            let move = CGAffineTransform(translationX: half, y: half).scaledBy(x: k, y: k).translatedBy(x: -half, y: -half)
+            return only.transformed(by: move).cropped(to: img.extent)
+        }
+        let fringed = channel((1, 0, 0), 1.010)
+            .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: channel((0, 1, 0), 1)])
+            .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: channel((0, 0, 1), 0.990)])
+        // Soft toward the rim (field curvature): sharp in the middle, smeared at the edge.
+        let mask = CIFilter(name: "CIRadialGradient", parameters: [
+            "inputCenter": mid, "inputRadius0": half * 0.45, "inputRadius1": half,
+            "inputColor0": CIColor.black, "inputColor1": CIColor.white,
+        ])!.outputImage!.cropped(to: img.extent)
+        let soft = fringed.clampedToExtent().applyingFilter("CIMaskedVariableBlur", parameters: [
+            "inputMask": mask, kCIInputRadiusKey: 4.5 * scale,
+        ]).cropped(to: img.extent)
+        // The light falling off toward the edge.
+        let dim = soft.applyingFilter("CIVignetteEffect", parameters: [
+            kCIInputCenterKey: mid, kCIInputRadiusKey: half * 1.05, kCIInputIntensityKey: 0.6, "inputFalloff": 0.4,
+        ])
+        return ci.createCGImage(dim, from: img.extent)
+    }
+
     private func label(_ s: String, at p: NSPoint, size: CGFloat, color: NSColor) {
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: max(size, 7), weight: .semibold),
@@ -367,4 +561,17 @@ final class ContactSheetView: NSView {
         ]
         NSAttributedString(string: s, attributes: attrs).draw(at: p)
     }
+}
+
+/// A small seeded random source, so the same roll lies the same way each time.
+struct Grit {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed &* 6364136223846793005 &+ 1442695040888963407 }
+    mutating func next() -> UInt64 {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return state >> 33
+    }
+    mutating func unit() -> CGFloat { CGFloat(next() % 1_000_000) / 1_000_000 }
+    mutating func signed() -> CGFloat { unit() * 2 - 1 }
+    mutating func int(_ n: Int) -> Int { Int(next() % UInt64(max(1, n))) }
 }
