@@ -38,11 +38,15 @@ final class ContactSheetView: NSView {
     override var isFlipped: Bool { true }
 
     /// Where rolls are kept: chosen in File > Choose Where Rolls Are Kept
-    /// (remembered), else ~/Pictures/Splat Camera. SPLAT_CAMERA_ROLLS overrides, for tests.
+    /// (remembered), else ~/Pictures/Crank & Click (or the folder of the game's
+    /// old name, Splat Camera, if that is where rolls already are). SPLAT_CAMERA_ROLLS overrides, for tests.
     static var root: URL {
         if let env = ProcessInfo.processInfo.environment["SPLAT_CAMERA_ROLLS"] { return URL(fileURLWithPath: env) }
         if let chosen = UserDefaults.standard.string(forKey: "rollsFolder") { return URL(fileURLWithPath: chosen) }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Splat Camera")
+        let pictures = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures")
+        let now = pictures.appendingPathComponent("Crank & Click"), before = pictures.appendingPathComponent("Splat Camera")
+        let fm = FileManager.default
+        return !fm.fileExists(atPath: now.path) && fm.fileExists(atPath: before.path) ? before : now
     }
 
     /// Rolls on disk, oldest first: filed as date / session / roll

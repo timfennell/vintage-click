@@ -26,7 +26,10 @@ final class ViewfinderHUD: NSView {
         var meterStops: Float = 0      // + over, - under
         var shutterIndex = 7           // the speed set, index into shutterSpeeds
         var mode = ""                  // DOF preview, lighting, developing...
-        var stats = ""
+        var stats = ""                 // render speed: shown only when asked for (--stats)
+        var stops: [String] = []       // the mounted lens's aperture ring, for the ADR window
+        var stopIndex = 0
+        var note: String?              // lens, film and pace, shown a moment after they change
         var mirrorUp = false
         var lines: [String] = []        // lighting plot, shown while placing lights
         /// Seen from a light: its beam's hot centre, edge and falloff, as radii
@@ -108,13 +111,17 @@ final class ViewfinderHUD: NSView {
                     : NSColor(calibratedRed: 1, green: 0.93, blue: 0.84, alpha: 0.85), width: img.width * 0.92,
                  projected: true)
         }
-        // On the black surround: what is mounted and loaded (dim), and speed stats.
-        let top = img.minY - 1.6 * u
-        text("\(info.lens)  ·  \(info.stock)", at: NSPoint(x: img.minX, y: max(2, top)), size: 0.8 * u, color: dim,
-             width: img.width * 0.6)
+        // Above the frame, as on the camera: the lens's own aperture ring seen
+        // through a little window (ADR); what changed, a moment, as projected light.
+        drawADR(img, u: u)
+        let top = img.minY - 1.75 * u
+        if let note = info.note {
+            text(note, at: NSPoint(x: img.minX, y: max(2, top)), size: 0.8 * u,
+                 color: NSColor(calibratedRed: 1, green: 0.9, blue: 0.76, alpha: 0.75), width: img.width * 0.4)
+        }
         if !info.stats.isEmpty {
             text(info.stats, at: NSPoint(x: img.maxX, y: max(2, top)), size: 0.7 * u, color: dim.withAlphaComponent(0.6),
-                 align: .right, width: img.width * 0.5)
+                 align: .right, width: img.width * 0.4, projected: false)
         }
         drawLEDs(img, u: u)
         if let m = info.measure { drawMeasure(m, in: img, u: u) }
@@ -259,6 +266,86 @@ final class ViewfinderHUD: NSView {
         notes.append(info.stock.contains(" at EI ") ? "EI \(info.iso) · " + (info.stock.contains("push") ? "PUSH" : "PULL") : "ISO \(info.iso)")
         text(notes.joined(separator: "   ·   "), at: NSPoint(x: img.midX, y: y + h * 1.3), size: 0.75 * u,
              color: ledRed.withAlphaComponent(0.85), align: .center, width: img.width)
+    }
+
+    // MARK: the aperture ring's window
+
+    /// Where the ring shows in the window (it turns, not jumps).
+    private var adrShown: CGFloat = -1
+
+    /// The aperture direct readout: a small window above the frame through
+    /// which a prism shows the lens's aperture ring, the stop in use under the
+    /// index. The ring is a dark cylinder with its numbers in worn white paint,
+    /// curving away at the window's ends; all of it a touch soft.
+    private func drawADR(_ img: NSRect, u: CGFloat) {
+        guard !info.stops.isEmpty else { return }
+        let target = CGFloat(info.stopIndex)
+        if adrShown < 0 { adrShown = target }
+        adrShown += (target - adrShown) * 0.35
+        if abs(target - adrShown) < 0.01 { adrShown = target } else {
+            DispatchQueue.main.async { [weak self] in self?.needsDisplay = true }
+        }
+        let win = NSRect(x: img.midX - 7.5 * u, y: img.minY - 2.15 * u, width: 15 * u, height: 1.55 * u)
+        let frame = NSBezierPath(roundedRect: win, xRadius: 0.35 * u, yRadius: 0.35 * u)
+        NSGraphicsContext.saveGraphicsState()
+        frame.addClip()
+        // The ring's knurled black, lit along its middle.
+        NSGradient(colors: [NSColor(white: 0.02, alpha: 1), NSColor(white: 0.13, alpha: 1), NSColor(white: 0.02, alpha: 1)])?
+            .draw(in: win, angle: 90)
+        let spacing = 3.0 * u
+        let paint = NSColor(calibratedRed: 0.96, green: 0.94, blue: 0.86, alpha: 0.9)
+        let glow = NSShadow()
+        glow.shadowColor = paint.withAlphaComponent(0.45)
+        glow.shadowBlurRadius = 0.25 * u
+        glow.shadowOffset = .zero
+        for (k, label) in info.stops.enumerated() {
+            let x = win.midX + (CGFloat(k) - adrShown) * spacing
+            guard x > win.minX - spacing, x < win.maxX + spacing else { continue }
+            // Round the cylinder: squeezed and dimmer toward the window's ends.
+            let t = (x - win.midX) / (win.width / 2)
+            let squeeze = max(0.35, 1 - 0.35 * t * t)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont(name: "Futura-Medium", size: 0.95 * u) ?? NSFont.systemFont(ofSize: 0.95 * u),
+                .foregroundColor: paint.withAlphaComponent(0.9 * max(0.15, 1 - abs(t) * 0.7)),
+                .shadow: glow,
+            ]
+            let str = NSAttributedString(string: label, attributes: attrs)
+            let sz = str.size()
+            NSGraphicsContext.saveGraphicsState()
+            let tr = NSAffineTransform()
+            tr.translateX(by: x, yBy: win.midY)
+            tr.scaleX(by: squeeze, yBy: 1)
+            tr.concat()
+            str.draw(at: NSPoint(x: -sz.width / 2, y: -sz.height / 2))
+            NSGraphicsContext.restoreGraphicsState()
+            // A dot between stops, as rings have.
+            let dx = x + spacing / 2
+            if k < info.stops.count - 1, abs(dx - win.midX) < win.width / 2 {
+                paint.withAlphaComponent(0.4).setFill()
+                NSBezierPath(ovalIn: NSRect(x: dx - 0.08 * u, y: win.midY - 0.08 * u, width: 0.16 * u, height: 0.16 * u)).fill()
+            }
+        }
+        // The window's ends in shadow, its glass with a faint sheen.
+        NSGradient(colors: [NSColor(white: 0, alpha: 0.85), NSColor(white: 0, alpha: 0), NSColor(white: 0, alpha: 0),
+                            NSColor(white: 0, alpha: 0.85)], atLocations: [0, 0.3, 0.7, 1], colorSpace: .deviceRGB)?
+            .draw(in: win, angle: 0)
+        NSGradient(colors: [NSColor(white: 1, alpha: 0.07), NSColor(white: 1, alpha: 0)])?
+            .draw(in: NSRect(x: win.minX, y: win.minY, width: win.width, height: win.height * 0.4), angle: 90)
+        NSGraphicsContext.restoreGraphicsState()
+        frame.lineWidth = 1
+        NSColor(white: 0.25, alpha: 0.8).setStroke()
+        frame.stroke()
+        // The index: a small lit mark over the window's middle.
+        let mark = NSBezierPath()
+        mark.move(to: NSPoint(x: win.midX - 0.3 * u, y: win.minY - 0.45 * u))
+        mark.line(to: NSPoint(x: win.midX + 0.3 * u, y: win.minY - 0.45 * u))
+        mark.line(to: NSPoint(x: win.midX, y: win.minY - 0.08 * u))
+        mark.close()
+        NSGraphicsContext.saveGraphicsState()
+        glow.set()
+        paint.withAlphaComponent(0.8).setFill()
+        mark.fill()
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     // MARK: the meter

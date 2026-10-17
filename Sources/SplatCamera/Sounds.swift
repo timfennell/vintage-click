@@ -21,11 +21,15 @@ final class Sounds {
 
     static let shared = Sounds()
 
-    /// ~/Library/Application Support/Splat Camera/Sounds (SPLAT_CAMERA_SOUNDS overrides, for tests).
+    /// ~/Library/Application Support/Crank & Click/Sounds (or the old name's, Splat Camera,
+    /// if recordings are already there). SPLAT_CAMERA_SOUNDS overrides, for tests.
     static var folder: URL {
         if let env = ProcessInfo.processInfo.environment["SPLAT_CAMERA_SOUNDS"] { return URL(fileURLWithPath: env) }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Splat Camera/Sounds")
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let now = support.appendingPathComponent("Crank & Click/Sounds")
+        let before = support.appendingPathComponent("Splat Camera/Sounds")
+        let fm = FileManager.default
+        return !fm.fileExists(atPath: now.path) && fm.fileExists(atPath: before.path) ? before : now
     }
 
     private var takes: [Event: [Data]] = [:]
@@ -169,7 +173,7 @@ final class Sounds {
         let url = Self.folder.appendingPathComponent("README.txt")
         guard !FileManager.default.fileExists(atPath: url.path) else { return }
         let text = """
-        Splat Camera plays your own recordings of a camera. Put them here, one
+        Crank & Click plays your own recordings of a camera. Put them here, one
         sound per file (WAV or AIFF, 48 kHz is ideal, silence trimmed at the start),
         named for what they are; record several takes of each for variety:
 

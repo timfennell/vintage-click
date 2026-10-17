@@ -41,7 +41,7 @@ enum DNG {
         short(259, [1])                                  // Compression: none
         short(262, [34892])                              // PhotometricInterpretation: LinearRaw
         ascii(270, description)                          // ImageDescription
-        ascii(271, "Splat Camera")                       // Make
+        ascii(271, "Crank & Click")                       // Make
         ascii(272, lens)                                 // Model
         long(273, [dataOffset])                          // StripOffsets
         short(274, [1])                                  // Orientation
@@ -49,7 +49,7 @@ enum DNG {
         long(278, [UInt32(height)])                      // RowsPerStrip
         long(279, [UInt32(imageBytes)])                  // StripByteCounts
         short(284, [1])                                  // PlanarConfiguration: chunky
-        ascii(305, "Splat Camera")                       // Software
+        ascii(305, "Crank & Click")                       // Software
         short(339, [3, 3, 3])                            // SampleFormat: IEEE float
         rational(33434, [Double(shutterSeconds)], signed: false)   // ExposureTime
         rational(33437, [Double(fNumber)], signed: false)          // FNumber
@@ -57,7 +57,7 @@ enum DNG {
         rational(37386, [Double(focalMM)], signed: false)          // FocalLength
         byte(50706, [1, 4, 0, 0])                        // DNGVersion 1.4
         byte(50707, [1, 4, 0, 0])                        // DNGBackwardVersion 1.4
-        ascii(50708, "Splat Camera")                     // UniqueCameraModel
+        ascii(50708, "Crank & Click")                     // UniqueCameraModel
         // ColorMatrix1: XYZ (D65) to the camera's RGB, which is linear sRGB.
         long(50717, [1, 1, 1])                           // WhiteLevel: 1.0 is white for float data (brighter is kept)
         rational(50721, [3.2406, -1.5372, -0.4986, -0.9689, 1.8758, 0.0415, 0.0557, -0.2040, 1.0570], signed: true)

@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 import simd
 import MetalKit
 
-// Splat Camera: a 1970s 35 mm SLR in a 3DGS scan.
+// Crank & Click: a 1970s 35 mm SLR in a 3DGS scan.
 // From Finder it asks for a scene (or opens a .ply dropped on it). From a shell:
 //   SplatCamera [model.ply] [--inside] [--ev 12] [--res 1620x1080] [--fps 24] [--scale M_PER_UNIT]
 //               [--cells 32] [--lens I] [--aperture F] [--film I] [--photo-res WxH]
@@ -176,7 +176,7 @@ func startSession(_ plyPath: String) {
     let fit = min(1, min(screen.width * 0.9 / CGFloat(res[0]), screen.height * 0.9 / CGFloat(res[1])))
     window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: CGFloat(res[0]) * fit, height: CGFloat(res[1]) * fit),
                       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-    window.title = "Splat Camera — \((plyPath as NSString).deletingLastPathComponent.split(separator: "/").last ?? "")/\((plyPath as NSString).lastPathComponent)"
+    window.title = "Crank & Click — \((plyPath as NSString).deletingLastPathComponent.split(separator: "/").last ?? "")/\((plyPath as NSString).lastPathComponent)"
     window.contentAspectRatio = NSSize(width: res[0], height: res[1])
     window.backgroundColor = .black
     let note = NSTextField(labelWithString: "Loading the scan…  (a big place takes a minute)")
@@ -570,10 +570,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About Splat Camera", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "About Crank & Click", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide Splat Camera", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: "Quit Splat Camera", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Hide Crank & Click", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Quit Crank & Click", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         let fileItem = NSMenuItem()
         main.addItem(fileItem)
