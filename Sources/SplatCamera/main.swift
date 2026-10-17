@@ -100,6 +100,12 @@ if let i = args.firstIndex(of: "--photometry"), i + 1 < args.count {
 
 // Your camera's recorded sounds (the folder is made, with a README, if missing).
 _ = Sounds.shared
+if args.contains("--sound-check") {
+    for s in shutterSpeeds.reversed() {
+        print(String(format: "%6@ -> %@", s.label, Sounds.shared.choice(shutterSeconds: s.seconds)))
+    }
+    exit(0)
+}
 
 // Trace the light heads' optics in the background while the scan loads.
 for head in lightKit.indices { DispatchQueue.global(qos: .userInitiated).async { _ = Photometry.tablesFor(head) } }
