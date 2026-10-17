@@ -137,4 +137,11 @@ let filmStocks: [FilmStock] = [
               crosstalk: mix([0.95, 0.08, -0.03], [0.04, 0.9, 0.06], [0.02, 0.1, 0.88]),
               balance: [1.06, 0.93, 1.02], saturation: 0.75, contrast: 0.72, toe: 0.85,
               shoulder: 0.7, blackLift: 0.09, grain: 0.26, grainSize: 1.4),
+    FilmStock(name: "False Colour IR 400", inspiredBy: "colour infrared reconnaissance slide film: leaves turn magenta-red, skin yellow, skies deep blue",
+              iso: 400, exposures: 36,
+              // Its layers see infrared, red and green, printed as red, green and blue. There is
+              // no infrared in a scan: leaves (strongly green, little red or blue) stand in for it.
+              crosstalk: mix([0.55, 1.15, -0.45], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+              balance: [1.0, 0.95, 1.0], saturation: 1.25, contrast: 1.3, toe: 1.15,
+              shoulder: 1.0, blackLift: 0.015, grain: 0.12, grainSize: 1.0),
 ]
