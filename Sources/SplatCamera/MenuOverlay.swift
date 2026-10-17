@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 
 /// The game menu (Esc on the keyboard, + / Menu on a pad): switch between the
 /// camera, lighting and the light table, see the controls, and the odd job
@@ -49,7 +50,7 @@ final class MenuOverlay: NSView {
 
     override var isFlipped: Bool { true }
 
-    private let amber = NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.25, alpha: 1)
+    private let amber = NSColor(calibratedRed: 1.0, green: 0.78, blue: 0.42, alpha: 1)
     private var itemRects: [NSRect] = []
 
     func move(_ d: Int) {
@@ -101,13 +102,65 @@ final class MenuOverlay: NSView {
         }
     }
 
+    /// The menus' type is light, as the finder's meter scale is: warm cream
+    /// (greys become dimmer cream, amber stays warm), soft, with a glow.
+    static func glowFont(_ size: CGFloat, bold: Bool = false) -> NSFont {
+        NSFont(name: bold ? "Futura-Bold" : "Futura-Medium", size: size) ?? NSFont.systemFont(ofSize: size)
+    }
+
+    private func light(_ c: NSColor) -> NSColor {
+        guard let rgb = c.usingColorSpace(.deviceRGB) else { return c }
+        let mx = max(rgb.redComponent, rgb.greenComponent, rgb.blueComponent)
+        let mn = min(rgb.redComponent, rgb.greenComponent, rgb.blueComponent)
+        if mx - mn < 0.05 {
+            let w = min(1, mx * 1.15 + 0.08)
+            return NSColor(calibratedRed: w, green: w * 0.92, blue: w * 0.80, alpha: rgb.alphaComponent)
+        }
+        return rgb
+    }
+
     private func text(_ s: String, _ p: NSPoint, size: CGFloat, color: NSColor, weight: NSFont.Weight = .medium) {
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: size, weight: weight),
-                                                    .foregroundColor: color]
+        let c = light(color)
+        let glow = NSShadow()
+        glow.shadowColor = c.withAlphaComponent(0.55)
+        glow.shadowBlurRadius = size * 0.35
+        glow.shadowOffset = .zero
+        let attrs: [NSAttributedString.Key: Any] = [.font: Self.glowFont(size * 1.05, bold: weight == .bold),
+                                                    .foregroundColor: c, .shadow: glow]
         NSAttributedString(string: s, attributes: attrs).draw(at: p)
     }
 
+    private lazy var ci = CIContext(options: [.cacheIntermediates: false])
+
+    /// Drawn whole, then softened a touch and bloomed, so the type glows as
+    /// light does rather than sitting on the screen like print.
     override func draw(_ dirtyRect: NSRect) {
+        let scale = window?.backingScaleFactor ?? 2
+        let w = Int(bounds.width * scale), h = Int(bounds.height * scale)
+        guard w > 0, h > 0, let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            drawContent(dirtyRect)
+            return
+        }
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: scale, y: -scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        drawContent(bounds)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let sharp = ctx.makeImage() else { return }
+        let img = CIImage(cgImage: sharp)
+        let soft = img.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 0.45 * scale])
+            .cropped(to: img.extent)
+        let bloomed = soft.applyingFilter("CIBloom", parameters: [kCIInputRadiusKey: 5 * scale, kCIInputIntensityKey: 0.45])
+            .cropped(to: img.extent)
+        if let out = ci.createCGImage(bloomed, from: img.extent) {
+            NSImage(cgImage: out, size: bounds.size).draw(in: bounds)
+        }
+    }
+
+    private func drawContent(_ dirtyRect: NSRect) {
         NSColor(white: 0, alpha: 0.72).setFill()
         bounds.fill()
         let u = bounds.height / 60
@@ -198,7 +251,7 @@ final class MenuOverlay: NSView {
         var x = panel.minX + 17 * u
         // As many shelves as there are: the tabs shrink to fit the panel.
         func tabWidth(_ name: String, _ size: CGFloat) -> CGFloat {
-            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: size, weight: .semibold)]
+            let attrs: [NSAttributedString.Key: Any] = [.font: Self.glowFont(size * 1.05)]
             return NSAttributedString(string: name, attributes: attrs).size().width + 2 * size / 1.05
         }
         let room = panel.maxX - 1.5 * u - x

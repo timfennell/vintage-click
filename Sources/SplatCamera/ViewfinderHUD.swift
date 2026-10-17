@@ -62,15 +62,27 @@ final class ViewfinderHUD: NSView {
                       width: bounds.width * f.scale, height: bounds.height * f.scale)
     }
 
+    /// `projected`: light in the finder (as framelines are), soft and glowing, not ink.
     private func text(_ s: String, at p: NSPoint, size: CGFloat, color: NSColor,
-                      align: NSTextAlignment = .left, width: CGFloat = 400, weight: NSFont.Weight = .medium) {
+                      align: NSTextAlignment = .left, width: CGFloat = 400, weight: NSFont.Weight = .medium,
+                      projected: Bool = true) {
         let style = NSMutableParagraphStyle()
         style.alignment = align
+        let shadow = NSShadow()
+        if projected {
+            shadow.shadowBlurRadius = size * 0.45
+            shadow.shadowColor = color.withAlphaComponent(0.55)
+            shadow.shadowOffset = .zero
+        } else {
+            shadow.shadowBlurRadius = 3
+            shadow.shadowColor = .black
+        }
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: size, weight: weight),
-            .foregroundColor: color,
+            .font: projected ? (NSFont(name: "Futura-Medium", size: size) ?? NSFont.systemFont(ofSize: size))
+                : NSFont.monospacedSystemFont(ofSize: size, weight: weight),
+            .foregroundColor: projected ? color.withAlphaComponent(0.85) : color,
             .paragraphStyle: style,
-            .shadow: { let s = NSShadow(); s.shadowBlurRadius = 3; s.shadowColor = .black; return s }(),
+            .shadow: shadow,
         ]
         let x = align == .right ? p.x - width : (align == .center ? p.x - width / 2 : p.x)
         (s as NSString).draw(in: NSRect(x: x, y: p.y, width: width, height: size * 1.6), withAttributes: attrs)
@@ -90,9 +102,11 @@ final class ViewfinderHUD: NSView {
         }
         // The lighting plot, over the top of the image.
         for (k, line) in info.lines.enumerated() {
+            // Projected in the finder too: the lights warm, the help a paler cream.
             text(line, at: NSPoint(x: img.minX + 3.5 * u, y: img.minY + 1.2 * u + CGFloat(k) * 1.4 * u), size: 0.95 * u,
-                 color: k < info.lines.count - 3 ? NSColor(calibratedRed: 1, green: 0.72, blue: 0.25, alpha: 1)
-                    : NSColor.white.withAlphaComponent(0.8), width: img.width * 0.92)
+                 color: k < info.lines.count - 3 ? NSColor(calibratedRed: 1, green: 0.82, blue: 0.55, alpha: 1)
+                    : NSColor(calibratedRed: 1, green: 0.93, blue: 0.84, alpha: 0.85), width: img.width * 0.92,
+                 projected: true)
         }
         // On the black surround: what is mounted and loaded (dim), and speed stats.
         let top = img.minY - 1.6 * u
@@ -291,11 +305,11 @@ final class ViewfinderHUD: NSView {
         let k: CGFloat = 60, damp: CGFloat = 11
         needleSpeed += (k * (want - needle) - damp * needleSpeed) * dt
         needle += needleSpeed * dt
-        // The needle aims through the reading's tick (ticks point at the pivot),
-        // and reaches past the plate.
+        // The needle aims through the reading's tick (ticks point at the pivot).
         let pivot = NSPoint(x: card.minX - 9 * u, y: card.midY)
         let aim = NSPoint(x: card.minX + 0.1 * u, y: Self.speedY(needle, card: card, u: u))
-        let reach = (card.maxX + 2.2 * u - pivot.x) / (aim.x - pivot.x)
+        // The tip ends just past the ticks, short of the numbers.
+        let reach = (card.minX + 1.15 * u - pivot.x) / (aim.x - pivot.x)
         meterShape = MeterShape(card: card, pivot: pivot,
                                 tip: NSPoint(x: pivot.x + (aim.x - pivot.x) * reach, y: pivot.y + (aim.y - pivot.y) * reach),
                                 u: u, shutterIndex: info.shutterIndex, bounds: bounds.size)
@@ -364,21 +378,32 @@ final class ViewfinderHUD: NSView {
     // MARK: flying a light
 
     private func drawBeam(_ beam: (hot: CGFloat, edge: CGFloat, falloff: CGFloat), in img: NSRect, u: CGFloat) {
-        let amber = NSColor(calibratedRed: 1, green: 0.72, blue: 0.25, alpha: 1)
+        // Projected light, as the wireframes are: warm cream, soft, glowing.
+        let cream = NSColor(calibratedRed: 1.0, green: 0.90, blue: 0.76, alpha: 1)
         let c = NSPoint(x: img.midX, y: img.midY)
-        for (r, alpha, dash) in [(beam.hot, 0.5, false), (beam.edge, 0.9, false), (beam.falloff, 0.6, true)] {
+        let glow = NSShadow()
+        glow.shadowColor = cream.withAlphaComponent(0.6)
+        glow.shadowBlurRadius = 0.5 * u
+        glow.shadowOffset = .zero
+        NSGraphicsContext.saveGraphicsState()
+        glow.set()
+        for (r, alpha, dash) in [(beam.hot, 0.45, false), (beam.edge, 0.75, false), (beam.falloff, 0.5, true)] {
             let rad = r * img.width
             let path = NSBezierPath(ovalIn: NSRect(x: c.x - rad, y: c.y - rad, width: 2 * rad, height: 2 * rad))
-            path.lineWidth = 1.5
-            if dash { path.setLineDash([8, 6], count: 2, phase: 0) }
-            amber.withAlphaComponent(alpha).setStroke()
+            path.lineWidth = 0.22 * u
+            path.lineCapStyle = .round
+            if dash { path.setLineDash([1.2 * u, 0.9 * u], count: 2, phase: 0) }
+            cream.withAlphaComponent(alpha).setStroke()
             path.stroke()
         }
         let cross = NSBezierPath()
-        cross.move(to: NSPoint(x: c.x - 10, y: c.y)); cross.line(to: NSPoint(x: c.x + 10, y: c.y))
-        cross.move(to: NSPoint(x: c.x, y: c.y - 10)); cross.line(to: NSPoint(x: c.x, y: c.y + 10))
+        cross.move(to: NSPoint(x: c.x - 0.6 * u, y: c.y)); cross.line(to: NSPoint(x: c.x + 0.6 * u, y: c.y))
+        cross.move(to: NSPoint(x: c.x, y: c.y - 0.6 * u)); cross.line(to: NSPoint(x: c.x, y: c.y + 0.6 * u))
+        cross.lineWidth = 0.18 * u
+        cream.withAlphaComponent(0.7).setStroke()
         cross.stroke()
-        text(info.title, at: NSPoint(x: img.midX, y: img.maxY - 4 * u), size: 1.5 * u, color: amber,
-             align: .center, width: img.width)
+        NSGraphicsContext.restoreGraphicsState()
+        text(info.title, at: NSPoint(x: img.midX, y: img.maxY - 4 * u), size: 1.5 * u, color: cream,
+             align: .center, width: img.width, projected: true)
     }
 }

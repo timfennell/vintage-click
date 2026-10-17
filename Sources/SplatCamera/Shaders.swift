@@ -500,25 +500,44 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
 
 // Wireframes of the light heads: segments already projected to finder pixels
 // (x, y, metres along the axis, alpha). Dimmed where the scene is in front.
-struct LineOut { float4 pos [[position]]; float z; float a; };
+struct LineOut { float4 pos [[position]]; float z; float a; float across; };
 
+// The light heads' wireframes as light projected into the finder (as
+// framelines are): each segment a soft band, W = (half width px, -, -, -),
+// drawn twice, a fine core and a faint wide glow, added onto the scene.
 vertex LineOut wire_vertex(uint vid [[vertex_id]], device const float4* v [[buffer(0)]],
-                           constant float4* O [[buffer(1)]]) {
-    float4 p = v[vid];
-    LineOut o;
+                           constant float4* O [[buffer(1)]], constant float4& W [[buffer(2)]]) {
+    uint seg = vid / 6, k = vid % 6;
+    float4 p0 = v[2 * seg], p1 = v[2 * seg + 1];
     // Image pixels into the window (the finder's image is inset, O[7]).
-    float2 w = O[7].xy + p.xy * O[7].z;
+    float2 a = O[7].xy + p0.xy * O[7].z, b = O[7].xy + p1.xy * O[7].z;
+    float2 d = b - a;
+    float len = max(length(d), 1e-3);
+    d /= len;
+    float2 n = float2(-d.y, d.x);
+    // Two triangles: corners (end, side) = (0,-)(1,-)(0,+) (0,+)(1,-)(1,+).
+    bool far = k == 1 || k == 4 || k == 5;
+    float side = (k == 2 || k == 3 || k == 5) ? 1.0 : -1.0;
+    float hw = W.x;
+    float2 w = (far ? b + d * hw : a - d * hw) + n * side * hw;
+    LineOut o;
     o.pos = float4(w.x / O[0].x * 2 - 1, 1 - w.y / O[0].y * 2, 0, 1);   // the window is the frame's size
+    float4 p = far ? p1 : p0;
     o.z = p.z;
     o.a = p.w;
+    o.across = side;
     return o;
 }
 
 fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[buffer(0)]],
                               constant float4* O [[buffer(1)]], constant float4& colour [[buffer(2)]]) {
     float zs = frame_z(f, clamp_px(int2((in.pos.xy - O[7].xy) / O[7].z), O), O);
-    float a = in.a * (in.z > zs * 1.01 ? 0.3 : 1.0);
-    return float4(colour.rgb, colour.a * a);
+    float behind = in.z > zs * 1.01 ? 0.3 : 1.0;
+    // Soft across the band, brightest along its middle.
+    float x = abs(in.across);
+    float profile = exp(-x * x * 3.2) * (1 - smoothstep(0.85, 1.0, x));
+    float a = in.a * behind * profile * colour.a;
+    return float4(colour.rgb * a, a);
 }
 
 // Relighting (gs_render's model, made for scans lit from the camera): each

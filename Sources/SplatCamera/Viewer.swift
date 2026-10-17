@@ -148,8 +148,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         wd.fragmentFunction = lib.makeFunction(name: "wire_fragment")
         wd.colorAttachments[0].pixelFormat = .bgra8Unorm
         wd.colorAttachments[0].isBlendingEnabled = true
-        wd.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-        wd.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        // Added light, not paint: the wireframes are projected into the finder.
+        wd.colorAttachments[0].sourceRGBBlendFactor = .one
+        wd.colorAttachments[0].destinationRGBBlendFactor = .one
         wirePSO = try device.makeRenderPipelineState(descriptor: wd)
         meterPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "meter")!)
         probePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "probe")!)
@@ -531,7 +532,8 @@ final class Viewer: NSObject, MTKViewDelegate {
             guard !verts.isEmpty,
                   let vb = device.makeBuffer(bytes: verts, length: verts.count * 16, options: .storageModeShared)
             else { continue }
-            var colour: SIMD4<Float> = chosen ? [1.0, 0.72, 0.25, 0.95] : [0.85, 0.88, 0.9, 0.55]
+            // Warm cream light, as framelines are; the light being placed a little brighter, warmer.
+            let colour: SIMD4<Float> = chosen ? [1.0, 0.80, 0.55, 0.75] : [1.0, 0.92, 0.80, 0.42]
             let f = Self.finderImage
             enc.setScissorRect(MTLScissorRect(x: Int(f.x * CGFloat(width)), y: Int(f.y * CGFloat(height)),
                                               width: Int(f.scale * CGFloat(width)), height: Int(f.scale * CGFloat(height))))
@@ -540,8 +542,15 @@ final class Viewer: NSObject, MTKViewDelegate {
             enc.setVertexBytes(&o, length: o.count * 16, index: 1)
             enc.setFragmentBuffer(frame.buf, offset: frame.off, index: 0)
             enc.setFragmentBytes(&o, length: o.count * 16, index: 1)
-            enc.setFragmentBytes(&colour, length: 16, index: 2)
-            enc.drawPrimitives(type: .line, vertexStart: 0, vertexCount: verts.count)
+            // A faint wide glow, then the fine core.
+            let segments = verts.count / 2
+            for (half, gain) in [(Float(9), Float(0.16)), (Float(2.4), Float(1))] {
+                var w = SIMD4<Float>(half * Float(height) / 1080, 0, 0, 0)
+                var c = SIMD4<Float>(colour.x, colour.y, colour.z, colour.w * gain)
+                enc.setVertexBytes(&w, length: 16, index: 2)
+                enc.setFragmentBytes(&c, length: 16, index: 2)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: segments * 6)
+            }
         }
     }
 
