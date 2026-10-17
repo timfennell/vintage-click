@@ -189,7 +189,7 @@ B removes it, Y changes its head, d-pad left/right chooses, up/down dims in
 half stops, L2/R2 flood / spot, L3 house lights, R3 back to the camera.
 
 Pad, light table: sticks slide the loupe, L2/R2 its power, d-pad chooses a frame,
-A marks it, L1/R1 change roll, B back to the camera.
+A marks it, L1/R1 change session (all its rolls are on the table, each cut into its own strips), B back to the camera.
 
 ## Where it is going
 

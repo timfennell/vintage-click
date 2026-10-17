@@ -2,9 +2,9 @@ import AppKit
 import ImageIO
 import CoreImage
 
-/// The only place pictures are seen: each roll laid out on a light table in
-/// strips of six (rebate, sprocket holes, edge print), looked at through a
-/// loupe you slide over it. The loupe magnifies from the full-size frames.
+/// The only place pictures are seen: a session's rolls laid out on a light
+/// table, each cut into its own strips of six (rebate, sprocket holes, edge
+/// print), looked at through a loupe you slide over it. The loupe magnifies from the full-size frames.
 /// Keepers get a red grease-pencil box (saved with the roll).
 final class ContactSheetView: NSView {
     struct Roll {
@@ -17,7 +17,9 @@ final class ContactSheetView: NSView {
     }
 
     var rolls: [Roll] = []
-    var rollIndex = 0
+    /// The session on the table: all its rolls, each cut into strips of its own.
+    var sessionIndex = 0
+    /// The chosen frame: an index into the table's frames (session order).
     var selected = 0
     /// Frames shot on the current roll that are still in the darkroom.
     var pending: (roll: URL?, frames: [Int]) = (nil, [])
@@ -29,7 +31,8 @@ final class ContactSheetView: NSView {
     private var thumbs: [URL: NSImage] = [:]
     private var detail: [URL: NSImage] = [:]
     private var loading: Set<URL> = []
-    private var marks: Set<Int> = []
+    /// Keepers, per roll (frame indices from 0).
+    private var marks: [URL: Set<Int>] = [:]
 
     override var isFlipped: Bool { true }
 
@@ -74,52 +77,88 @@ final class ContactSheetView: NSView {
         return rolls.sorted { ($0.session, $0.number) < ($1.session, $1.number) }
     }
 
+    /// The sessions, oldest first: each its rolls' indices (loose old rolls are one session each).
+    private var sessions: [[Int]] {
+        var out: [[Int]] = []
+        for (i, r) in rolls.enumerated() {
+            if let last = out.last?.last, !r.session.isEmpty, rolls[last].session == r.session {
+                out[out.count - 1].append(i)
+            } else {
+                out.append([i])
+            }
+        }
+        return out
+    }
+
+    private var sessionRolls: [Int] { sessions.indices.contains(sessionIndex) ? sessions[sessionIndex] : [] }
+
     func reload(showRoll dir: URL?) {
-        let keep = roll?.dir
+        let keepSession = sessionRolls.first.map { rolls[$0].session }
         rolls = Self.scanRolls()
-        if let d = (dir ?? keep)?.standardizedFileURL, let i = rolls.firstIndex(where: { $0.dir.standardizedFileURL == d }) {
-            rollIndex = i
+        let all = sessions
+        if let d = dir?.standardizedFileURL, let r = rolls.firstIndex(where: { $0.dir.standardizedFileURL == d }),
+           let si = all.firstIndex(where: { $0.contains(r) }) {
+            sessionIndex = si
+        } else if let k = keepSession, let si = all.firstIndex(where: { rolls[$0[0]].session == k }) {
+            sessionIndex = si
         } else {
-            rollIndex = max(0, rolls.count - 1)
+            sessionIndex = max(0, all.count - 1)
         }
         loadMarks()
-        // Open on the newest frame, with the loupe over it.
-        if dir != nil {
-            selected = max(0, frameCount - 1)
+        // Open on the newest frame of that roll, with the loupe over it.
+        if let d = dir?.standardizedFileURL {
+            let cells = tableLayout().cells
+            if let i = cells.lastIndex(where: { rolls[$0.roll].dir.standardizedFileURL == d && $0.frame < rolls[$0.roll].frames.count }) {
+                selected = i
+            } else {
+                selected = max(0, cells.count - 1)
+            }
             centreLoupeOnSelection()
         }
         needsDisplay = true
     }
 
     private func centreLoupeOnSelection() {
-        let L = tableLayout()
-        if selected < L.frames.count { loupeCentre = CGPoint(x: L.frames[selected].midX, y: L.frames[selected].midY) }
+        let cells = tableLayout().cells
+        if cells.indices.contains(selected) { loupeCentre = CGPoint(x: cells[selected].rect.midX, y: cells[selected].rect.midY) }
     }
 
-    private var roll: Roll? { rolls.indices.contains(rollIndex) ? rolls[rollIndex] : nil }
-    private var frameCount: Int { roll?.frames.count ?? 0 }
-
+    /// Left and right along the strips; up and down to the frame nearest above or below.
     func move(dx: Int, dy: Int) {
-        selected = max(0, min(35, selected + dx + dy * 6))
+        let cells = tableLayout().cells
+        guard !cells.isEmpty else { return }
+        selected = max(0, min(cells.count - 1, selected + dx))
+        if dy != 0 {
+            let here = cells[selected]
+            let rows = Set(cells.map { $0.rect.midY }).sorted()
+            if let r = rows.firstIndex(of: here.rect.midY), rows.indices.contains(r + dy) {
+                let y = rows[r + dy]
+                if let best = cells.indices.filter({ cells[$0].rect.midY == y })
+                    .min(by: { abs(cells[$0].rect.midX - here.rect.midX) < abs(cells[$1].rect.midX - here.rect.midX) }) {
+                    selected = best
+                }
+            }
+        }
         centreLoupeOnSelection()
         needsDisplay = true
     }
 
+    /// The next or previous session's rolls onto the table.
     func changeRoll(_ d: Int) {
-        guard !rolls.isEmpty else { return }
-        rollIndex = max(0, min(rolls.count - 1, rollIndex + d))
+        let n = sessions.count
+        guard n > 0 else { return }
+        sessionIndex = max(0, min(n - 1, sessionIndex + d))
         selected = 0
-        centreLoupeOnSelection()
         detail.removeAll()
         loadMarks()
+        centreLoupeOnSelection()
         needsDisplay = true
     }
 
     /// The loupe under the mouse; the frame under it becomes the chosen one.
     func putLoupe(at p: CGPoint) {
         loupeCentre = p
-        let L = tableLayout()
-        if let i = L.frames.firstIndex(where: { $0.contains(p) }) { selected = i }
+        if let i = tableLayout().cells.firstIndex(where: { $0.rect.contains(p) }) { selected = i }
         needsDisplay = true
     }
 
@@ -140,23 +179,28 @@ final class ContactSheetView: NSView {
 
     /// Red grease pencil round the chosen frame: a keeper (or not any more).
     func toggleMark() {
-        guard roll != nil, selected < frameCount else { return }
-        if marks.contains(selected) { marks.remove(selected) } else { marks.insert(selected) }
-        saveMarks()
+        let cells = tableLayout().cells
+        guard cells.indices.contains(selected) else { return }
+        let c = cells[selected]
+        let roll = rolls[c.roll]
+        guard c.frame < roll.frames.count else { return }
+        var m = marks[roll.dir] ?? []
+        if m.contains(c.frame) { m.remove(c.frame) } else { m.insert(c.frame) }
+        marks[roll.dir] = m
+        if let d = try? JSONEncoder().encode(m.map { $0 + 1 }.sorted()) {
+            try? d.write(to: roll.dir.appendingPathComponent("marks.json"))
+        }
         needsDisplay = true
     }
 
-    private var marksURL: URL? { roll?.dir.appendingPathComponent("marks.json") }
-
     private func loadMarks() {
-        marks = []
-        if let u = marksURL, let d = try? Data(contentsOf: u),
-           let a = try? JSONDecoder().decode([Int].self, from: d) { marks = Set(a.map { $0 - 1 }) }
-    }
-
-    private func saveMarks() {
-        guard let u = marksURL, let d = try? JSONEncoder().encode(marks.map { $0 + 1 }.sorted()) else { return }
-        try? d.write(to: u)
+        marks = [:]
+        for i in sessionRolls {
+            let u = rolls[i].dir.appendingPathComponent("marks.json")
+            if let d = try? Data(contentsOf: u), let a = try? JSONDecoder().decode([Int].self, from: d) {
+                marks[rolls[i].dir] = Set(a.map { $0 - 1 })
+            }
+        }
     }
 
     // MARK: images
@@ -190,45 +234,90 @@ final class ContactSheetView: NSView {
     // MARK: drawing
 
     private struct Layout {
-        var strips: [NSRect] = []
-        var frames: [NSRect] = []
+        struct Strip {
+            var rect: NSRect
+            var roll: Int           // index into rolls
+            var first: Int          // its first frame on the roll (0-based)
+            var frames: [NSRect]
+        }
+        var strips: [Strip] = []
+        var cells: [(rect: NSRect, roll: Int, frame: Int)] = []
+        var mm: CGFloat = 1
     }
 
+    /// How many frames a roll has to show: those developed, and any still in the darkroom.
+    private func shown(_ r: Int) -> Int {
+        let roll = rolls[r]
+        let pend = pending.roll?.standardizedFileURL == roll.dir.standardizedFileURL ? (pending.frames.max() ?? 0) : 0
+        return max(roll.frames.count, pend)
+    }
+
+    /// The session's rolls, each cut into strips of six as a lab would (the
+    /// last cut short after the last frame shot), laid in rows, in columns if
+    /// there are many, as large as the table allows.
     private func tableLayout() -> Layout {
         let b = bounds
-        let areaH = b.height * 0.9, areaW = min(b.width * 0.9, areaH * 0.95)
-        let x0 = b.midX - areaW / 2, y0 = b.height * 0.04
-        let frameW = areaW / 6.25, frameH = frameW / 1.5
-        let stripH = frameH * 35 / 24          // 35 mm film, 24 mm frames
-        let gap = (areaH - stripH * 6) / 5
-        var L = Layout()
-        for strip in 0..<6 {
-            let y = y0 + CGFloat(strip) * (stripH + gap)
-            L.strips.append(NSRect(x: x0, y: y, width: areaW, height: stripH))
-            for k in 0..<6 {
-                let fx = x0 + frameW * 0.125 + CGFloat(k) * frameW * 1.02
-                L.frames.append(NSRect(x: fx, y: y + (stripH - frameH) / 2, width: frameW * 0.98, height: frameH))
+        var cuts: [(roll: Int, first: Int, count: Int)] = []
+        for r in sessionRolls {
+            let n = shown(r)
+            var f = 0
+            while f < n {
+                cuts.append((r, f, min(6, n - f)))
+                f += 6
             }
+        }
+        var L = Layout()
+        guard !cuts.isEmpty else { return L }
+        let areaW = b.width * 0.92, areaH = b.height * 0.88
+        // Film in millimetres: a strip 35 high, 38 per frame plus 6 of leader.
+        func fit(_ cols: Int) -> CGFloat {
+            let rows = Int((Double(cuts.count) / Double(cols)).rounded(.up))
+            let byW = (areaW / CGFloat(cols) * 0.96) / (6 * 38 + 6)
+            let byH = areaH / (CGFloat(rows) * 35 + CGFloat(rows - 1) * 6)
+            return min(byW, byH)
+        }
+        let cols = (1...4).max { fit($0) < fit($1) } ?? 1
+        let mm = fit(cols)
+        let rows = Int((Double(cuts.count) / Double(cols)).rounded(.up))
+        let colW = (6 * 38 + 6) * mm, gapX = (areaW - CGFloat(cols) * colW) / CGFloat(max(1, cols))
+        let blockH = CGFloat(rows) * 35 * mm + CGFloat(rows - 1) * 6 * mm
+        let x0 = b.midX - (CGFloat(cols) * colW + CGFloat(cols - 1) * gapX) / 2
+        let y0 = max(b.height * 0.03, (b.height * 0.95 - blockH) / 2)
+        L.mm = mm
+        for (k, cut) in cuts.enumerated() {
+            let col = k / rows, row = k % rows
+            let x = x0 + CGFloat(col) * (colW + gapX), y = y0 + CGFloat(row) * 41 * mm
+            let rect = NSRect(x: x, y: y, width: (CGFloat(cut.count) * 38 + 6) * mm, height: 35 * mm)
+            var frames: [NSRect] = []
+            for j in 0..<cut.count {
+                let fr = NSRect(x: x + (4 + CGFloat(j) * 38) * mm, y: y + 5.5 * mm, width: 36 * mm, height: 24 * mm)
+                frames.append(fr)
+                L.cells.append((fr, cut.roll, cut.first + j))
+            }
+            L.strips.append(.init(rect: rect, roll: cut.roll, first: cut.first, frames: frames))
         }
         return L
     }
 
     /// The strips on the glass. `fine`: under the loupe, from the full-size frames.
-    private func drawStrips(_ L: Layout, roll: Roll, fine: Bool, near: CGPoint?) {
-        let stockName = roll.stock.uppercased()
-        let bw = filmStocks.first { roll.stock.hasPrefix($0.name) }?.blackAndWhite ?? false
-        // Edge print is exposed into the film at the factory and developed with
-        // it: on the print it glows out of the black rebate, warm through a
-        // colour film's mask, grey on black-and-white.
-        let edge = bw ? NSColor(white: 0.80, alpha: 0.85)
-            : NSColor(calibratedRed: 1.0, green: 0.70, blue: 0.30, alpha: 0.85)
-        let pend = pending.roll?.standardizedFileURL == roll.dir.standardizedFileURL ? pending.frames : []
+    private func drawStrips(_ L: Layout, fine: Bool, near: CGPoint?) {
         // Real 35 mm in film millimetres: perforations 1.98 x 2.79 at 4.75 pitch,
         // 2 mm in from the edge; the frame from 5.5 to 29.5 across.
-        let mm = L.frames[0].height / 24
-        for (s, strip) in L.strips.enumerated() {
+        let mm = L.mm
+        var cell = 0
+        for (s, cut) in L.strips.enumerated() {
+            let roll = rolls[cut.roll]
+            let strip = cut.rect
+            let stockName = roll.stock.uppercased()
+            let bw = filmStocks.first { roll.stock.hasPrefix($0.name) }?.blackAndWhite ?? false
+            // Edge print is exposed into the film at the factory and developed with
+            // it: on the print it glows out of the black rebate, warm through a
+            // colour film's mask, grey on black-and-white.
+            let edge = bw ? NSColor(white: 0.80, alpha: 0.85)
+                : NSColor(calibratedRed: 1.0, green: 0.70, blue: 0.30, alpha: 0.85)
+            let pend = pending.roll?.standardizedFileURL == roll.dir.standardizedFileURL ? pending.frames : []
             // Laid down by hand: never quite square, never quite in line.
-            var rng = Grit(seed: UInt64(roll.number * 131 + s * 17 + 5))
+            var rng = Grit(seed: UInt64(roll.number * 131 + cut.first * 17 + s + 5))
             NSGraphicsContext.saveGraphicsState()
             let lay = NSAffineTransform()
             lay.translateX(by: strip.midX + rng.signed() * 1.5, yBy: strip.midY + rng.signed() * 1.2)
@@ -248,19 +337,20 @@ final class ContactSheetView: NSView {
             }
             NSColor(white: 0.05, alpha: 1).setFill()
             film.fill()
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: strip).addClip()
             // Outer margins (2 mm): the stock name along the top, frame numbers,
             // half-frame marks and a DX-style bar code along the bottom.
             let top = strip.minY + 0.35 * mm, bottom = strip.maxY - 1.75 * mm
             var nx = strip.minX + 3 * mm
-            while nx < strip.maxX - 60 * mm {
+            repeat {
                 filmPrint("\(stockName)  SAFETY FILM", at: NSPoint(x: nx, y: top), mm: mm, color: edge)
                 nx += 115 * mm
-            }
-            for k in 0..<6 {
-                let i = s * 6 + k
-                let fr = L.frames[i]
-                filmPrint("\(i + 1)", at: NSPoint(x: fr.minX + 2 * mm, y: bottom), mm: mm, color: edge)
-                filmPrint("▸ \(i + 1)A", at: NSPoint(x: fr.midX + 1 * mm, y: bottom), mm: mm, color: edge)
+            } while nx < strip.maxX - 50 * mm
+            for (j, fr) in cut.frames.enumerated() {
+                let n = cut.first + j + 1
+                filmPrint("\(n)", at: NSPoint(x: fr.minX + 2 * mm, y: bottom), mm: mm, color: edge)
+                filmPrint("▸ \(n)A", at: NSPoint(x: fr.midX + 1 * mm, y: bottom), mm: mm, color: edge)
                 if !bw {
                     // The bar code: thin and thick dashes, the same for the whole roll.
                     edge.withAlphaComponent(0.6).setFill()
@@ -272,9 +362,9 @@ final class ContactSheetView: NSView {
                     }
                 }
             }
-            for k in 0..<6 {
-                let i = s * 6 + k
-                let fr = L.frames[i]
+            NSGraphicsContext.restoreGraphicsState()
+            for (j, fr) in cut.frames.enumerated() {
+                let i = cut.first + j
                 guard i < roll.frames.count else {
                     if pend.contains(i + 1) {
                         label("in the darkroom", at: NSPoint(x: fr.minX + 4, y: fr.midY - 5), size: 1.6 * mm,
@@ -291,7 +381,7 @@ final class ContactSheetView: NSView {
             }
             // Dust printed in with the pictures: white specks, now and then a hair.
             NSColor(white: 0.92, alpha: 0.7).setFill()
-            for _ in 0..<(10 + rng.int(14)) {
+            for _ in 0..<(2 + rng.int(3) + cut.frames.count * 2) {
                 let p = NSPoint(x: strip.minX + rng.unit() * strip.width, y: strip.minY + rng.unit() * strip.height)
                 let r = (0.08 + 0.25 * rng.unit() * rng.unit()) * mm
                 NSBezierPath(ovalIn: NSRect(x: p.x - r, y: p.y - r * (0.6 + 0.4 * rng.unit()), width: 2 * r, height: 1.6 * r)).fill()
@@ -300,16 +390,18 @@ final class ContactSheetView: NSView {
                 hair(from: NSPoint(x: strip.minX + rng.unit() * strip.width, y: strip.minY + rng.unit() * strip.height),
                      length: (3 + 6 * rng.unit()) * mm, width: 0.07 * mm, color: NSColor(white: 0.9, alpha: 0.55), rng: &rng)
             }
-            for k in 0..<6 where marks.contains(s * 6 + k) {
-                greasePencil(around: L.frames[s * 6 + k], seed: UInt64(s * 6 + k), mm: mm)
+            let keep = marks[roll.dir] ?? []
+            for (j, fr) in cut.frames.enumerated() {
+                if keep.contains(cut.first + j) { greasePencil(around: fr, seed: UInt64(roll.number * 100 + cut.first + j), mm: mm) }
+                if cell + j == selected {
+                    let sel = NSBezierPath(rect: fr.insetBy(dx: -2, dy: -2))
+                    sel.lineWidth = 1.5
+                    sel.setLineDash([6, 4], count: 2, phase: 0)
+                    NSColor(white: 0.1, alpha: 0.8).setStroke()
+                    sel.stroke()
+                }
             }
-            if selected / 6 == s, selected < L.frames.count {
-                let sel = NSBezierPath(rect: L.frames[selected].insetBy(dx: -2, dy: -2))
-                sel.lineWidth = 1.5
-                sel.setLineDash([6, 4], count: 2, phase: 0)
-                NSColor(white: 0.1, alpha: 0.8).setStroke()
-                sel.stroke()
-            }
+            cell += cut.frames.count
             NSGraphicsContext.restoreGraphicsState()
         }
     }
@@ -355,20 +447,20 @@ final class ContactSheetView: NSView {
         let b = bounds
         // The light table: tubes behind a worn diffuser, dust and lint on the glass.
         if let table = tableImage() { NSImage(cgImage: table, size: b.size).draw(in: b) }
-        guard let roll else {
+        let L = tableLayout()
+        guard !L.strips.isEmpty else {
             label("No rolls developed yet.", at: NSPoint(x: b.midX - 110, y: b.midY), size: 18,
                   color: NSColor(white: 0.2, alpha: 1))
             return
         }
-        let L = tableLayout()
-        drawStrips(L, roll: roll, fine: false, near: nil)
+        drawStrips(L, fine: false, near: nil)
 
         // The loupe: the table under it, magnified, from the full-size frames.
         let c = loupeCentre ?? CGPoint(x: b.midX, y: b.midY)
         let R = b.height * 0.2
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)).addClip()
-        if let seen = loupeView(L, roll: roll, centre: c, radius: R) {
+        if let seen = loupeView(L, centre: c, radius: R) {
             NSImage(cgImage: seen, size: NSSize(width: 2 * R, height: 2 * R))
                 .draw(in: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R))
         }
@@ -399,10 +491,19 @@ final class ContactSheetView: NSView {
         NSColor(white: 0.55, alpha: 0.9).setStroke()
         rim.stroke()
 
-        let where_ = roll.session.isEmpty ? "" : roll.session + " · "
-        let hint = String(format: "%@Roll %d (%d of %d) · %@ · loupe %.0f×      sticks: loupe   L2/R2: power   d-pad: frame   A: mark   L1/R1: roll   B: back",
-                          where_, roll.number, rollIndex + 1, rolls.count, roll.stock, loupePower)
-        label(hint, at: NSPoint(x: b.midX - 330, y: b.height - 20), size: 11.5, color: NSColor(white: 0.15, alpha: 1))
+        // The session, how many films, and the chosen frame (the edge print names each film).
+        let rollsHere = sessionRolls.map { rolls[$0] }
+        let when = rollsHere.first?.session ?? ""
+        var chosen = ""
+        if L.cells.indices.contains(selected) {
+            let c = L.cells[selected]
+            chosen = " · roll \(rolls[c.roll].number) frame \(c.frame + 1)"
+        }
+        let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×     sticks: loupe  L2/R2: power  d-pad: frame  A: mark  L1/R1: session  B: back",
+                          when.isEmpty ? "" : when + " · ", rollsHere.count, rollsHere.count == 1 ? "roll" : "rolls",
+                          sessionIndex + 1, sessions.count, chosen, loupePower)
+        let hintW = NSAttributedString(string: hint, attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .semibold)]).size().width
+        label(hint, at: NSPoint(x: max(8, b.midX - hintW / 2), y: b.height - 20), size: 11.5, color: NSColor(white: 0.15, alpha: 1))
     }
 
     /// Edge print: small, a little soft (a latent image, not ink), in the margin.
@@ -500,7 +601,7 @@ final class ContactSheetView: NSView {
     /// What the loupe sees: the table under it magnified, through a simple
     /// lens. Pincushion toward the rim, colour fringes growing outward, the
     /// edge going soft, the light falling off.
-    private func loupeView(_ L: Layout, roll: Roll, centre c: CGPoint, radius R: CGFloat) -> CGImage? {
+    private func loupeView(_ L: Layout, centre c: CGPoint, radius R: CGFloat) -> CGImage? {
         let scale = window?.backingScaleFactor ?? 2
         let side = Int(2 * R * scale)
         guard side > 8, let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
@@ -517,7 +618,7 @@ final class ContactSheetView: NSView {
         t.translateX(by: -c.x, yBy: -c.y)
         t.concat()
         if let table = tableImage() { NSImage(cgImage: table, size: bounds.size).draw(in: bounds) }
-        drawStrips(L, roll: roll, fine: true, near: c)
+        drawStrips(L, fine: true, near: c)
         NSGraphicsContext.restoreGraphicsState()
         guard let raw = ctx.makeImage() else { return nil }
         let img = CIImage(cgImage: raw)

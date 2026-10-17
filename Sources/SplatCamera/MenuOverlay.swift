@@ -175,7 +175,7 @@ final class MenuOverlay: NSView {
             ("loupe power", "L2 / R2", "mouse wheel"),
             ("choose a frame", "d-pad", "arrows"),
             ("mark a keeper", "bottom (A)", "click / Enter"),
-            ("another roll", "L1 / R1", "Q / E"),
+            ("another session", "L1 / R1", "Q / E"),
         ]),
         ("ANYWHERE", [
             ("this menu", "Menu (+)", "Esc"),
