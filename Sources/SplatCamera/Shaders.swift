@@ -246,6 +246,30 @@ float2 eyepiece_forward(float2 pos, constant float4* O, float k) {
     return c + d * (1 + k * dot(d, d) / dot(c, c));
 }
 
+// The lit screen glows faintly past its mask: the black surround near each
+// part of the window's edge takes a soft halo of the image just inside it (`pe`: where
+// the eye sees, in image pixels; `edge`: how far outside, px). sRGB.
+float3 surround(float2 pos, float2 pe, float edge, device const float* f, constant float4* O) {
+    float g = 0.022 + 0.01 * value_noise(pos / 3.0, 31);              // the surround's black
+    float3 lin = to_lin(float3(g, g, g * 1.05));
+    float inset = O[7].w + 4;
+    float2 q = clamp(pe, float2(inset), O[0].xy - inset);
+    // Diffuse: gathered from a patch inside the edge that widens with distance.
+    float spread = O[0].y * 0.05 + max(edge, 0.0) * 1.2;
+    float2 inward = normalize(O[0].xy * 0.5 - q + 1e-3);
+    float2 centre = q + inward * spread * 0.6;
+    float3 near = 0;
+    for (uint k = 0; k < 16; k++) {
+        float2 t = centre + vogel(k, 16) * spread;
+        near += to_lin(frame_rgb(f, clamp_px(int2(t), O), O));
+    }
+    near /= 16;
+    float h = O[0].y;
+    // Very faint: the glass itself stays clean; only the black catches a little.
+    float halo = 0.07 * exp(-max(edge, 0.0) / (h * 0.025)) + 0.02 * exp(-max(edge, 0.0) / (h * 0.11));
+    return to_srgb(lin + near * halo * O[5].y);
+}
+
 // The finder: the screen's image, a rounded-corner window in a black surround (sRGB).
 float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     float2 p = (pos - O[7].xy) / O[7].z;
@@ -254,10 +278,7 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     float2 pe = (eyepiece(pos, O, EYEPIECE_K) - O[7].xy) / O[7].z;
     float2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
     float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;   // < 0 inside
-    if (edge > 1.0) {
-        float g = 0.022 + 0.01 * value_noise(pos / 3.0, 31);              // the surround's black
-        return float3(g, g, g * 1.05);
-    }
+    if (edge > 1.0) return surround(pos, pe, edge, f, O);
     float2 c = O[0].xy * 0.5;
     float R = O[5].x;
     float r = length(p - c);
@@ -290,6 +311,7 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
         float tooth = value_noise(p / 1.4, 7) + 0.5 * value_noise(p / 0.7, 11) - 0.75;
         col *= 1 + 0.10 * tooth;
     }
+
     if (abs(r - R) < 0.8 || abs(r - R * 1.75) < 0.8) col *= 0.55;
     // The fresnel's grooves: faint rings centred on the axis.
     float ring = fract(r / max(O[0].y / 70, 4.0));
@@ -304,7 +326,7 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     // The window's edge: a soft dark lip, then the surround.
     col *= smoothstep(0.0, O[7].w * 0.9, -edge) * 0.25 + 0.75;
     float3 outc = to_srgb(col);
-    return mix(outc, float3(0.022), saturate(edge + 0.5));
+    return mix(outc, surround(pos, pe, edge, f, O), saturate(edge + 0.5));
 }
 
 // The meter, seen through the eyepiece. Its scale is light projected beside
