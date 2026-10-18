@@ -127,19 +127,20 @@ final class ViewfinderHUD: NSView {
     }
 
     private func drawContent() {
-        // Mirror up: nothing reaches the finder, not even the readouts.
-        if info.mirrorUp { meterShape = nil; return }
+        // Mirror up: the image is gone but the readouts stay; the lighting
+        // plot belongs to the image, so it goes with it.
+        let mirrorUp = info.mirrorUp
         let img = imageRect
         let u = img.height / 50
 
         if let beam = info.beam {
             meterShape = nil
-            drawBeam(beam, in: img, u: u)
+            if !mirrorUp { drawBeam(beam, in: img, u: u) }
         } else {
             drawMeter(img, u: u)
         }
         // The lighting plot, over the top of the image.
-        for (k, line) in info.lines.enumerated() {
+        for (k, line) in info.lines.enumerated() where !mirrorUp {
             // Projected in the finder too: the lights warm, the help a paler cream.
             text(line, at: NSPoint(x: img.minX + 3.5 * u, y: img.minY + 1.2 * u + CGFloat(k) * 1.4 * u), size: 0.95 * u,
                  color: k < info.lines.count - 3 ? NSColor(calibratedRed: 1, green: 0.82, blue: 0.55, alpha: 1)

@@ -18,7 +18,7 @@
 //   O[6] = (lateral colour at the corner, axial colour, circular fisheye's image radius px (0: none),
 //           mirror lens's central obstruction in aperture radii)
 //   O[7] = finder only: where the image sits in the window (origin px, scale, corner radius px)
-//   O[8] = (oval stop's width over height, 0 = round)
+//   O[8] = (oval stop's width over height, 0 = round; 1 = mirror up: no image)
 // (cx, cy) is the optical axis: the frame's centre, unless the lens is shifted.
 // Film (FilmStock.packed): F[0..2] crosstalk rows, F[3] = (balance, b&w),
 //   F[4] = (b&w mix, saturation), F[5] = (contrast, black lift, shoulder, grain),
@@ -279,7 +279,9 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     float2 pe = (eyepiece(pos, O, EYEPIECE_K) - O[7].xy) / O[7].z;
     float2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
     float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;   // < 0 inside
-    if (edge > 1.0) return surround(pos, pe, edge, f, O);
+    // Mirror up (O[8].y): no image on the screen, so no glow round it either.
+    bool dark = O[8].y > 0.5;
+    if (edge > 1.0) return dark ? float3(0.022) : surround(pos, pe, edge, f, O);
     float2 c = O[0].xy * 0.5;
     float R = O[5].x;
     float r = length(p - c);
@@ -334,8 +336,8 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     if (O[6].z > 0) col *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(p - c));
     // The window's edge: a soft dark lip, then the surround.
     col *= smoothstep(0.0, O[7].w * 0.9, -edge) * 0.25 + 0.75;
-    float3 outc = to_srgb(col);
-    return mix(outc, surround(pos, pe, edge, f, O), saturate(edge + 0.5));
+    float3 outc = dark ? float3(0) : to_srgb(col);
+    return mix(outc, dark ? float3(0.022) : surround(pos, pe, edge, f, O), saturate(edge + 0.5));
 }
 
 // The meter, seen through the eyepiece. Its scale is light projected beside

@@ -326,16 +326,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         guard let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let cb = queue.makeCommandBuffer() else { return }
         displayFrame += 1
-        // Mirror up: the finder is black while the shutter is open.
-        if now < mirrorUpUntil {
-            rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-            rpd.colorAttachments[0].loadAction = .clear
-            cb.makeRenderCommandEncoder(descriptor: rpd)?.endEncoding()
-            present(cb, drawable)
-            cb.commit()
-            updateHUD(mirrorUp: true)
-            return
-        }
+        // Mirror up: no image reaches the screen while the shutter is open
+        // (the frame and its glow go black); the finder's own readouts stay.
+        let mirrorUp = now < mirrorUpUntil
         guard let frame = loop.acquireLatest() else {
             cb.makeRenderCommandEncoder(descriptor: rpd)?.endEncoding()
             present(cb, drawable)
@@ -350,6 +343,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         finderGain *= pow(want / finderGain, min(1, Float(dt) * 0.8))
         var o = finderOptics(frame.job, seed: UInt32(displayFrame))
         o[5].y *= finderGain
+        if mirrorUp { o[8].y = 1 }
         var f = frame.job.body.developed.packed
 
         let ce = cb.makeComputeCommandEncoder()!
@@ -373,7 +367,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         enc.setFragmentBytes(&m, length: m.count * 16, index: 3)
         enc.setFragmentTexture(meterTexture ?? blankTexture, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        drawWireframes(enc, frame: frame, optics: &o)
+        if !mirrorUp { drawWireframes(enc, frame: frame, optics: &o) }
         enc.endEncoding()
         present(cb, drawable)
         let loop = self.loop, slot = frame.slot, meter = meterBuf, probe = probeBuf
@@ -392,7 +386,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             }
         }
         cb.commit()
-        updateHUD(mirrorUp: false)
+        updateHUD(mirrorUp: mirrorUp)
     }
 
     /// Optics for the focusing screen (layout in Shaders.swift).
