@@ -1,4 +1,4 @@
-# Crank & Click
+# Vintage Click
 
 (Formerly Splat Camera: rolls and sounds already kept under that name are still found.)
 
@@ -17,12 +17,12 @@ each frame held evenly for 1/fps.
 
 ## Play
 
-`./build.sh`, then copy `build/Crank & Click.app` to /Applications. Open it from Finder and it asks for
+`./build.sh`, then copy `build/Vintage Click.app` to /Applications. Open it from Finder and it asks for
 a scan (a 3DGS `.ply`) and two things about it: whether it's an object (scanned on a rig, lit from
 the camera) or a place to stand in, and how bright its light was. The answers are remembered per
 file. You can also drop a `.ply` on the app or use **Open With**. **File > Open Scene…** switches
 scans, **File > Choose Where Rolls Are Kept…** picks the folder for developed rolls (default
-`~/Pictures/Crank & Click`), and **Help > Controls** lists the keys and pad buttons.
+`~/Pictures/Vintage Click`), and **Help > Controls** lists the keys and pad buttons.
 
 **Speed (M2 Pro, 3M-splat bee, nothing else on the GPU):** about 6 finder frames a second, ~150 ms
 each, nearly the same at 810x540 as at 1620x1080 and with shadows or the lens off. The cost is per
@@ -41,7 +41,7 @@ SPIRULA_BUILD=~/Documents/spirula-studio-capture/build ./build.sh
 ## Run
 
 ```bash
-open "build/Crank & Click.app" --args ~/Desktop/bee/bee-final.ply
+open "build/Vintage Click.app" --args ~/Desktop/bee/bee-final.ply
 ```
 
 Options: `--res 1620x1080` (3:2, like 35 mm), `--fps 24`, `--scale`, `--demo-lights`,
@@ -73,7 +73,7 @@ lens's pupil sets the bokeh: blade count, cat's-eye clipping by the barrel
 develops it: exposure from aperture, shutter and ISO against the scene's EV
 (`--ev`, default 12), a characteristic curve, colour crosstalk, halation and
 grain. Frames are filed by day, sitting and roll in the rolls folder
-(`~/Pictures/Crank & Click` unless chosen in the menu or File menu):
+(`~/Pictures/Vintage Click` unless chosen in the menu or File menu):
 `2026-10-17/09.14 Skate park/Roll 01 - Portrait 400/frame-01.png`, each with
 a JSON of how it was taken and, with Digital negative on, a
 high-dynamic-range DNG (linear light before the film, 16-bit float).
@@ -118,7 +118,7 @@ folder name and each frame's .json.
 ## Sounds
 
 The camera plays your own recordings: put them in
-`~/Library/Application Support/Crank & Click/Sounds` (menu > Camera sounds
+`~/Library/Application Support/Vintage Click/Sounds` (menu > Camera sounds
 opens it; a README there lists the names), one sound per file, several
 takes each: `shutter-1.wav`, `advance-1.wav` ... `advance-8.wav`, and
 optionally `shutter-open-*` + `shutter-close-*` (slow speeds come apart by

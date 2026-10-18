@@ -1,10 +1,10 @@
 #!/bin/zsh
-# Builds Crank & Click.app with swiftc (no Xcode needed: Command Line Tools only).
+# Builds Vintage Click.app with swiftc (no Xcode needed: Command Line Tools only).
 # SPIRULA_BUILD points at a spirula-studio build containing libspirula_render.dylib.
 set -e
 cd "$(dirname "$0")"
 SPIRULA_BUILD=${SPIRULA_BUILD:-$HOME/Documents/spirula-studio-capture/build}
-APP="build/Crank & Click.app"
+APP="build/Vintage Click.app"
 mkdir -p build "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
 # The Command Line Tools ship SwiftBridging twice (module.modulemap and
 # bridging.modulemap), which breaks any C module import; hide one copy.
@@ -21,7 +21,7 @@ fi
 swiftc "${VFS[@]}" -O -wmo -target arm64-apple-macos14.0 \
     -I Sources/CSpirula -L "$SPIRULA_BUILD" -lspirula_render \
     -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
-    Sources/SplatCamera/*.swift -o "$APP/Contents/MacOS/CrankAndClick"
+    Sources/SplatCamera/*.swift -o "$APP/Contents/MacOS/VintageClick"
 cp "$SPIRULA_BUILD/libspirula_render.dylib" "$APP/Contents/Frameworks/"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"

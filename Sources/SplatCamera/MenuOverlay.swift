@@ -176,7 +176,7 @@ final class MenuOverlay: NSView {
         NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).fill()
         amber.withAlphaComponent(0.5).setStroke()
         NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).stroke()
-        text("CRANK & CLICK", NSPoint(x: panel.minX + 2 * u, y: panel.minY + 1.6 * u), size: 1.5 * u, color: amber, weight: .bold)
+        text("VINTAGE CLICK", NSPoint(x: panel.minX + 2 * u, y: panel.minY + 1.6 * u), size: 1.5 * u, color: amber, weight: .bold)
         text("now: \(currentMode)", NSPoint(x: panel.maxX - 16 * u, y: panel.minY + 1.9 * u), size: 1.0 * u,
              color: NSColor(white: 0.6, alpha: 1))
         itemRects = []
