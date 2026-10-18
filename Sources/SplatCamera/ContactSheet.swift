@@ -763,6 +763,9 @@ final class ContactSheetView: NSView {
     }
 
     private lazy var ci = CIContext(options: [.cacheIntermediates: false])
+    /// Red from one image, green from a second, blue from a third.
+    private static let channels = CIColorKernel(source:
+        "kernel vec4 rgb(__sample r, __sample g, __sample b) { return vec4(r.r, g.g, b.b, g.a); }")
 
     /// What the loupe sees: the table under it magnified, through a simple
     /// lens. Pincushion toward the rim, colour fringes growing outward, the
@@ -795,17 +798,14 @@ final class ContactSheetView: NSView {
             kCIInputCenterKey: mid, kCIInputRadiusKey: half * 1.15, kCIInputScaleKey: -0.14,
         ]).cropped(to: img.extent)
         // Lateral colour: red a touch bigger than green, blue a touch smaller.
-        func channel(_ m: (CGFloat, CGFloat, CGFloat), _ k: CGFloat) -> CIImage {
-            let only = bent.applyingFilter("CIColorMatrix", parameters: [
-                "inputRVector": CIVector(x: m.0, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: m.1, z: 0, w: 0),
-                "inputBVector": CIVector(x: 0, y: 0, z: m.2, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-            ])
+        // Each channel taken from its own scaled copy (not added: adding the
+        // copies raised the brightness and contrast).
+        func scaled(_ k: CGFloat) -> CIImage {
             let move = CGAffineTransform(translationX: half, y: half).scaledBy(x: k, y: k).translatedBy(x: -half, y: -half)
-            return only.transformed(by: move).cropped(to: img.extent)
+            return bent.transformed(by: move).cropped(to: img.extent)
         }
-        let fringed = channel((1, 0, 0), 1.010)
-            .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: channel((0, 1, 0), 1)])
-            .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: channel((0, 0, 1), 0.990)])
+        guard let fringed = Self.channels?.apply(extent: img.extent, arguments: [scaled(1.010), bent, scaled(0.990)])
+        else { return nil }
         // Soft toward the rim (field curvature): sharp in the middle, smeared at the edge.
         let mask = CIFilter(name: "CIRadialGradient", parameters: [
             "inputCenter": mid, "inputRadius0": half * 0.45, "inputRadius1": half,
