@@ -332,8 +332,25 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     float2 q = field(p, O);
     float vig = 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
     col *= vig * (1 - 0.22 * dot(q, q)) * O[5].y;
-    // A circular fisheye's image is a disc: black beyond it.
-    if (O[6].z > 0) col *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(p - c));
+    // A circular fisheye's image is a disc: black beyond it, but for a soft
+    // glow of the light near its rim scattered past it inside the lens.
+    if (O[6].z > 0) {
+        float rr = length(p - c), Rc = O[6].z;
+        col *= 1 - smoothstep(Rc - 2.0, Rc, rr);
+        if (rr > Rc - 2.0) {
+            float out = max(rr - Rc, 0.0);
+            float th = atan2(p.y - c.y, p.x - c.x), spread = 0.5 + 1.5 * out / Rc;
+            th += (hash(uint2(p), 41) - 0.5) * spread / 16;
+            float3 rim = 0;
+            for (int k = 0; k < 16; k++) {
+                float a = th + (float(k) / 15 - 0.5) * spread;
+                float r = Rc * (0.94 - 0.05 * float(k % 3));
+                rim += frame_lin_ca(f, c + r * float2(cos(a), sin(a)), O);
+            }
+            rim /= 16;
+            col += rim * (0.14 * exp(-out / (Rc * 0.035)) + 0.04 * exp(-out / (Rc * 0.18))) * O[5].y;
+        }
+    }
     // The window's edge: a soft dark lip, then the surround.
     col *= smoothstep(0.0, O[7].w * 0.9, -edge) * 0.25 + 0.75;
     float3 outc = dark ? float3(0) : to_srgb(col);
@@ -495,6 +512,27 @@ kernel void streak(device const float4* acc [[buffer(0)]], constant float4* O [[
     }
 }
 
+// A circular fisheye's disc on film: black beyond it but for a soft glow of
+// the light near its rim, scattered past it inside the lens (as in the finder).
+float3 fisheye_rim(float3 lin, device const float4* acc, float2 pc, float2 c, float3 gain, constant float4* O) {
+    float rr = length(pc - c), Rc = O[6].z;
+    lin *= 1 - smoothstep(Rc - 2.0, Rc, rr);
+    if (rr <= Rc - 2.0) return lin;
+    // Gathered from an arc of the rim that widens with distance (light
+    // scattered further comes from more of it), so it stays a haze, not rays.
+    float out = max(rr - Rc, 0.0);
+    float th = atan2(pc.y - c.y, pc.x - c.x), spread = 0.5 + 1.5 * out / Rc;
+    th += (hash(uint2(pc), 41) - 0.5) * spread / 24;    // dithered: no pattern lines up
+    float3 rim = 0;
+    for (int k = 0; k < 24; k++) {
+        float a = th + (float(k) / 23 - 0.5) * spread;
+        float r = Rc * (0.94 - 0.05 * float(k % 3));
+        rim += acc_at(acc, c + r * float2(cos(a), sin(a)), O);
+    }
+    rim = rim / 24 * gain;
+    return lin + rim * (0.14 * exp(-out / (Rc * 0.035)) + 0.04 * exp(-out / (Rc * 0.18)));
+}
+
 // Develops the exposure into a print. D = per-channel 1 / pupil weight of the full aperture.
 kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
                     constant float4* F [[buffer(2)]], constant float4& D [[buffer(3)]],
@@ -526,7 +564,7 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
         }
         halo /= 32;
     }
-    if (O[6].z > 0) lin *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(pc - c));
+    if (O[6].z > 0) lin = fisheye_rim(lin, acc, pc, c, D.rgb * expo, O);
     float3 col = film_look(lin, halo, pc, uint(O[5].z), O[0].y, F);
     out[idx(p, O)] = uchar4(uchar3(round(col * 255)), 255);
 }
@@ -551,7 +589,7 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
     lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
     lin = max(lin * D.rgb * expo * vig, 0.0);
     if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;
-    if (O[6].z > 0) lin *= 1 - smoothstep(O[6].z - 2.0, O[6].z, length(pc - c));
+    if (O[6].z > 0) lin = fisheye_rim(lin, acc, pc, c, D.rgb * expo, O);
     uint i = idx(p, O) * 3;
     out[i] = half(min(lin.r, 60000.0)); out[i + 1] = half(min(lin.g, 60000.0)); out[i + 2] = half(min(lin.b, 60000.0));
 }
