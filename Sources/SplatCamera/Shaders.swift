@@ -19,6 +19,7 @@
 //           mirror lens's central obstruction in aperture radii)
 //   O[7] = finder only: where the image sits in the window (origin px, scale, corner radius px)
 //   O[8] = (oval stop's width over height, 0 = round; 1 = mirror up: no image)
+//   O[9..11] = the lens filter (see "lens filters" below)
 // (cx, cy) is the optical axis: the frame's centre, unless the lens is shifted.
 // Film (FilmStock.packed): F[0..2] crosstalk rows, F[3] = (balance, b&w),
 //   F[4] = (b&w mix, saturation), F[5] = (contrast, black lift, shoulder, grain),
@@ -230,6 +231,105 @@ float3 prism_sample(device const float* f, float2 p, float2 shift, float z, cons
 // The focusing screen, always: the lens's image (its depth of field, light
 // fall-off and colour fringes) on fine-ground glass with a fresnel, a
 // split-prism disc (halves shift apart with defocus) and a microprism collar.
+// ---- lens filters ----------------------------------------------------------
+//
+// O[9] = (the filter's transmission rgb, -), O[10] = (star points, star
+// strength, 1 = diffraction grating, angle), O[11] = (glow, soften, veil,
+// highlight threshold). A filter is in front of the lens: the finder, the
+// meter and the film all see through it.
+
+struct AccSource {
+    device const float4* acc; constant float4* O; float3 k;
+    float3 at(float2 q) const { return acc[idx(clamp_px(int2(q), O), O)].rgb * k; }
+};
+struct FrameSource {
+    device const float* f; constant float4* O; float3 k;
+    float3 at(float2 q) const { return to_lin(frame_rgb(f, clamp_px(int2(q), O), O)) * k; }
+};
+
+// Light brighter than `thr`, keeping its colour (a cut per channel would tint it).
+float3 above(float3 v, float thr) {
+    float lum = dot(v, float3(0.2126, 0.7152, 0.0722));
+    return v * (max(lum - thr, 0.0) / max(lum, 1e-4));
+}
+
+// A spectrum colour, h from 0 (violet) to 1 (red), roughly even in brightness.
+float3 spectrum(float h) {
+    float3 c = float3(smoothstep(0.40, 0.85, h) + 0.4 * (1 - smoothstep(0.0, 0.12, h)),
+                      1 - saturate(abs(h - 0.52) * 2.4),
+                      1 - smoothstep(0.08, 0.50, h));
+    return saturate(c) * 1.4;
+}
+
+// The light an effect filter adds at p (or takes, for soften and veil) to
+// `base`, the light already there. `steps`: samples along each star ray.
+template <typename S>
+float3 filter_fx(thread const S& src, float2 p, float3 base, constant float4* O, int steps) {
+    float3 add = 0;
+    float thr = O[11].w, H = O[0].y;
+    int points = int(O[10].x);
+    // Each pixel's samples start at its own offset, so their spacing never shows.
+    float jitter = hash(uint2(p), 57);
+    if (points > 0) {
+        bool spectral = O[10].z > 0.5;
+        float L = H * (spectral ? 0.20 : 0.15);
+        // Rays both ways along each line: a 4-point star is two lines.
+        int lines = max(1, points / 2);
+        int n = spectral ? steps * 2 : steps;
+        float3 star = 0;
+        for (int j = 0; j < lines; j++) {
+            float a = O[10].w + float(j) * M_PI_F / float(lines);
+            float2 dir = float2(cos(a), sin(a));
+            for (int s = 0; s < n; s++) {
+                float t = (float(s) + jitter) / float(n);
+                float d = L * t * t;
+                float w = exp(-3.2 * t) * (2.0 * t / float(n)) * 3.0;
+                for (int side = -1; side <= 1; side += 2) {
+                    float3 v = above(src.at(p - dir * d * float(side)), thr);
+                    if (spectral) {
+                        // A grating sends each order's spectrum further out, violet
+                        // nearest: the spike is rainbow bands repeating along it,
+                        // white only at its root.
+                        float lum = dot(v, float3(0.2126, 0.7152, 0.0722));
+                        float h = fract(t * 3.2 + 0.15);
+                        float3 c = mix(float3(1), spectrum(h), smoothstep(0.02, 0.10, t));
+                        star += lum * c * w * 1.3;
+                    } else {
+                        star += v * w;
+                    }
+                }
+            }
+        }
+        add += star * O[10].y;
+    }
+    if (O[11].x > 0 || O[11].y > 0 || O[11].z > 0) {
+        // Discs of samples, spread evenly by area and turned at random per pixel.
+        float rot = jitter * 6.2831853;
+        // Soft-focus filters scatter from everything bright, not only clipped
+        // highlights; each sample's bright part first, then spread (a small lamp
+        // averaged with the dark round it would never pass the threshold).
+        float gthr = thr * 0.45;
+        float3 near = 0, far = 0, nearHi = 0, farHi = 0;
+        // Samples crowd toward the middle (radius ~ t^2): a halo bright near the
+        // light, fading smoothly, with no edge.
+        for (uint k = 0; k < 20; k++) {
+            float t = (float(k) + 0.5) / 20, a = float(k) * 2.39996323 + rot;
+            float3 v = src.at(p + float2(cos(a), sin(a)) * t * t * H * 0.02);
+            near += v; nearHi += above(v, gthr);
+        }
+        for (uint k = 0; k < 28; k++) {
+            float t = (float(k) + 0.5) / 28, a = float(k) * 2.39996323 + rot;
+            float3 v = src.at(p + float2(cos(a), sin(a)) * t * t * H * 0.09);
+            far += v; farHi += above(v, gthr);
+        }
+        near /= 20; far /= 28; nearHi /= 20; farHi /= 28;
+        add += O[11].x * (nearHi * 1.2 + farHi * 1.6);
+        add += O[11].y * (near - base);
+        add += O[11].z * ((far - base) * 0.6 + far * 0.12);
+    }
+    return add;
+}
+
 // The eyepiece is not perfect: what sits on the screen (the window's edge,
 // the meter, the wireframes) is seen with a little pincushion, a touch more
 // in red than in blue. `pos` in window pixels; returns where to look on the
@@ -321,6 +421,12 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
         // Fine matte: the ground glass's own tooth, still while the image moves.
         float tooth = value_noise(p / 1.4, 7) + 0.5 * value_noise(p / 0.7, 11) - 0.75;
         col *= 1 + 0.10 * tooth;
+    }
+    // The filter on the lens: its colour, and what an effect filter scatters.
+    col *= O[9].rgb;
+    if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) {
+        FrameSource src = { f, O, O[9].rgb };
+        col = max(col + filter_fx(src, p, col, O, 16), 0.0);
     }
 
     if (abs(r - R) < 0.8 || abs(r - R * 1.75) < 0.8) col *= 0.55;
@@ -443,7 +549,7 @@ kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buff
                   device float* out [[buffer(2)]], uint2 g [[thread_position_in_grid]],
                   uint2 grid [[threads_per_grid]]) {
     float2 p = (float2(g) + 0.5) / float2(grid) * O[0].xy;
-    float3 c = to_lin(frame_rgb(f, clamp_px(int2(p), O), O));
+    float3 c = to_lin(frame_rgb(f, clamp_px(int2(p), O), O)) * O[9].rgb;    // TTL: through the filter
     out[g.y * grid.x + g.x] = dot(c, float3(0.2126, 0.7152, 0.0722));
 }
 
@@ -512,6 +618,19 @@ kernel void streak(device const float4* acc [[buffer(0)]], constant float4* O [[
     }
 }
 
+// What an effect filter adds to the exposure, from the whole of it (written
+// before develop reads it). In exposed light, as develop adds it.
+kernel void lens_fx(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
+                    constant float4& D [[buffer(3)]], device float4* out [[buffer(5)]],
+                    uint2 p [[thread_position_in_grid]]) {
+    if (p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    float3 k = D.rgb * exp2(O[5].w) * O[9].rgb;
+    AccSource src = { acc, O, k };
+    uint i = idx(p, O);
+    float2 pc = float2(p) + 0.5;
+    out[i] = float4(filter_fx(src, pc, acc[i].rgb * k, O, 20), 0);
+}
+
 // A circular fisheye's disc on film: black beyond it but for a soft glow of
 // the light near its rim, scattered past it inside the lens (as in the finder).
 float3 fisheye_rim(float3 lin, device const float4* acc, float2 pc, float2 c, float3 gain, constant float4* O) {
@@ -537,7 +656,7 @@ float3 fisheye_rim(float3 lin, device const float4* acc, float2 pc, float2 c, fl
 kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
                     constant float4* F [[buffer(2)]], constant float4& D [[buffer(3)]],
                     device uchar4* out [[buffer(4)]], device const float4* streaks [[buffer(5)]],
-                    uint2 p [[thread_position_in_grid]]) {
+                    device const float4* fx [[buffer(6)]], uint2 p [[thread_position_in_grid]]) {
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
@@ -551,8 +670,9 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
     lin.r = acc_at(acc, c + (pc - c) * (1 - k), O).r;
     lin.g = acc_at(acc, pc, O).g;
     lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
-    lin *= D.rgb * expo * vig;
+    lin *= D.rgb * expo * vig * O[9].rgb;                 // O[9]: the filter's colour
     if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;    // D.w: the lens streaks
+    if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) lin = max(lin + fx[idx(p, O)].rgb * vig, 0.0);
     // Halation: light past the film base bouncing back, around bright highlights.
     float3 halo = 0;
     if (F[6].x > 0) {
@@ -575,7 +695,8 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
 // print would burn out but the negative keeps.
 kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
                      constant float4& D [[buffer(3)]], device half* out [[buffer(4)]],
-                     device const float4* streaks [[buffer(5)]], uint2 p [[thread_position_in_grid]]) {
+                     device const float4* streaks [[buffer(5)]], device const float4* fx [[buffer(6)]],
+                     uint2 p [[thread_position_in_grid]]) {
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
@@ -587,8 +708,9 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
     lin.r = acc_at(acc, c + (pc - c) * (1 - k), O).r;
     lin.g = acc_at(acc, pc, O).g;
     lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
-    lin = max(lin * D.rgb * expo * vig, 0.0);
+    lin = max(lin * D.rgb * expo * vig * O[9].rgb, 0.0);
     if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;
+    if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) lin = max(lin + fx[idx(p, O)].rgb * vig, 0.0);
     if (O[6].z > 0) lin = fisheye_rim(lin, acc, pc, c, D.rgb * expo, O);
     uint i = idx(p, O) * 3;
     out[i] = half(min(lin.r, 60000.0)); out[i + 1] = half(min(lin.g, 60000.0)); out[i + 2] = half(min(lin.b, 60000.0));

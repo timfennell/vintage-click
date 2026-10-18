@@ -67,6 +67,7 @@ final class RenderLoop {
     private let relightPSO: MTLComputePipelineState
     private let negativePSO: MTLComputePipelineState
     private let streakPSO: MTLComputePipelineState
+    private let lensFxPSO: MTLComputePipelineState
     // The scan's own colours (relighting reads them; Spirula's are overwritten).
     private let means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
     private let colours: (buf: MTLBuffer, off: Int)
@@ -150,6 +151,7 @@ final class RenderLoop {
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
         streakPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "streak")!)
+        lensFxPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "lens_fx")!)
         shadowPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shadow_vis")!)
         count = model.count
         higherCoeffs = (model.shDegree + 1) * (model.shDegree + 1) - 1
@@ -416,7 +418,7 @@ final class RenderLoop {
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(h) / 2 : 0, l.obstruction),
             SIMD4(0, 0, 0, 0),
             SIMD4(l.squeeze, 0, 0, 0),
-        ]
+        ] + b.filter.optics(threshold: 1.0)        // highlights: past ~2.5 stops over mid grey
     }
 
     /// One sub-pupil of the exposure: render the view sheared to that lens
@@ -527,6 +529,17 @@ final class RenderLoop {
                 ce.dispatchThreads(MTLSize(width: h, height: 1, depth: 1),
                                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             }
+            // An effect filter (stars, glow, mist): what it scatters, from the whole exposure.
+            var fxBuf = e.accum
+            if b.filter.hasEffect, let fb = device.makeBuffer(length: w * h * 16, options: .storageModePrivate) {
+                fxBuf = fb
+                ce.setComputePipelineState(lensFxPSO)
+                ce.setBuffer(e.accum, offset: 0, index: 0)
+                ce.setBytes(&o, length: o.count * 16, index: 1)
+                ce.setBytes(&dv, length: 16, index: 3)
+                ce.setBuffer(fb, offset: 0, index: 5)
+                ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
+            }
             var f = b.developed.packed
             ce.setComputePipelineState(developPSO)
             ce.setBuffer(e.accum, offset: 0, index: 0)
@@ -535,6 +548,7 @@ final class RenderLoop {
             ce.setBytes(&dv, length: 16, index: 3)
             ce.setBuffer(out, offset: 0, index: 4)
             ce.setBuffer(streaks, offset: 0, index: 5)
+            ce.setBuffer(fxBuf, offset: 0, index: 6)
             ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             if e.wantsNegative, let neg = device.makeBuffer(length: w * h * 6, options: .storageModeShared) {
                 negBuf = neg
@@ -544,6 +558,7 @@ final class RenderLoop {
                 ce.setBytes(&dv, length: 16, index: 3)
                 ce.setBuffer(neg, offset: 0, index: 4)
                 ce.setBuffer(streaks, offset: 0, index: 5)
+                ce.setBuffer(fxBuf, offset: 0, index: 6)
                 ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             }
         }

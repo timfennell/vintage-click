@@ -50,6 +50,9 @@ func pair(_ name: String) -> SIMD2<Float>? {
     return SIMD2(v[0], v[1])
 }
 let tiltChoice = pair("--tilt"), shiftChoice = pair("--shift")
+// --filter I (index into lensFilters), --gel I (on every light): for tests.
+let filterChoice = option("--filter").flatMap { Int($0) }
+let gelChoice = option("--gel").flatMap { Int($0) }
 // --turn YAW,PITCH (degrees, right and up): aim the camera for scripted checks.
 let turn = option("--turn").map { $0.split(separator: ",").compactMap { Float($0) } }
 let noShadows = args.contains("--no-shadows")
@@ -57,9 +60,10 @@ args.removeAll { $0 == "--no-shadows" }
 // --menu / --controls: open with the game menu or the controls guide up (for checks).
 let startMenu = args.contains("--menu"), startControls = args.contains("--controls")
 let startFilm = args.contains("--film-menu"), startLenses = args.contains("--lens-menu")
+let startFilters = args.contains("--filter-menu")
 let measureDemo = args.contains("--measure-demo")
 args.removeAll { $0 == "--measure-demo" }
-args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" || $0 == "--lens-menu" }
+args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" || $0 == "--lens-menu" || $0 == "--filter-menu" }
 let lightingMode = args.contains("--lighting-mode")
 args.removeAll { $0 == "--lighting-mode" }
 let demoLights = args.contains("--demo-lights")
@@ -231,11 +235,16 @@ func configureSession() {
     if let m = focusChoice { viewer.body.focusM = m }
     if let t = tiltChoice { viewer.body.tilt = t }
     if let t = shiftChoice { viewer.body.shift = t }
+    if let i = filterChoice, lensFilters.indices.contains(i) { viewer.body.filterIndex = i }
+    if let g = gelChoice, gels.indices.contains(g) {
+        for k in viewer.lighting.lights.indices { viewer.lighting.lights[k].gel = g }
+    }
     DispatchQueue.main.async {
         if startMenu { viewer.openMenu() }
         if startControls { viewer.showControls() }
         if startFilm { viewer.openFilm() }
         if startLenses { viewer.openLenses() }
+        if startFilters { viewer.openFilters() }
         if measureDemo { viewer.measureDemo() }
     }
     if let t = turn, t.count == 2 {

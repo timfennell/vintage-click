@@ -96,6 +96,19 @@ through different parts of the lens's aperture.
 (or **M + arrows**) to move it; **Y + click the right stick** (or **N**) squares
 it up again.
 
+### Filters
+
+The camera bag's **Filters** shelf (or **V**) holds what screws onto the front
+of the lens, from made-up makers that recall the real ones: neutral density
+(1 to 6 stops, to shoot fast film wide open in daylight), contrast filters for
+black and white (yellow, orange, red, deep red, green, blue), colour correction
+(skylight, warming 81A, 85B amber, 80A blue), cross-screen stars with 4, 6 or
+8 points, diffraction gratings that throw rainbow spikes, soft-focus, mist,
+black mist and fog. You see the filter in the viewfinder, the meter reads
+through it as a through-the-lens meter does, and the film records it.
+Fisheyes, the 13 mm and the mirror lens have no front thread: they take colour
+and ND filters at the back, and no effect filters.
+
 ### Film
 
 ![Loading film](docs/screenshots/film.jpg)
@@ -124,7 +137,10 @@ Press **L** (or R3) for lighting mode. Add 1970s tungsten heads (Fresnel 650,
 it, flood or spot it, dim it, and turn the scan's own light down to night.
 Lights relight the scan and cast shadows; their beams come from traced optics
 of real Fresnel lenses, not a formula. In the finder the heads appear as
-projected wireframes.
+projected wireframes. Each light can carry a **gel** (**C**, or the menu): full,
+half and quarter CT blue and CT orange to convert between tungsten and
+daylight, and colours from pale straw and bastard amber to primary red,
+magenta, moss green, peacock and deep night blue, each with its own light loss.
 
 ### The light table
 
@@ -174,6 +190,7 @@ scan, and see every control.
 | fire the shutter | A | left click |
 | depth-of-field preview | hold B | hold right click |
 | camera bag | X | B, or 1-9 within the shelf |
+| lens filter (bag's Filters shelf) | menu | V |
 | load film | tap Y | R |
 | tilt / shift the lens | hold Y + right stick | hold M + arrows |
 | square the lens up | hold Y + click R3 | N |
@@ -183,6 +200,7 @@ scan, and see every control.
 | back to the camera's view | B | 0 or `` ` `` |
 | add a light | X | F |
 | change the head | Y | T |
+| gel on the light | menu | C |
 | flood / spot | L2 / R2 | mouse wheel |
 | dimmer (half stops) | d-pad up / down | `-` `=` |
 | remove the light you fly | menu | Backspace |

@@ -40,6 +40,7 @@ struct PlacedLight {
     var aim: SIMD3<Float>           // unit, where the lens points
     var spot: Float = 0.5           // 0 = full flood, 1 = full spot
     var dimmerStops: Float = 0      // scrims / dimmer: 0 = full, -1 = half
+    var gel = 0                     // index into gels (0: none)
 
     var kit: LightHead { lightKit[head] }
 
@@ -57,7 +58,7 @@ struct PlacedLight {
         return ([
             SIMD4(position, 0),
             SIMD4(f, exp2(dimmerStops) / eRef),
-            SIMD4(tungsten, kit.shine),
+            SIMD4(tungsten * gels[gel].transmission, kit.shine),      // through its gel
             SIMD4(r, metresPerUnit),
         ], beam.cd.map { SIMD4($0, 0) })
     }

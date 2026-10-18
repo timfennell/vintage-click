@@ -36,6 +36,9 @@ struct Lens {
     var curvatureRadial: Float = 0
     var curvatureTangential: Float = 0
     var movement = Movement.none
+    /// No front thread (a bulging or huge front element): filters go in at the
+    /// back (a fisheye's turret, a mirror lens's drop-in), colour and ND only.
+    var rearFilter = false
     /// A thin vertical wire across the stop: the share of light it diffracts
     /// into a horizontal streak (the anamorphic-look flare).
     var streak: Float = 0
@@ -150,15 +153,15 @@ private let exoticLenses: [Lens] = [
          sphericalAberration: 0.15),
     Lens(name: "Ohi Kor 13mm f/5.6", inspiredBy: "the rare 118-degree rectilinear ultra-wide (1976-98): straight lines, almost no distortion",
          focalMM: 13, maxAperture: 5.6, minAperture: 22, blades: 7, bladeRotation: 0,
-         catsEye: 0.2, soapBubble: 0, vignette: 0.6, minFocusM: 0.3, lateralCA: 0.002, axialCA: 0.004),
+         catsEye: 0.2, soapBubble: 0, vignette: 0.6, minFocusM: 0.3, lateralCA: 0.002, axialCA: 0.004, rearFilter: true),
     Lens(name: "Ohi Fisheye-Kor 16mm f/2.8", inspiredBy: "full-frame fisheye: 180 degrees corner to corner",
          focalMM: 16, maxAperture: 2.8, minAperture: 22, blades: 7, bladeRotation: 0,
          catsEye: 0.2, soapBubble: 0, vignette: 0.3, minFocusM: 0.25, lateralCA: 0.002, axialCA: 0.005,
-         projection: .fisheye),
+         projection: .fisheye, rearFilter: true),
     Lens(name: "Ohi Fisheye-Kor 8mm f/2.8 Circular", inspiredBy: "circular fisheye: the whole hemisphere in a disc",
          focalMM: 8, maxAperture: 2.8, minAperture: 22, blades: 7, bladeRotation: 0,
          catsEye: 0.1, soapBubble: 0, vignette: 0.25, minFocusM: 0.3, lateralCA: 0.0025, axialCA: 0.004,
-         projection: .circularFisheye),
+         projection: .circularFisheye, rearFilter: true),
     Lens(name: "Vienna Petzval 85mm f/2.2", inspiredBy: "19th-century Petzval portrait design: wild swirl",
          focalMM: 85, maxAperture: 2.2, minAperture: 16, blades: 0, bladeRotation: 0,
          catsEye: 0.95, soapBubble: 0.3, vignette: 0.65, minFocusM: 0.75, lateralCA: 0.0012, axialCA: 0.04,
@@ -166,7 +169,7 @@ private let exoticLenses: [Lens] = [
     Lens(name: "Ohi Reflex-Kor 500mm f/8", inspiredBy: "catadioptric mirror lens: ring-shaped bokeh",
          focalMM: 500, maxAperture: 8, minAperture: 8, blades: 0, bladeRotation: 0,
          catsEye: 0.1, soapBubble: 0.2, vignette: 0.3, minFocusM: 4.0, lateralCA: 0.0001, axialCA: 0,
-         obstruction: 0.45),
+         obstruction: 0.45, rearFilter: true),
     Lens(name: "Munich Imago 120mm f/4.5 Soft", inspiredBy: "soft-focus portrait lens: a glow around everything",
          focalMM: 120, maxAperture: 4.5, minAperture: 22, blades: 0, bladeRotation: 0,
          catsEye: 0.2, soapBubble: 0.2, vignette: 0.25, minFocusM: 1.2, lateralCA: 0.0006, axialCA: 0.02,

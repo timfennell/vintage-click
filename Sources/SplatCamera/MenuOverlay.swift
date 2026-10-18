@@ -28,17 +28,74 @@ final class MenuOverlay: NSView {
     private var lensRects: [NSRect] = []
     private var shelfRects: [NSRect] = []
 
+    /// The bag's last shelf holds the filters.
+    var filterShelf: Int { lensCollections.count }
+    var onFilterShelf: Bool { lensShelf == filterShelf }
+    var mountedFilter = 0
+    /// Whether the lens on the camera takes that filter (rear-filter lenses: colour and ND only).
+    var filterFits: (Int) -> Bool = { _ in true }
+    var onMountFilter: ((Int) -> Void)?
+    private var lensRowFirst = 0
+
     func moveLens(_ d: Int) {
-        let n = lensCollections[lensShelf].lenses.count
+        let n = onFilterShelf ? lensFilters.count : lensCollections[lensShelf].lenses.count
         lensChoice = (lensChoice + d + n) % n
     }
     func moveShelf(_ d: Int) {
-        lensShelf = (lensShelf + d + lensCollections.count) % lensCollections.count
-        lensChoice = 0
+        lensShelf = (lensShelf + d + filterShelf + 1) % (filterShelf + 1)
+        lensChoice = onFilterShelf ? mountedFilter : 0
     }
     func mountLens() {
+        if onFilterShelf { onMountFilter?(lensChoice); return }
         let before = lensCollections.prefix(lensShelf).reduce(0) { $0 + $1.lenses.count }
         onMountLens?(before + lensChoice)
+    }
+
+    // A simple chooser page (the lights' gels): a title, a line about it, rows.
+    var showingList = false { didSet { needsDisplay = true } }
+    var listTitle = "", listAbout = ""
+    var listRows: [(name: String, detail: String)] = []
+    var listChoice = 0 { didSet { needsDisplay = true } }
+    var listMarked = -1
+    var onChooseList: ((Int) -> Void)?
+    private var listRects: [NSRect] = []
+    private var listRowFirst = 0
+    func moveList(_ d: Int) {
+        guard !listRows.isEmpty else { return }
+        listChoice = (listChoice + d + listRows.count) % listRows.count
+    }
+
+    private func drawList(_ u: CGFloat) {
+        let rowH = 3.0 * u
+        let shown = min(listRows.count, 12)
+        let first = max(0, min(listRows.count - shown, listChoice - shown / 2))
+        listRowFirst = first
+        let w = min(bounds.width * 0.7, 70 * u), h = CGFloat(shown) * rowH + 12 * u
+        let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
+        NSColor(white: 0.08, alpha: 0.96).setFill()
+        NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).fill()
+        text(listTitle, NSPoint(x: panel.minX + 2 * u, y: panel.minY + 1.5 * u), size: 1.5 * u, color: amber, weight: .bold)
+        text(listAbout, NSPoint(x: panel.minX + 2 * u, y: panel.minY + 4.0 * u), size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
+        listRects = []
+        for k in 0..<shown {
+            let i = first + k
+            let row = listRows[i]
+            let r = NSRect(x: panel.minX + u, y: panel.minY + 6.2 * u + CGFloat(k) * rowH, width: w - 2 * u, height: rowH - 0.4 * u)
+            listRects.append(r)
+            if i == listChoice {
+                amber.withAlphaComponent(0.18).setFill()
+                NSBezierPath(roundedRect: r, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
+            }
+            text((i == listChoice ? "▶ " : "  ") + row.name + (i == listMarked ? "  ●" : ""),
+                 NSPoint(x: r.minX + u, y: r.minY + 0.3 * u), size: 1.15 * u, color: i == listChoice ? amber : .white)
+            text(row.detail, NSPoint(x: r.minX + 3 * u, y: r.minY + 1.7 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1))
+        }
+        if first > 0 { text("▲ more", NSPoint(x: panel.maxX - 9 * u, y: panel.minY + 4.0 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1)) }
+        if first + shown < listRows.count {
+            text("▼ more", NSPoint(x: panel.maxX - 9 * u, y: panel.maxY - 2.6 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1))
+        }
+        text("▲▼ choose   A / Enter / click again: put it on   B / Esc back      ● on now",
+             NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u), size: 0.9 * u, color: NSColor(white: 0.6, alpha: 1))
     }
     private var filmRects: [NSRect] = []
     private var ratingRect = NSRect.zero
@@ -72,15 +129,27 @@ final class MenuOverlay: NSView {
     }
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if !showingHelp && !showingFilm && !showingLenses, let i = itemRects.firstIndex(where: { $0.contains(p) }), i != selected { selected = i }
+        if !showingHelp && !showingFilm && !showingLenses && !showingList, let i = itemRects.firstIndex(where: { $0.contains(p) }), i != selected { selected = i }
     }
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if showingHelp { showingHelp = false; return }
         if showingLenses {
-            if let i = shelfRects.firstIndex(where: { $0.contains(p) }) { lensShelf = i; lensChoice = 0; return }
-            if let i = lensRects.firstIndex(where: { $0.contains(p) }) {
+            if let i = shelfRects.firstIndex(where: { $0.contains(p) }) {
+                lensShelf = i
+                lensChoice = onFilterShelf ? mountedFilter : 0
+                return
+            }
+            if let k = lensRects.firstIndex(where: { $0.contains(p) }) {
+                let i = lensRowFirst + k
                 if i == lensChoice { mountLens() } else { lensChoice = i }
+            }
+            return
+        }
+        if showingList {
+            if let k = listRects.firstIndex(where: { $0.contains(p) }) {
+                let i = listRowFirst + k
+                if i == listChoice { onChooseList?(i) } else { listChoice = i }
             }
             return
         }
@@ -167,6 +236,7 @@ final class MenuOverlay: NSView {
         if showingHelp { drawHelp(u); return }
         if showingFilm { drawFilm(u); return }
         if showingLenses { drawLenses(u); return }
+        if showingList { drawList(u); return }
         // The whole list fits the window, however many items there are.
         u = min(u, bounds.height * 0.92 / (CGFloat(items.count) * 2.9 + 9))
         let w = min(bounds.width * 0.5, 40 * u * 1.4), rowH = 2.9 * u
@@ -209,6 +279,7 @@ final class MenuOverlay: NSView {
             ("fire the shutter", "bottom (A)", "left click"),
             ("depth-of-field preview", "hold right (B)", "hold right click"),
             ("camera bag (change lens)", "left (X)", "B, or 1 - 9 in the collection"),
+            ("lens filter (the bag's Filters shelf)", "menu", "V"),
             ("load film (stock, push / pull)", "tap top (Y)", "R"),
             ("tilt / shift the lens", "hold Y + right stick", "hold M + arrows"),
             ("square the lens up again", "hold Y + click R3", "N"),
@@ -219,6 +290,7 @@ final class MenuOverlay: NSView {
             ("back to the camera's view", "right (B)", "0  or  `"),
             ("add a light (you fly it)", "left (X)", "F"),
             ("change the head", "top (Y)", "T"),
+            ("gel on the light", "menu", "C"),
             ("flood / spot", "L2 / R2", "mouse wheel"),
             ("dimmer (half stops)", "d-pad ▲ ▼", "-  ="),
             ("remove the light you fly", "via the menu", "Backspace"),
@@ -240,10 +312,11 @@ final class MenuOverlay: NSView {
 
     /// The camera bag: collections across the top, their lenses below.
     private func drawLenses(_ u: CGFloat) {
-        let shelf = lensCollections[lensShelf]
+        let shelfNames = lensCollections.map(\.name) + ["Filters"]
         let rowH = 3.3 * u
         let w = min(bounds.width * 0.86, 84 * u)
-        let h = CGFloat(max(shelf.lenses.count, 8)) * rowH + 15 * u
+        let rowsShown = onFilterShelf ? 9 : max(lensCollections[lensShelf].lenses.count, 8)
+        let h = CGFloat(rowsShown) * rowH + 15 * u
         let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
         NSColor(white: 0.08, alpha: 0.96).setFill()
         NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).fill()
@@ -257,21 +330,27 @@ final class MenuOverlay: NSView {
             return NSAttributedString(string: name, attributes: attrs).size().width + 2 * size / 1.05
         }
         let room = panel.maxX - 1.5 * u - x
-        let natural = lensCollections.reduce(0) { $0 + tabWidth($1.name, 1.05 * u) + 0.6 * u }
+        let natural = shelfNames.reduce(0) { $0 + tabWidth($1, 1.05 * u) + 0.6 * u }
         let fit = min(1, room / natural)
         let ts = 1.05 * u * fit
-        for (i, c) in lensCollections.enumerated() {
-            let tw = tabWidth(c.name, ts)
+        for (i, name) in shelfNames.enumerated() {
+            let tw = tabWidth(name, ts)
             let r = NSRect(x: x, y: panel.minY + 1.2 * u, width: tw, height: 2.2 * u)
             shelfRects.append(r)
             if i == lensShelf {
                 amber.withAlphaComponent(0.25).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 0.4 * u, yRadius: 0.4 * u).fill()
             }
-            text(c.name, NSPoint(x: r.minX + ts / 1.05, y: r.minY + 0.35 * u + (1.05 * u - ts) / 2), size: ts,
+            text(name, NSPoint(x: r.minX + ts / 1.05, y: r.minY + 0.35 * u + (1.05 * u - ts) / 2), size: ts,
                  color: i == lensShelf ? amber : NSColor(white: 0.7, alpha: 1), weight: .semibold)
             x += tw + 0.6 * u * fit
         }
+        if onFilterShelf {
+            drawFilterRows(panel, w: w, rowH: rowH, shown: rowsShown, u: u)
+            return
+        }
+        let shelf = lensCollections[lensShelf]
+        lensRowFirst = 0
         text(shelf.about, NSPoint(x: panel.minX + 2 * u, y: panel.minY + 4.0 * u), size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
         lensRects = []
         let before = lensCollections.prefix(lensShelf).reduce(0) { $0 + $1.lenses.count }
@@ -309,6 +388,42 @@ final class MenuOverlay: NSView {
                 text(how, NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 4.2 * u), size: 0.9 * u, color: amber)
             }
         }
+    }
+
+    /// The bag's filter shelf: what screws on the front (or drops in at the back).
+    private func drawFilterRows(_ panel: NSRect, w: CGFloat, rowH: CGFloat, shown: Int, u: CGFloat) {
+        let n = lensFilters.count
+        let first = max(0, min(n - shown, lensChoice - shown / 2))
+        lensRowFirst = first
+        let rearOnly = !filterFits(lensFilters.firstIndex { $0.hasEffect } ?? 0)
+        text(rearOnly ? "this lens takes filters at the back: colour and ND only, no effect filters"
+                      : "on the front of the lens: the finder, the meter and the film all see through it",
+             NSPoint(x: panel.minX + 2 * u, y: panel.minY + 4.0 * u), size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
+        lensRects = []
+        for k in 0..<min(shown, n) {
+            let i = first + k
+            let f = lensFilters[i]
+            let fits = filterFits(i)
+            let r = NSRect(x: panel.minX + u, y: panel.minY + 6.2 * u + CGFloat(k) * rowH, width: w - 2 * u, height: rowH - 0.4 * u)
+            lensRects.append(r)
+            if i == lensChoice {
+                amber.withAlphaComponent(0.18).setFill()
+                NSBezierPath(roundedRect: r, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
+            }
+            let dim = NSColor(white: 0.4, alpha: 1)
+            text((i == lensChoice ? "▶ " : "  ") + f.name + (i == mountedFilter ? "  ●" : ""), NSPoint(x: r.minX + u, y: r.minY + 0.4 * u),
+                 size: 1.2 * u, color: !fits ? dim : (i == lensChoice ? amber : .white))
+            let loss = f.stops < 0.05 ? "no light lost" : String(format: "%.1f stops", f.stops)
+            text(fits ? "\(f.group) · \(loss)" : "\(f.group) · not on this lens", NSPoint(x: r.minX + w * 0.5, y: r.minY + 0.55 * u),
+                 size: 0.95 * u, color: fits ? NSColor(white: 0.72, alpha: 1) : dim)
+            text(f.about, NSPoint(x: r.minX + 3 * u, y: r.minY + 1.95 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1))
+        }
+        if first > 0 { text("▲ more", NSPoint(x: panel.maxX - 9 * u, y: panel.minY + 4.0 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1)) }
+        if first + shown < n {
+            text("▼ more", NSPoint(x: panel.maxX - 9 * u, y: panel.maxY - 4.2 * u), size: 0.8 * u, color: NSColor(white: 0.5, alpha: 1))
+        }
+        text("◀▶ shelf   ▲▼ filter   A / Enter / click again: put it on   B / Esc back      ● on the lens",
+             NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u), size: 0.9 * u, color: NSColor(white: 0.6, alpha: 1))
     }
 
     /// Loading a roll: the stocks in the bag, and how to rate the roll.

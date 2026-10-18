@@ -41,6 +41,12 @@ struct CameraBody {
     var framesShot = 0
     var rollNumber = 1
     var dofPreview = false
+    /// The filter on the lens (index into lensFilters; 0 = none).
+    var filterIndex = 0
+    var filter: LensFilter { lensFilters[filterIndex] }
+
+    /// Whether this lens can take that filter (rear-filter lenses: colour and ND only).
+    func fits(_ f: LensFilter) -> Bool { !(lens.rearFilter && f.hasEffect) }
     /// Lens movements: a tilt lens's tilt (degrees: x turns the focus plane
     /// across the frame, y up and down), a shift lens's shift (mm, right and up).
     var tilt = SIMD2<Float>(0, 0)
@@ -119,6 +125,8 @@ struct CameraBody {
         focusM = max(focusM, lens.minFocusM)
         tilt = .zero
         shift = .zero
+        // An effect filter cannot go on the back of a fisheye or mirror lens.
+        if !fits(filter) { filterIndex = 0 }
     }
 
     /// Tilts or shifts the lens by `v` (stick or arrows, per second, times dt),

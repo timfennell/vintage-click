@@ -404,8 +404,9 @@ final class Viewer: NSObject, MTKViewDelegate {
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(height) / 2 : 0, l.obstruction),
             Self.finderInset(width: width, height: height),
             SIMD4(l.squeeze, 0, 0, 0),
-        ]
+        ] + b.filter.optics(threshold: min(0.95, max(0.35, meterLum * 5)))
         if job.fromLight != nil {
+            o.replaceSubrange(9...11, with: lensFilters[0].optics(threshold: 1))     // no filter on a light's view
             o[5].x = 0          // no focusing aids
             o[6].x = 0          // no lens colour
             o[3].w = 0
@@ -623,6 +624,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.down) { body.changeShutter(-1) }
             if body.shutterIndex != speed { Sounds.shared.play(.shutterDial, volume: 0.7) }
             if p.contains(.x) { openLenses() }
+            if p.contains(.filters) { openFilters() }
             if p.contains(.y) { openFilm() }
             if p.contains(.l3) { changeGait(gait == Self.gaits.count - 1 ? -gait : 1) }
             body.dofPreview = s.bHeld
@@ -687,6 +689,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// same controls fly and aim it. The camera waits where you left it.
     private func lightingInput(_ s: GamepadInput.State, dt: Float) {
         let p = s.pressed
+        if p.contains(.gels) { openGels(); return }
         var plot = lighting
         let n = plot.lights.count
         if p.contains(.x) && plot.lights.count < RenderLoop.maxLights {
@@ -1013,6 +1016,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.showingHelp = false
         menu.showingFilm = false
         menu.showingLenses = false
+        menu.showingList = false
         var items: [MenuOverlay.Item] = [
             .init(title: "Back to the \(mode == .sheet ? "light table" : mode == .lighting ? "lights" : "camera")",
                   detail: "carry on where you were") { [weak self] in self?.closeMenu() },
@@ -1032,9 +1036,20 @@ final class Viewer: NSObject, MTKViewDelegate {
                 self.closeMenu()
             })
         }
+        var gelTitle = "Gels…", gelDetail = "add a light first (lighting mode)"
+        if !lighting.lights.isEmpty {
+            let k = min(lighting.selected, lighting.lights.count - 1)
+            let name: String = gels[lighting.lights[k].gel].name
+            gelTitle = "Gel on light \(k + 1): " + name
+            gelDetail = "colour correction and effect colours for the light (C in lighting)"
+        }
+        let filterTitle: String = "Lens filter: " + body.filter.name
         items += [
             .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
                 self?.openLenses() },
+            .init(title: filterTitle, detail: "in the camera bag's Filters shelf: ND, colour, star, soft and mist (V)") { [weak self] in
+                self?.openFilters() },
+            .init(title: gelTitle, detail: gelDetail) { [weak self] in self?.openGels() },
             .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") { [weak self] in
                 self?.openFilm() },
             .init(title: "Set the scale (measure)…",
@@ -1111,7 +1126,54 @@ final class Viewer: NSObject, MTKViewDelegate {
             self?.mount(i)
             self?.closeMenu()
         }
+        menu.mountedFilter = body.filterIndex
+        menu.filterFits = { [weak self] i in self.map { $0.body.fits(lensFilters[i]) } ?? true }
+        menu.onMountFilter = { [weak self] i in
+            guard let self else { return }
+            guard self.body.fits(lensFilters[i]) else {
+                self.hud?.flash("THIS LENS TAKES ONLY COLOUR AND ND FILTERS, AT THE BACK")
+                return
+            }
+            self.body.filterIndex = i
+            self.body.meterShutter(sceneLuminance: self.meterLum)
+            self.hud?.flash(i == 0 ? "FILTER OFF" : lensFilters[i].name.uppercased())
+            self.closeMenu()
+        }
         menu.showingLenses = true
+    }
+
+    /// The camera bag, open at its Filters shelf (V, or the menu).
+    func openFilters() {
+        openLenses()
+        guard let menu else { return }
+        menu.lensShelf = menu.filterShelf
+        menu.lensChoice = body.filterIndex
+    }
+
+    /// The gel book, for the light being flown (or the one chosen): C in lighting, or the menu.
+    func openGels() {
+        guard !lighting.lights.isEmpty else {
+            hud?.flash("ADD A LIGHT FIRST (LIGHTING MODE)")
+            return
+        }
+        if !menuOpen { openMenu() }
+        guard let menu else { return }
+        let k = pov ?? min(lighting.selected, lighting.lights.count - 1)
+        menu.listTitle = "GELS · LIGHT \(k + 1)"
+        menu.listAbout = "\(lighting.lights[k].kit.name): a sheet of colour in front of the lens"
+        menu.listRows = gels.map { g in
+            let stops = -log2(max(simd_dot(g.transmission, SIMD3<Float>(0.2126, 0.7152, 0.0722)), 1e-4))
+            return (g.name, g.about + (stops < 0.05 ? "" : String(format: " · %.1f stops", stops)))
+        }
+        menu.listMarked = lighting.lights[k].gel
+        menu.listChoice = lighting.lights[k].gel
+        menu.onChooseList = { [weak self] g in
+            guard let self, self.lighting.lights.indices.contains(k) else { return }
+            self.lighting.lights[k].gel = g
+            self.hud?.flash(g == 0 ? "GEL OFF" : gels[g].name.uppercased())
+            self.closeMenu()
+        }
+        menu.showingList = true
     }
 
     private var movementLabel: String {
@@ -1197,6 +1259,16 @@ final class Viewer: NSObject, MTKViewDelegate {
             filmStickX = x
             if p.contains(.a) { menu.mountLens() }
             if p.contains(.b) || p.contains(.menu) { menu.showingLenses = false }
+            return
+        }
+        if menu.showingList {
+            let y = s.move.y + s.look.y
+            if abs(y) > 0.5 && abs(menuStick) <= 0.5 { menu.moveList(y > 0 ? -1 : 1) }
+            menuStick = y
+            if p.contains(.up) { menu.moveList(-1) }
+            if p.contains(.down) { menu.moveList(1) }
+            if p.contains(.a) { menu.onChooseList?(menu.listChoice) }
+            if p.contains(.b) || p.contains(.menu) { menu.showingList = false }
             return
         }
         if menu.showingFilm {
@@ -1303,7 +1375,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         }
         print(String(format: "Developed frame %d in %.1f s", job.frameNumber, seconds))
         let meta: [String: Any] = [
-            "lens": b.lens.name, "lens_inspired_by": b.lens.inspiredBy,
+            "lens": b.lens.name, "lens_inspired_by": b.lens.inspiredBy, "filter": b.filter.name,
+            "filter_stops": b.filter.stops,
             "aperture": b.takingAperture, "shutter": "1/\(b.shutter.label)",
             "film": b.stock.name, "iso": b.stock.iso, "rated_ei": b.ratedEI, "push": b.push, "focus_m": b.focusM,
             "exposure_stops": b.exposureStops, "reciprocity_loss_stops": b.reciprocityLoss,
@@ -1340,7 +1413,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let b = body
         var i = ViewfinderHUD.Info()
         let g = Self.gaits[gait]
-        i.lens = b.lens.name + "  ·  " + (g.metres < 0.1 ? String(format: "%@ %.0f mm/s", g.name, g.metres * 1000)
+        i.lens = b.lens.name + (b.filterIndex == 0 ? "" : "  +  " + b.filter.name) + "  ·  " + (g.metres < 0.1 ? String(format: "%@ %.0f mm/s", g.name, g.metres * 1000)
                                            : String(format: "%@ %.1f m/s", g.name, g.metres))
         i.aperture = String(format: b.takingAperture < 10 ? "%.1f" : "%.0f", b.takingAperture)
         i.shutter = b.shutter.seconds >= 1 ? "\(b.shutter.label)\"" : b.shutter.label
@@ -1367,8 +1440,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         if mode == .lighting {
             var lines = lighting.lights.enumerated().map { k, l -> String in
                 let mark = k == pov ? "◉" : " "
-                return String(format: "%@ %d %@  beam %.0f°  %@", mark, k + 1, l.kit.name, l.beamAngle,
-                              l.dimmerStops == 0 ? "full" : String(format: "%+.1f stop", l.dimmerStops))
+                return String(format: "%@ %d %@  beam %.0f°  %@%@", mark, k + 1, l.kit.name, l.beamAngle,
+                              l.dimmerStops == 0 ? "full" : String(format: "%+.1f stop", l.dimmerStops),
+                              l.gel == 0 ? "" : "  · " + gels[l.gel].name)
             }
             lines.append(String(format: "House lights: %@ (%.2f%%)   ·   next light: %@", lighting.ambientName,
                                 lighting.ambient * 100, lightKit[lighting.kitChoice].name))
