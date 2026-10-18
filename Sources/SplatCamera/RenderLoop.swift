@@ -59,7 +59,9 @@ final class RenderLoop {
     let device: MTLDevice
     let finderSize: (w: Int, h: Int)
     let photoSize: (w: Int, h: Int)
-    let background: SIMD4<Float>
+    /// Display rgb behind the scan; w = 2 for a place, where nothing should
+    /// show through (see frame_rgb in Shaders.swift).
+    var background: SIMD4<Float>
 
     private let queue: MTLCommandQueue
     private let accumulatePSO: MTLComputePipelineState

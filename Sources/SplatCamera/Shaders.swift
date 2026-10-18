@@ -57,7 +57,16 @@ uint idx(uint2 p, constant float4* O) { return p.y * uint(O[0].x) + p.x; }
 float3 frame_rgb(device const float* f, uint2 p, constant float4* O) {
     uint n = uint(O[0].x * O[0].y), i = idx(p, O);
     float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
-    return c + f[3 * n + i] * O[4].rgb;
+    float t = f[3 * n + i];
+    // In a place (O[4].w = 2) the scan surrounds you: what shows through is
+    // the blend's leak, not a background. Blurred splats over each other
+    // never add back up to solid (a single layer leaks about a third), so
+    // scale back up to full cover; only an all-but-empty pixel shows the dark.
+    if (O[4].w > 1.5) {
+        float keep = smoothstep(0.85, 0.97, t);
+        return mix(c / max(1 - t, 0.03), c + t * O[4].rgb, keep);
+    }
+    return c + t * O[4].rgb;
 }
 
 // Distance along the view axis in metres (far away where nothing was hit).

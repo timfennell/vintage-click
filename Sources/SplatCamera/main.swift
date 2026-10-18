@@ -234,6 +234,7 @@ func configureSession() {
     if noShadows { viewer.loop.shadowsOn = false }
     // Places are scanned in their own light; objects on the rig are lit from the camera.
     viewer.loop.daylightScan = inside || args.contains("--daylight-scan")
+    viewer.loop.background.w = inside ? 2 : 1
     args.removeAll { $0 == "--daylight-scan" }
     if let h = house { viewer.lighting.setHouseLights(h) }
     if lightingMode || flyLight != nil { viewer.startLighting() }
