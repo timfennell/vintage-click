@@ -222,8 +222,9 @@ float3 frame_lin_smooth(device const float* f, float2 p, constant float4* O) {
 float3 prism_sample(device const float* f, float2 p, float2 shift, float z, constant float4* O) {
     float2 q = p + shift;
     float zq = frame_z(f, clamp_px(int2(q), O), O);
-    if (zq < z * 0.85) q = p;
-    return frame_lin_smooth(f, q, O);
+    // Eased, not switched: a hard either/or carved sharp edges into soft blur.
+    float keep = smoothstep(z * 0.7, z * 0.9, zq);
+    return mix(frame_lin_smooth(f, p, O), frame_lin_smooth(f, q, O), keep);
 }
 
 // The focusing screen, always: the lens's image (its depth of field, light
@@ -286,8 +287,12 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     if (r < R) {
         // Split image: each half shows the image displaced by its own defocus.
         float side = p.y < c.y ? 1 : -1;
-        float z = prism_depth(f, p, 1.5, O);
-        float shift = coc_px(z, O) * 0.6 * side;
+        // One depth for each half, read across it: the wedge moves its half as
+        // one (per-pixel depths jump about in blur and tore seams through it).
+        float z = prism_depth(f, float2(c.x, c.y - side * R * 0.5), R * 0.18, O);
+        // Displacement follows defocus but levels off (a wedge bends light only
+        // so far): badly out of focus the halves stay apart, not flung away.
+        float shift = clamp(coc_px(z, O) * 0.6, -R * 0.45, R * 0.45) * side;
         col = prism_sample(f, p, float2(shift, 0), z, O);
         // A prism needs a fast lens: it blacks out half when stopped down.
         float dark = saturate((O[2].y - 4.0) / 3.0);
@@ -303,8 +308,12 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
         float a = (floor(hash(uint2(g + 4096), 23) * 6) + 0.5) * M_PI_F / 3;
         float2 centre = (g + 0.5) * cell;
         float z = prism_depth(f, centre, cell * 0.5, O);
-        float shift = coc_px(z, O) * 0.5;
+        float coc = abs(coc_px(z, O));
+        // Each facet moves its bit of image a little way (a few facets at most):
+        // far out of focus the collar shimmers finely and dims, never scatters.
+        float shift = min(coc * 0.5, cell * 2.5);
         col = prism_sample(f, p, shift * float2(cos(a), sin(a)), z, O);
+        col *= 1 - 0.35 * smoothstep(cell * 2, cell * 10, coc);
     } else {
         col = frame_lin_ca(f, p, O);
         // Fine matte: the ground glass's own tooth, still while the image moves.

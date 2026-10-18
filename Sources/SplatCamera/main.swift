@@ -285,6 +285,14 @@ func configureSession() {
         k.scale = scale
         k.remember(path)
     }
+    viewer.onSceneLight = { ev in
+        // Remember the light with the file.
+        let path = currentScene?.path ?? cliPath
+        guard let path else { return }
+        var k = SceneKind.remembered(path) ?? SceneKind(place: inside, ev: ev)
+        k.ev = ev
+        k.remember(path)
+    }
     viewer.onSwitchKind = {
         // Remember the other answer for this file and reopen it that way.
         let path = currentScene?.path ?? cliPath
@@ -292,7 +300,7 @@ func configureSession() {
         var k = SceneKind.remembered(path) ?? SceneKind(place: inside, ev: sceneEV ?? 12)
         k.place.toggle()
         k.scale = nil          // a measured size belonged to the other reading
-        k.ev = k.place ? max(k.ev, 15) : 12
+        k.ev = k.place ? 13 : 12
         k.remember(path)
         delegate.relaunch(with: path)
     }
@@ -354,10 +362,11 @@ struct SceneKind {
     /// A guess from the scan's shape, from a quick sample of the file: a place
     /// is dominated by its ground (flat: its thinnest spread a small share of
     /// its widest; the skate park 0.06), an object on the rig is a rounder blob
-    /// (the bee 0.26). Places get bright sun, objects shade.
+    /// (the bee 0.26). Places get bright overcast (scans are mostly made in
+    /// soft light), objects shade; the game menu's Scene light changes it.
     static func guess(_ path: String) -> SceneKind {
         guard let flat = flatness(path) else { return SceneKind(place: false, ev: 12) }
-        return flat < 0.15 ? SceneKind(place: true, ev: 15) : SceneKind(place: false, ev: 12)
+        return flat < 0.15 ? SceneKind(place: true, ev: 13) : SceneKind(place: false, ev: 12)
     }
 
     private static func flatness(_ path: String) -> Float? {
@@ -422,8 +431,12 @@ struct SceneKind {
     }
 }
 
-private let evChoices: [(String, Float)] = [("Indoors / room light (EV 9)", 9), ("Shade or overcast (EV 12)", 12),
-                                            ("Bright sun (EV 15)", 15)]
+/// The light a scan was made in, as a photographer would judge it (EV at ISO 100).
+let sceneLightChoices: [(String, Float)] = [
+    ("Indoors, room light (EV 9)", 9), ("Indoors by big windows (EV 10)", 10), ("Deep shade or dusk (EV 11)", 11), ("Open shade or overcast (EV 12)", 12),
+    ("Bright overcast, dappled shade (EV 13)", 13), ("Hazy sun (EV 14)", 14), ("Bright sun (EV 15)", 15),
+]
+private let evChoices = sceneLightChoices
 
 /// The two questions, as popups for a panel or an alert.
 /// The popups, how to read them, and how to set them (for a newly chosen file).

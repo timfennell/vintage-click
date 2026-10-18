@@ -60,6 +60,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// The scan's kind, and switching it (reopens the scene the other way).
     var sceneIsPlace = false
     var onSwitchKind: (() -> Void)?
+    /// The scan's light changed in the menu: remember it with the file.
+    var onSceneLight: ((Float) -> Void)?
     private var menuOpen = false
     private var menuStick: Float = 0
     private var focusTurned: Float = 0
@@ -1050,6 +1052,18 @@ final class Viewer: NSObject, MTKViewDelegate {
             },
             .init(title: "Controls", detail: "every button, pad and keyboard") { [weak self] in
                 self?.menu?.showingHelp = true },
+            .init(title: "Scene light: " + (sceneLightChoices.first { $0.1 == body.sceneEV }?.0
+                                            ?? String(format: "EV %.0f", body.sceneEV)),
+                  detail: "the light the scan was made in: what the meter reads (select to change)") { [weak self] in
+                guard let self else { return }
+                let i = sceneLightChoices.firstIndex { $0.1 == self.body.sceneEV } ?? -1
+                let next = sceneLightChoices[(i + 1) % sceneLightChoices.count].1
+                self.body.sceneEV = next
+                self.onSceneLight?(next)
+                let keep = self.menu?.selected ?? 0
+                self.openMenu()
+                self.menu?.selected = keep
+            },
             .init(title: sceneIsPlace ? "Treat this scan as an object" : "Treat this scan as a place",
                   detail: sceneIsPlace ? "now: a place to stand in, about 30 m across — wrong size? switch"
                                        : "now: an object about 60 cm across — wrong size? switch") { [weak self] in
