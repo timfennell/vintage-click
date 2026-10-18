@@ -19,6 +19,8 @@ import simd
 /// Light table: the mouse is the loupe · wheel its power · click marks a keeper ·
 ///   arrows choose · Q / E roll · Tab or Esc back
 final class GamepadInput {
+    /// VC_PADLOG=1: print each button press (for checking a controller's mapping).
+    static let logPresses = ProcessInfo.processInfo.environment["VC_PADLOG"] != nil
     struct State {
         var move = SIMD2<Float>(0, 0)   // left stick
         var look = SIMD2<Float>(0, 0)   // right stick
@@ -46,6 +48,7 @@ final class GamepadInput {
     }
 
     private var held: Set<Button> = []
+    private var lastRaw: Set<String> = []
     /// The pad's top button: a tap loads film; held, the right stick tilts or
     /// shifts the lens (then letting go loads nothing).
     private var padYDown = false, padYMoved = false
@@ -75,8 +78,13 @@ final class GamepadInput {
         GCController.shouldMonitorBackgroundEvents = true
         NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil,
                                                queue: .main) { [weak self] n in
-            self?.controllerName = (n.object as? GCController)?.vendorName ?? "controller"
+            let c = n.object as? GCController
+            self?.controllerName = c?.vendorName ?? "controller"
             print("Controller connected: \(self?.controllerName ?? "?")")
+            if let c {
+                fputs("  buttons: " + c.physicalInputProfile.buttons.keys.sorted().joined(separator: ", ") + "\n", stderr)
+                fputs("  stick clicks: L3 \(c.extendedGamepad?.leftThumbstickButton != nil), R3 \(c.extendedGamepad?.rightThumbstickButton != nil)\n", stderr)
+            }
         }
         NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil,
                                                queue: .main) { [weak self] _ in
@@ -143,6 +151,16 @@ final class GamepadInput {
                 (pad.rightThumbstickButton?.isPressed == true, .r3),
             ]
             for (down, b) in map where down { now.insert(b) }
+            // Some pads (an 8BitDo Pro 2, in some of its modes) report the
+            // stick clicks as the back buttons: they count as L3 and R3 too.
+            if let all = GCController.controllers().first(where: { $0.extendedGamepad === pad })?.physicalInputProfile.buttons {
+                for (name, b) in [("Back Left Button 0", Button.l3), ("Back Right Button 0", Button.r3)]
+                where all[name]?.isPressed == true { now.insert(b) }
+            }
+            if Self.logPresses {
+                let raw = Set(GCController.current?.physicalInputProfile.buttons.filter { $0.value.isPressed }.map(\.key) ?? [])
+                if raw != lastRaw { if !raw.isEmpty { fputs("raw: \(raw.sorted())\n", stderr) }; lastRaw = raw }
+            }
             if keyMode == .camera {
                 now.remove(.y)
                 let y = pad.buttonY.isPressed
@@ -233,6 +251,7 @@ final class GamepadInput {
         s.move = simd_clamp(s.move, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
         s.movement = simd_clamp(s.movement, SIMD2<Float>(repeating: -1), SIMD2<Float>(repeating: 1))
         s.pressed = now.subtracting(held)
+        if Self.logPresses, !s.pressed.isEmpty { fputs("pressed: \(s.pressed.map { "\($0)" }.sorted())\n", stderr) }
         held = now
         return s
     }

@@ -794,7 +794,9 @@ final class ContactSheetView: NSView {
         let mid = CIVector(x: CGFloat(side) / 2, y: CGFloat(side) / 2)
         let half = CGFloat(side) / 2
         // Pincushion: the rim magnified more than the middle.
-        let bent = img.applyingFilter("CIBumpDistortion", parameters: [
+        // (Edges clamped: a bend or a colour's scaled copy reaching past the
+        // magnified view must find more of it, not the table behind the loupe.)
+        let bent = img.clampedToExtent().applyingFilter("CIBumpDistortion", parameters: [
             kCIInputCenterKey: mid, kCIInputRadiusKey: half * 1.15, kCIInputScaleKey: -0.14,
         ]).cropped(to: img.extent)
         // Lateral colour: red a touch bigger than green, blue a touch smaller.
@@ -802,7 +804,7 @@ final class ContactSheetView: NSView {
         // copies raised the brightness and contrast).
         func scaled(_ k: CGFloat) -> CIImage {
             let move = CGAffineTransform(translationX: half, y: half).scaledBy(x: k, y: k).translatedBy(x: -half, y: -half)
-            return bent.transformed(by: move).cropped(to: img.extent)
+            return bent.clampedToExtent().transformed(by: move).cropped(to: img.extent)
         }
         guard let fringed = Self.channels?.apply(extent: img.extent, arguments: [scaled(1.010), bent, scaled(0.990)])
         else { return nil }

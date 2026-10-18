@@ -342,9 +342,9 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
 
 // The meter, seen through the eyepiece. Its scale is light projected beside
 // the image (as framelines are): soft, with a faint bloom and colour
-// fringes, as bright as the light the scene sends in. The needle is a dark
-// wire in front, its shadow faint on the scale. M[0] = the scale's texture
-// rect (px), M[1] = needle pivot and tip (px), M[2] = (on, u px, -, -).
+// fringes, as bright as the light the scene sends in. The needle is lit red.
+// M[0] = the scale's texture rect (px), M[1] = needle pivot and tip (px),
+// M[2] = (on, u px, -, -).
 float3 meter_light(float3 outc, float2 pos, device const float* f, constant float4* O,
                    constant float4* M, texture2d<float> plate) {
     constexpr sampler sm(filter::linear, address::clamp_to_zero);
@@ -352,7 +352,6 @@ float3 meter_light(float3 outc, float2 pos, device const float* f, constant floa
     float4 R = M[0];
     float3 lin = to_lin(outc);
     float2 lo = R.xy - 2.5 * u, hi = R.xy + R.zw + 2.5 * u;
-    float shade = 0;
     if (all(pos > lo) && all(pos < hi)) {
         // How much light reaches the scale: what the scene sends to the screen's edge.
         float L = 0;
@@ -371,19 +370,18 @@ float3 meter_light(float3 outc, float2 pos, device const float* f, constant floa
         }
         float3 light = to_lin(saturate(core / 12)) + 0.35 * to_lin(saturate(glow / 12));
         lin += light * I;
-        shade = plate.sample(sm, (pos - R.xy) / R.zw).a;
     }
-    // The needle, and its shadow on the scale.
+    // The needle: lit red, as the LEDs are, a little out of focus, with a
+    // soft glow round it (it lights itself, so it shows in any light).
     float2 a = M[1].xy, b = M[1].zw;
     float2 ab = b - a;
     float t = saturate(dot(pos - a, ab) / dot(ab, ab));
     float d = length(pos - (a + t * ab));
-    float w = max(0.7, 0.12 * u);
-    lin *= 1 - 0.85 * (1 - smoothstep(w - 1.6, w + 1.6, d));     // a little out of focus
-    float2 off = float2(0.25, 0.3) * u;
-    float t2 = saturate(dot(pos - off - a, ab) / dot(ab, ab));
-    float d2 = length(pos - off - (a + t2 * ab));
-    lin *= 1 - 0.3 * shade * (1 - smoothstep(w, w + 0.5 * u, d2));
+    float w = max(0.7, 0.11 * u);
+    float core = 1 - smoothstep(w - 1.2, w + 1.2, d);
+    float glow = exp(-d * d / (0.5 * u * u));
+    float3 red = float3(1.0, 0.10, 0.06);
+    lin = mix(lin, red * 1.6, core * 0.9) + red * glow * 0.12;
     return to_srgb(lin);
 }
 

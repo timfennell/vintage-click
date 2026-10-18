@@ -1,4 +1,5 @@
 import AppKit
+import GameController
 import CSpirula
 import Foundation
 import UniformTypeIdentifiers
