@@ -79,8 +79,36 @@ struct CameraBody {
     var exposureStops: Float {
         let n = takingAperture, t = shutter.seconds
         let ev = log2(n * n / t) - log2(ratedEI / 100)
-        return sceneEV + calibration - ev
+        return sceneEV + calibration - ev - closeFocusLoss
     }
+
+    /// The lens's magnification at the distance it is focused to (thin lens,
+    /// m = f / (s - f), scaled to the lens's published closest-focus figure).
+    var magnification: Float {
+        let f = lens.focalMM / 1000
+        let simple = f / max(focusM - f, f * 0.05)
+        // A macro extends further than a simple lens as it nears its closest
+        // focus: blend toward its published figure there, by how close it is
+        // (in dioptres, squared: far off it is the simple lens).
+        guard lens.maxMagnification > 0 else { return simple }
+        let atClosest = f / max(lens.minFocusM - f, f * 0.05)
+        let k = lens.maxMagnification / atClosest
+        let t = min(1, lens.minFocusM / max(focusM, lens.minFocusM))
+        return simple * (1 + (k - 1) * t * t)
+    }
+
+    /// Focal length in pixels as focused: the view narrows focusing close as
+    /// the lens moves out (breathing), or widens for an internal-focus lens.
+    func focalPixels(width: Int, height: Int) -> Float {
+        lens.focalPixels(width: width, height: height) * max(0.5, 1 + lens.breathing * magnification)
+    }
+
+    /// Light lost focusing close (the bellows factor): the lens moves away
+    /// from the film, so the effective aperture is N (1 + m). Barely anything
+    /// far off; a 50 mm at 0.45 m about a third of a stop; a macro at 1:1
+    /// two stops, at 2:1 three. Behind the lens: the finder dims and the meter
+    /// sees it, as on the real camera.
+    var closeFocusLoss: Float { 2 * log2(1 + magnification) }
 
     /// Reciprocity failure: past about 1/4 s film answers less than the time
     /// suggests (black-and-white about a stop down at 1 s, colour about half).

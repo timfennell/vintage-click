@@ -36,6 +36,12 @@ struct Lens {
     var curvatureRadial: Float = 0
     var curvatureTangential: Float = 0
     var movement = Movement.none
+    /// Magnification at the closest focus, as published (0 = what a simple
+    /// lens of this focal length gives there; macros are set: 1:2, 1:1).
+    var maxMagnification: Float = 0
+    /// How the view changes focusing close: 1 = the whole lens moves out (the
+    /// picture grows by 1 + m); an internal-focus lens shortens instead (< 0).
+    var breathing: Float = 1
     /// No front thread (a bulging or huge front element): filters go in at the
     /// back (a fisheye's turret, a mirror lens's drop-in), colour and ND only.
     var rearFilter = false
@@ -134,16 +140,16 @@ private let bokehMonsters: [Lens] = [
 private let macroLenses: [Lens] = [
     Lens(name: "Ohi Micro-Kor 55mm f/3.5", inspiredBy: "1:2 macro for close-ups",
          focalMM: 55, maxAperture: 3.5, minAperture: 32, blades: 6, bladeRotation: 0.3,
-         catsEye: 0.15, soapBubble: 0, vignette: 0.20, minFocusM: 0.24, lateralCA: 0.0003, axialCA: 0.01),
+         catsEye: 0.15, soapBubble: 0, vignette: 0.20, minFocusM: 0.24, lateralCA: 0.0003, axialCA: 0.01, maxMagnification: 0.5),
     Lens(name: "Ohi Micro-Kor 60mm f/2.8", inspiredBy: "life-size (1:1) 60 mm macro",
          focalMM: 60, maxAperture: 2.8, minAperture: 32, blades: 7, bladeRotation: 0.2,
-         catsEye: 0.15, soapBubble: 0, vignette: 0.2, minFocusM: 0.219, lateralCA: 0.0003, axialCA: 0.012),
+         catsEye: 0.15, soapBubble: 0, vignette: 0.2, minFocusM: 0.219, lateralCA: 0.0003, axialCA: 0.012, maxMagnification: 1.0),
     Lens(name: "Ohi Micro-Kor 105mm f/4", inspiredBy: "1:2 105 mm macro, more working distance",
          focalMM: 105, maxAperture: 4, minAperture: 32, blades: 7, bladeRotation: 0.1,
-         catsEye: 0.12, soapBubble: 0, vignette: 0.15, minFocusM: 0.47, lateralCA: 0.0003, axialCA: 0.01),
+         catsEye: 0.12, soapBubble: 0, vignette: 0.15, minFocusM: 0.47, lateralCA: 0.0003, axialCA: 0.01, maxMagnification: 0.5),
     Lens(name: "Ohi Micro-Kor 200mm f/4 IF", inspiredBy: "the long macro: shy insects from afar",
          focalMM: 200, maxAperture: 4, minAperture: 32, blades: 9, bladeRotation: 0,
-         catsEye: 0.1, soapBubble: 0, vignette: 0.15, minFocusM: 0.71, lateralCA: 0.0002, axialCA: 0.008),
+         catsEye: 0.1, soapBubble: 0, vignette: 0.15, minFocusM: 0.71, lateralCA: 0.0002, axialCA: 0.008, maxMagnification: 0.5, breathing: -0.35),
 ]
 
 private let exoticLenses: [Lens] = [
@@ -195,7 +201,7 @@ private let screwMount: [Lens] = [
          catsEye: 0.25, soapBubble: 0, vignette: 0.4, minFocusM: 1.5, lateralCA: 0.0012, axialCA: 0.02),
     Lens(name: "Itabashi Macro-Takuma 50mm f/4 SC", inspiredBy: "the screw-mount 1:2 macro fifty",
          focalMM: 50, maxAperture: 4, minAperture: 22, blades: 6, bladeRotation: 0,
-         catsEye: 0.2, soapBubble: 0, vignette: 0.35, minFocusM: 0.23, lateralCA: 0.0008, axialCA: 0.01),
+         catsEye: 0.2, soapBubble: 0, vignette: 0.35, minFocusM: 0.23, lateralCA: 0.0008, axialCA: 0.01, maxMagnification: 0.5),
 ]
 
 private let toysAndMods: [Lens] = [

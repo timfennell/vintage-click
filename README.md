@@ -92,6 +92,12 @@ bubble or smooth bokeh, spherical aberration, field curvature, and lateral and
 axial colour, all made by the renderer: a photo is the sum of many renders
 through different parts of the lens's aperture.
 
+Focusing close behaves as it does on a real lens: the lens moves out from
+the film, so it passes less light (the bellows factor, (1 + magnification)²:
+a third of a stop for a 50 mm at its closest, two stops for a macro at 1:1)
+and the view narrows (focus breathing; an internal-focus lens widens a little
+instead). The finder dims and the through-the-lens meter allows for it.
+
 **Tilt and shift:** with a tilt or shift lens mounted, hold **Y + right stick**
 (or **M + arrows**) to move it; **Y + click the right stick** (or **N**) squares
 it up again.

@@ -434,7 +434,7 @@ final class RenderLoop {
         let b = e.body
         let (w, h) = e.size
         let n = b.takingAperture
-        let fx = b.lens.focalPixels(width: w, height: h)
+        let fx = b.focalPixels(width: w, height: h)
         let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
         relight(e.lighting, eye: e.camera.position, body: b, quality: .photo)
         // Axial colour: with it, each sub-pupil carries one channel, focused

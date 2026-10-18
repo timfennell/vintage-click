@@ -311,7 +311,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                 view: lightCam.viewMatrix, position: lightCam.position, fx: lightCam.focalPixels(width: width),
                 lens: nil, body: body, lighting: lighting, fromLight: pov))
         } else {
-            let fx = body.lens.focalPixels(width: width, height: height)
+            let fx = body.focalPixels(width: width, height: height)
             let carried = carriedCamera
             let fisheye = body.lens.isFisheye
             loop.requestFinder(FinderJob(
@@ -399,7 +399,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             SIMD4(l.catsEye, l.soapBubble, l.bladeRotation, l.vignette),
             loop.background,
             // Stopping down for the depth-of-field preview darkens the screen.
-            SIMD4(Float(height) * 0.065, pow(l.maxAperture / b.viewingAperture, 2), Float(seed),
+            SIMD4(Float(height) * 0.065, pow(l.maxAperture / b.viewingAperture, 2) * exp2(-b.closeFocusLoss), Float(seed),
                   b.exposureStops),
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(height) / 2 : 0, l.obstruction),
             Self.finderInset(width: width, height: height),
@@ -1431,6 +1431,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             "aperture": b.takingAperture, "shutter": "1/\(b.shutter.label)",
             "film": b.stock.name, "iso": b.stock.iso, "rated_ei": b.ratedEI, "push": b.push, "focus_m": b.focusM,
             "exposure_stops": b.exposureStops, "reciprocity_loss_stops": b.reciprocityLoss,
+            "magnification": b.magnification, "close_focus_loss_stops": b.closeFocusLoss,
             "scene_ev": b.sceneEV, "mid_grey_calibration_stops": b.calibration, "sub_pupils": job.cells.count,
             "metres_per_unit": b.metresPerUnit, "width": image.width, "height": image.height,
             "negative": job.negative == nil ? "" : url.deletingPathExtension().appendingPathExtension("dng").lastPathComponent,
