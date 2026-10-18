@@ -379,9 +379,13 @@ float3 meter_light(float3 outc, float2 pos, device const float* f, constant floa
     float d = length(pos - (a + t * ab));
     float w = max(0.7, 0.11 * u);
     float core = 1 - smoothstep(w - 1.2, w + 1.2, d);
-    float glow = exp(-d * d / (0.5 * u * u));
-    float3 red = float3(1.0, 0.10, 0.06);
-    lin = mix(lin, red * 1.6, core * 0.9) + red * glow * 0.12;
+    float glow = exp(-d * d / (0.12 * u * u));
+    // Lit only inside the frame: it fades out toward the frame's edge, where
+    // it swings in from the dark surround.
+    float edgeX = O[7].x;
+    float lit = smoothstep(edgeX, edgeX + 3.5 * u, pos.x);
+    float3 red = float3(0.9, 0.08, 0.05);
+    lin = mix(lin, red * 0.75, core * 0.75 * lit) + red * glow * 0.03 * lit;
     return to_srgb(lin);
 }
 
