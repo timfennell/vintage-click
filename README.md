@@ -1,201 +1,255 @@
 # Vintage Click
 
-(Formerly Splat Camera: rolls and sounds already kept under that name are still found.)
+A photography game for the Mac: a manual-focus 35 mm SLR from the 1970s, and
+any 3D Gaussian splat scan to walk around in. Focus on a split-prism screen,
+read a needle meter, choose a lens from a camera bag and a film stock, light
+the scene with tungsten Fresnels, and shoot a roll you only get to see on a
+light table, through a loupe.
 
-A vintage 35 mm film-camera photography game set inside 3D Gaussian splat
-scenes, for macOS. Free and open source (GPL-3.0).
+Everything the camera does comes from the render, not filters laid over it:
+depth of field, bokeh shape, swirl, tilt and shift are made by the lens model
+inside the splat renderer, and the film's grain, halation and colour come from
+the developed exposure.
 
-**Stage 1 (this spike):** a native Mac window that loads a 3DGS PLY and flies
-a camera through it with a game controller, rendered in real time by
-[Spirula Studio](https://github.com/harry7557558/spirula-studio)'s Vulkan
-rasterizer (via MoltenVK). Frames never leave the GPU: Spirula renders into
-buffers it shares with Metal (`sr_shared_frames` / `sr_render_to_frame`), and
-a Metal pass composites them on screen.
+Free and open source (GPL-3.0).
 
-Play runs at a film cadence — 24 fps by default (`--fps 18` .. `--fps 24`),
-each frame held evenly for 1/fps.
+![The viewfinder](docs/screenshots/finder.jpg)
 
-## Play
+## System requirements
 
-`./build.sh`, then copy `build/Vintage Click.app` to /Applications. Open it from Finder and it asks for
-a scan (a 3DGS `.ply`) and two things about it: whether it's an object (scanned on a rig, lit from
-the camera) or a place to stand in, and how bright its light was. The answers are remembered per
-file. You can also drop a `.ply` on the app or use **Open With**. **File > Open Scene…** switches
-scans, **File > Choose Where Rolls Are Kept…** picks the folder for developed rolls (default
-`~/Pictures/Vintage Click`), and **Help > Controls** lists the keys and pad buttons.
+- **A Mac with Apple silicon** (M1 or later). Intel Macs are not supported.
+- **macOS 15.2 (Sequoia) or later.**
+- **Memory:** 16 GB is comfortable for scans up to about 10 million splats;
+  8 GB is fine for smaller ones (1 to 3 million).
+- **Scans:** 3D Gaussian splat `.ply` files, as exported by most trainers and
+  by [SuperSplat](https://superspl.at) (position, rotation, scale, opacity and
+  spherical-harmonic colour; SH degree 1 to 3).
+- **Optional:** a game controller (Xbox, PlayStation or Switch Pro). Keyboard
+  and mouse work for everything.
 
-**Speed (M2 Pro, 3M-splat bee, nothing else on the GPU):** about 6 finder frames a second, ~150 ms
-each, nearly the same at 810x540 as at 1620x1080 and with shadows or the lens off. The cost is per
-splat (projecting, sorting, relighting 3M of them), not per pixel: level of detail and a faster
-renderer path are next.
+## Install
 
-## Build
+1. Download `Vintage-Click-macOS.zip` from the
+   [latest release](https://github.com/timfennell/vintage-click/releases/latest)
+   and unzip it.
+2. Move **Vintage Click.app** to your Applications folder.
+3. The app is not notarised by Apple, so the first time, **right-click it and
+   choose Open**, then Open again in the dialog. (Or, in Terminal:
+   `xattr -dr com.apple.quarantine "/Applications/Vintage Click.app"`.)
+4. Open it and choose a `.ply` scan. It asks whether the scan is an object
+   (made on a turntable or rig) or a place to stand in, and how bright its light
+   was; both are remembered per scan and can be changed from the menu.
 
-Needs the Command Line Tools (no Xcode) and a build of `libspirula_render.dylib`
-from the `blender-render` branch of the spirula-studio fork:
+Developed rolls are kept in `~/Pictures/Vintage Click` (menu > Where rolls are
+kept to change it), filed by day, session and roll.
 
-```bash
-SPIRULA_BUILD=~/Documents/spirula-studio-capture/build ./build.sh
-```
+## A walk through
 
-## Run
+### The viewfinder
 
-```bash
-open "build/Vintage Click.app" --args ~/Desktop/bee/bee-final.ply
-```
+You look through a ground-glass focusing screen, as on a real SLR: the image
+is shown at the lens's widest aperture (hold the depth-of-field preview to stop
+down and see it darken), with a **split prism** in the middle that breaks a
+line in two until it is in focus and a **microprism collar** that shimmers
+until it snaps clear. The finder shows the lens's own light fall-off and
+colour fringes, the screen's fine matte and fresnel rings, and a slightly
+imperfect eyepiece.
 
-Options: `--res 1620x1080` (3:2, like 35 mm), `--fps 24`, `--scale`, `--demo-lights`,
-`--lighting-mode`,
-`--ev`, `--cells`, `--lens I`, `--aperture F`, `--film I`, `--bench FRAMES`
-(scripted orbit, uncapped, prints render timings and quits; `--pinhole` for
-no lens), `--shoot out.png` (take one frame and quit).
+Exposure is set the way it was: the **shutter-speed scale** on the left is
+projected into the finder, a **meter needle** swings in from the side to the
+speed the light wants, and a green tab marks the speed you have set: match
+them. Red **seven-segment LEDs** below show aperture, shutter speed, focus
+distance and the frame counter.
 
-## The camera
+The meter is honest. Every scan is **calibrated against mid grey** when it
+loads (its average tone is brought to 18%), and **Scene light** in the menu says
+what light it was made in, from room light (EV 9) to bright sun (EV 15).
+Aperture, shutter speed and film speed then behave as on a real camera, film
+loses sensitivity on long exposures (reciprocity failure) as real film does,
+and the meter does not know about that, as real meters did not.
 
-Depth of field is made by the render, not painted on: Spirula's projection
-gives every splat the blur and shift its depth and the lens pupil imply
-(`sr_set_lens`), so occlusion and edges stay correct. The finder shows that
-render at the lens's widest aperture (hold DOF preview to stop down) on a
-focusing screen with a split-prism and microprism collar. Firing the
-shutter swings the mirror up (the finder goes black for the mirror travel
-plus the shutter time) and advances the film; the frame is then exposed and
-developed in the background at photo resolution (`--photo-res`, default
-twice the finder), so you keep shooting: one render thread alternates live
-finder frames with the next sub-pupil of the oldest frame in the darkroom.
-The finder is always the ground glass: the lens's image with its light
-fall-off and lateral colour fringes, fine matte tooth and fresnel rings.
-Exposures add axial colour too: sub-pupils carry one colour each, focused
-where that colour focuses, so bokeh edges fringe magenta and green. An exposure adds up renders
-from sub-pupils of the taking aperture (`--cells`, default 32), each
-sheared so the focus plane stays put. Each
-lens's pupil sets the bokeh: blade count, cat's-eye clipping by the barrel
-(strong on the swirly Volna), and rim-bright soap bubbles. Then the stock
-develops it: exposure from aperture, shutter and ISO against the scene's EV
-(`--ev`, default 12), a characteristic curve, colour crosstalk, halation and
-grain. Frames are filed by day, sitting and roll in the rolls folder
-(`~/Pictures/Vintage Click` unless chosen in the menu or File menu):
-`2026-10-17/09.14 Skate park/Roll 01 - Portrait 400/frame-01.png`, each with
-a JSON of how it was taken and, with Digital negative on, a
-high-dynamic-range DNG (linear light before the film, 16-bit float).
+### Lenses
 
-Scans carry no scale. When choosing a scan the app guesses from its shape
-(an object on the rig, about 60 cm, or a place to stand in, about 30 m), and
-the menu can switch it. To set it exactly: menu > Set the scale (measure):
-aim the crosshair at one end of something you know the size of and press A /
-click, then at the other end, then type its real length (2.5 m, 30 cm, 6 ft)
-or dial it on the pad. The scale is remembered with the file; `--scale`
-(metres per unit) sets it from the command line.
+![The camera bag](docs/screenshots/bag.jpg)
 
-## Lighting
+The camera bag holds about forty lenses on six shelves, each modelled on a real
+lens (with fictional maker names that hint at the originals):
 
-Lights relight the scan on the GPU (gs_render's model, made for scans lit
-from the camera): each light reads the scan's broad colour in its own
-direction for the diffuse and its higher SH bands at the half vector for the
-shine; the house lights give back a share of the scan as captured. The kit is
-1970s tungsten at 3200 K: Fresnel 650, 1K and 2K (flood to spot) and a 2K
-quartz softlight, photometrically sized, so the meter and the film react to
-them as they would (daylight stocks go warm; Tungsten 800T is balanced for
-them). Heads show as wireframes in the finder only. Each light casts shadows.
+- **Field Assignment:** the magazine photographer's primes, 20 mm to 300 mm.
+- **Screw-Mount Classics:** multi-coated M42 primes of the early 70s.
+- **Bokeh Monsters:** fast glass, from a f/0.95 "dream lens" to a defocus-control 135.
+- **Macro:** close-focusing, flat-field lenses down to life size.
+- **Exotic:** the f/0.7 satellite lens a director used to film by candlelight,
+  a 13 mm rectilinear ultra-wide, full-frame and circular fisheyes, a Petzval,
+  a mirror lens with ring bokeh, a soft-focus portrait lens.
+- **Toys & Mods:** a Lomo-style compact lens, a plastic toy lens, a Helios-type
+  58 mm with its front element reversed (a whirlpool of swirl) or with an
+  oval insert and a fishing line across the stop (oval bokeh and horizontal
+  streak flares), a bendy tilt lens, and two perspective-control shift lenses.
 
-## Seeing the pictures
+Each lens has its own aperture blades, cat's-eye vignetting toward the corners,
+bubble or smooth bokeh, spherical aberration, field curvature, and lateral and
+axial colour, all made by the renderer: a photo is the sum of many renders
+through different parts of the lens's aperture.
 
-Only on the light table (View / K): each roll laid out in strips of six,
-edge print and sprocket holes, unexposed frames black, frames still in the
-darkroom blank. Slide the loupe over it with either stick (L2/R2 for its
-power, 2-10x); it magnifies from the full-size frames. The d-pad chooses a
-frame (the loupe glides to it) and A marks it as a keeper in red grease
-pencil (kept in the roll's marks.json). Nothing pops up when the shutter fires.
+**Tilt and shift:** with a tilt or shift lens mounted, hold **Y + right stick**
+(or **M + arrows**) to move it; **Y + click the right stick** (or **N**) squares
+it up again.
 
-## Film
+### Film
 
-Load film from the menu (or the pad's top button / R): choose a stock and
-rate the roll at box speed, pulled one stop or pushed up to three. The meter
-and the ISO readout follow the rating, and the whole roll is developed for
-it: pushing raises contrast and grain, deepens shadows and adds a little fog;
-pulling softens contrast and fines the grain. The rating is in the roll's
-folder name and each frame's .json.
+![Loading film](docs/screenshots/film.jpg)
 
-## Sounds
+Seventeen stocks: slide films, colour and black-and-white negatives, cine
+film, a fast night stock, black-and-white infrared, and a false-colour
+infrared film that turns foliage crimson. Rate a roll at box speed, pull it a
+stop or push it up to three; the whole roll is developed to match, with
+contrast, grain and fog to suit. Each stock has its own curve, colour, grain
+and halation.
 
-The camera sounds are a real Nikon, recorded for the game (Resources/Sounds):
-the shutter at every speed from 1/2000 to 1 s (the recording nearest the
-speed set plays), thirteen takes of the film advance lever, the aperture
-ring, the shutter-speed dial, lens changes and loading film. Each event
-plays a random take, never the same twice running, slightly varied in
-speed and level. Menu > Camera sounds turns them on or off.
+<p>
+<img src="docs/screenshots/photo-kchrome64.jpg" width="32%" alt="Slide film">
+<img src="docs/screenshots/photo-tripan400.jpg" width="32%" alt="Black-and-white film">
+<img src="docs/screenshots/photo-aerocolour-ir.jpg" width="32%" alt="False-colour infrared film">
+</p>
 
-## The menu
+*The same bee on slide film, black-and-white and false-colour infrared, through a 60 mm and a 105 mm macro.*
 
-Esc (keyboard) or + / Menu (pad) opens the game menu: switch between the
-camera, lighting and the light table, reset the view, open another scene,
-choose where rolls are kept, quit, and see every control (Controls, also
-Help > Controls) for pad and keyboard side by side.
+### Lighting
+
+![Lighting mode](docs/screenshots/lighting.jpg)
+
+Press **L** (or R3) for lighting mode. Add 1970s tungsten heads (Fresnel 650,
+1K and 2K, and a 2K softlight), fly each one from its own point of view to aim
+it, flood or spot it, dim it, and turn the scan's own light down to night.
+Lights relight the scan and cast shadows; their beams come from traced optics
+of real Fresnel lenses, not a formula. In the finder the heads appear as
+projected wireframes.
+
+### The light table
+
+![The light table](docs/screenshots/lighttable.jpg)
+
+Pictures are never shown when you shoot. They are developed in the background
+while you keep shooting, and you see them on the light table (**Tab**, or View
+on a pad): the whole session's rolls, each cut into strips of six with real
+edge printing, under an old brass loupe with its own optics. Slide the loupe
+around, turn its knob to zoom from 2x to 10x, and mark keepers with a red
+grease pencil.
+
+Every frame is saved as a PNG with a JSON of how it was taken, and optionally as
+a high-dynamic-range linear **DNG** (menu > Digital negative) for a raw developer.
+
+### Sound
+
+The camera sounds are a real Nikon, recorded for the game: the shutter at every
+speed from 1/2000 to 1 s, the film-advance lever (thirteen takes), the aperture
+ring, the shutter-speed dial, changing lenses and loading film. Menu > Camera
+sounds turns them on or off.
+
+### The menu
+
+![The menu](docs/screenshots/menu.jpg)
+
+**Esc** (or the pad's Menu button) opens the menu: switch between camera,
+lighting and the light table, change lens or film, set the scale by measuring
+something you know the size of, choose the photo size and exposure quality,
+set the scene's light, switch the scan between object and place, open another
+scan, and see every control.
 
 ## Controls
 
-Keyboard and mouse, laid out like a first-person game (click in the window to
-take the mouse, Esc to let it go):
+![Controls](docs/screenshots/controls.jpg)
 
-| | Camera | Lighting (L) | Light table (Tab) |
-|---|---|---|---|
-| Mouse | look | look | the loupe |
-| WASD / Shift | walk / run | walk / run | |
-| Space, Ctrl (or E, Q) | rise, sink | rise, sink | |
-| Left click | shutter | take / place the light | mark a keeper |
-| Right button (hold) | depth-of-field preview | | |
-| Wheel | focus ring | flood / spot | loupe power |
-| [ ] | aperture | choose a light | |
-| - = | shutter speed | dimmer | |
-| 1-8 | lens from the bag | | |
-| R | new roll (reload) | | |
-| F / T / Backspace | | add / change head / remove | |
-| G | | house lights (day ... night) | |
-| arrows / Q E / Esc | look | look | choose frame / roll / back |
-| M + arrows | tilt or shift the lens (tilt and shift lenses only) | | |
-| N | lens back square and centred | | |
-| H, U | reset view, up axis | | |
+| | Pad | Keyboard and mouse |
+|---|---|---|
+| **Camera** | | |
+| walk / look | sticks | WASD, mouse |
+| walking pace (rail ... run) | L3 | `,` `.` |
+| burst of speed | | hold Shift |
+| rise / sink | R1 / L1 | Space / Ctrl |
+| focus ring | R2 far, L2 near | mouse wheel |
+| aperture | d-pad left / right | `[` `]` |
+| shutter speed | d-pad up / down | `-` `=` |
+| fire the shutter | A | left click |
+| depth-of-field preview | hold B | hold right click |
+| camera bag | X | B, or 1-9 within the shelf |
+| load film | tap Y | R |
+| tilt / shift the lens | hold Y + right stick | hold M + arrows |
+| square the lens up | hold Y + click R3 | N |
+| **Lighting** | | |
+| lighting mode on / off | R3 | L |
+| fly a light | d-pad left / right | 1-9 |
+| back to the camera's view | B | 0 or `` ` `` |
+| add a light | X | F |
+| change the head | Y | T |
+| flood / spot | L2 / R2 | mouse wheel |
+| dimmer (half stops) | d-pad up / down | `-` `=` |
+| remove the light you fly | menu | Backspace |
+| house lights, day to night | L3 | G |
+| **Light table** | | |
+| open / close | View | Tab |
+| move the loupe | either stick | mouse |
+| loupe power | L2 / R2 | mouse wheel |
+| choose a frame | d-pad | arrows |
+| mark a keeper | A | click / Enter |
+| another session | L1 / R1 | Q / E |
+| **Anywhere** | | |
+| menu | Menu | Esc |
+| take / free the mouse | | click / Esc |
 
-Lens movements: the bendy lens tilts its plane of focus up to 15 degrees
-(hold M and use the arrows, or on a pad hold Y and use the right stick:
-left / right swings the sharp band across the frame, up / down along it);
-the PC lenses shift up to 11 mm (up raises the lens to keep a
-building's verticals straight while showing its top, left / right slides
-sideways). The finder shows the result as you move, and the amount flashes
-on the screen. N (or Y + a click of the right stick) squares the lens up;
-changing lens does too. A quick tap of Y still loads film.
+## Getting scans
 
-Pad (Xbox / PlayStation / Switch Pro), camera mode:
+Any 3D Gaussian splat `.ply` works: your own (from a trainer such as Brush,
+Postshot, gsplat or Spirula Studio) or one downloaded from
+[SuperSplat](https://superspl.at). Scans on SuperSplat belong to their
+authors: check each one's license, and credit the author when you share
+pictures made from it.
 
-| Pad | |
-|---|---|
-| Left stick | walk / strafe |
-| Right stick | look |
-| L1 / R1 | sink / rise |
-| L2 / R2 | focus ring near / far |
-| D-pad left / right | aperture open / close |
-| D-pad up / down | shutter faster / slower |
-| A / cross | shutter release |
-| B / circle (hold) | depth-of-field preview |
-| X / square | next lens from the bag |
-| Y / triangle | tap: load a new roll; hold + right stick: tilt / shift the lens; hold + R3: square it |
-| R3 | lighting mode |
-| View / Share | light table |
-| Menu | reset the view |
-| L3 | walk faster / slower |
+## Building from source
 
-Pad, lighting mode (walking and looking as above): X adds a light (in hand, held
-out in front and aimed where you focus), A takes / places the chosen light,
-B removes it, Y changes its head, d-pad left/right chooses, up/down dims in
-half stops, L2/R2 flood / spot, L3 house lights, R3 back to the camera.
+Needs the Xcode Command Line Tools (Xcode itself is not required), Git, and
+CMake and Ninja (`brew install cmake ninja`).
 
-Pad, light table: sticks slide the loupe, L2/R2 its power, d-pad chooses a frame,
-A marks it, L1/R1 change session (all its rolls are on the table, each cut into its own strips), B back to the camera.
+1. **The renderer.** Vintage Click draws with
+   [Spirula Studio](https://github.com/harry7557558/spirula-studio)'s rasterizer
+   (Vulkan, run on Metal through MoltenVK, which the build downloads). This
+   repository carries the changes it needs as a patch
+   (`renderer/spirula-vintage-click.patch`: the C interface, the thin-lens
+   model, frames shared with Metal) against the upstream commit in
+   `renderer/UPSTREAM_BASE.txt`. Build it with:
 
-## Where it is going
+   ```bash
+   tools/build_renderer.sh ../spirula
+   ```
 
-A manual-focus 35 mm SLR in your hands: viewfinder with a meter needle and a
-split-prism, aperture / shutter / ISO; a bag of classic lenses and film stocks
-(each "inspired by", no trademarks) with lens character from thin-lens
-sampling and film looks as a post pass; lights you place with the pad; a
-limited roll you develop. Next stages: GPU relighting and soft fur shadows,
-then a many-sample photo mode, then the game.
+   It clones Spirula Studio, applies the patch and builds
+   `libspirula_render.dylib` (the first build takes a while).
+
+2. **The app:**
+
+   ```bash
+   SPIRULA_BUILD=../spirula/build ./build.sh
+   ```
+
+   This makes `build/Vintage Click.app`, with the renderer, the sounds and the
+   icon inside it.
+
+For testing, the app takes command-line options, e.g.
+`open "build/Vintage Click.app" --args scene.ply --lens 22 --film 5 --shoot out.png`
+(take one frame and quit), `--bench 200` (render timings), `--stats` (render
+speed in the finder).
+
+## Credits
+
+- Rendering: [Spirula Studio](https://github.com/harry7557558/spirula-studio)
+  by harry7557558 (GPL-3.0), with
+  [MoltenVK](https://github.com/KhronosGroup/MoltenVK) (Apache-2.0).
+- Camera sounds recorded by Tim Fennell from his Nikon.
+- Lens and film names are fictional; the lenses and stocks they recall belong
+  to their makers.
+- The bee in the screenshots is a scan by Tim Fennell.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

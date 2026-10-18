@@ -1,0 +1,3880 @@
+diff --git a/cmake/SsBackendVulkan.cmake b/cmake/SsBackendVulkan.cmake
+index d4086b7b..93cd15bb 100644
+--- a/cmake/SsBackendVulkan.cmake
++++ b/cmake/SsBackendVulkan.cmake
+@@ -113,6 +113,29 @@ foreach(test_src ${SS_ENGINE_TESTS})
+         $<$<COMPILE_LANGUAGE:CXX>:${SPLAT_CXX_FLAGS}>)
+ endforeach()
+ 
++# The renderer as a shared library with a C interface, for the Blender render
++# engine add-on (loaded with ctypes). MoltenVK is static, so it is self-contained.
++# (its parts must be position-independent to link into a shared library on Linux)
++set_target_properties(csrc_portable ss_backend_vulkan PROPERTIES POSITION_INDEPENDENT_CODE ON)
++add_library(spirula_render SHARED ${SS_SRC}/blender/SplatRenderC.cpp)
++target_link_libraries(spirula_render PRIVATE csrc_portable ss_backend_vulkan
++    Threads::Threads)
++target_compile_options(spirula_render PRIVATE
++    $<$<COMPILE_LANGUAGE:CXX>:${SPLAT_CXX_FLAGS}>)
++# Export only the C interface: the static MoltenVK and engine inside must not
++# clash with the host process's own symbols (Blender links graphics code too).
++# Windows exports only what SR_API marks.
++set_target_properties(spirula_render PROPERTIES CXX_VISIBILITY_PRESET hidden
++    C_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
++if(APPLE)
++    target_link_options(spirula_render PRIVATE
++        "LINKER:-exported_symbols_list,${SS_SRC}/blender/exports.txt")
++elseif(UNIX)
++    target_link_options(spirula_render PRIVATE
++        "LINKER:--version-script=${SS_SRC}/blender/exports.map"
++        "LINKER:--exclude-libs,ALL")
++endif()
++
+ # The app targets build against the
+ # portable engine + Vulkan backend instead.
+ set(SS_APP_LIBS csrc_portable ss_backend_vulkan Threads::Threads)
+diff --git a/docs/notes/insect-voids.md b/docs/notes/insect-voids.md
+new file mode 100644
+index 00000000..1a27874a
+--- /dev/null
++++ b/docs/notes/insect-voids.md
+@@ -0,0 +1,98 @@
++# Voids inside shiny subjects
++
++A glossy convex surface -- an insect's abdomen, a beetle's wing case -- mirrors
++its lights as a virtual image about half its radius *behind* the surface.
++Plain 3DGS reproduces that image literally: a cloud of bright splats inside the
++body, seen through a half-transparent shell. Lowering the SH degree makes it
++worse, since view-dependent colour is then the only other way to get the
++highlight. This note covers the two tools that keep the body solid and the
++shine on its surface: keep-out voids, and voids that block light.
++
++## The workflow
++
++Draw the voids on a quick draft, then train the real model with them from
++step 0. Voids patched into a finished model clear the inside, but splats
++already sunk under the surface where a void stops short stay put once
++densification has ended.
++
++1. **Draft.** Train only to establish the shapes: around 1M splats, half
++   resolution, 10-15k steps, no region. It needs a clear outline of the shell
++   in cross section, not detail.
++2. **Draw.** In **Keep-out regions (insects)** open the **Cross-section void
++   editor** (with nothing training it slices the newest saved run). It cuts the
++   model into slices along the body's long, middle or short axis
++   (`app/gui/VoidSlices.h`): each splat's cross section in the slice plane,
++   base colour, faded by opacity. Slices are framed on the splats around where
++   the cameras aim, up to the first clear gap, so a pin or mount does not
++   stretch them. Draw each void as a blob: an outline on a few key slices,
++   more where the body bends. Between keys the outline is interpolated (per
++   blob, so separate voids never merge); it ends at its first and last key
++   unless **Round the ends** is ticked. Bring every outline right up to the
++   inner edge of the shell -- under fur that is the cuticle, not the base of
++   the hair -- leaving a hair's width for the wall. **Save voids** writes
++   `roi/voids.svoid` (the drawing) and `roi/voids.json` (the region: the
++   complement of a stack of outline prisms, one per slice, in the dataset
++   frame).
++3. **Train for real** with the region and **Voids block light** from the
++   first step: pick the voids file and **Use for the next run**.
++
++The voids are in the dataset's frame, so every later run on the same dataset
++reuses them; redraw only if the cameras are solved again. A paused run can
++also take them (**Apply to paused run**), as long as densification still has
++steps to go (below).
++
++## Keep-out: splats inside a void fade
++
++The region keeps splats out of the voids the way any region of interest does
++(`--roi-region`): at every densification step a splat whose centre is in a void
++keeps `--roi-outside-opacity-decay` (0.7) of its opacity and draws for growth
++with `--roi-outside-weight` (1e-4). Ones the images still need win opacity
++back; the rest fade and MCMC relocates them, and export drops anything under
++1/255. Densification must run nearly to the end for this to keep acting, so the
++panel raises `--refine-stop-iter` to 87.5% of the run. Pixel masking
++(`--roi-mask-pixels`) is turned off: the voids are inside the subject, and
++masking would hide the subject itself.
++
++## Voids block light
++
++Keep-out alone empties the interior, but it leaves the shell free to stay
++half transparent: the near and far walls together still cover every pixel, so
++the alpha losses are satisfied, and the shine moves onto the *inside* of the
++far wall, seen through the near one. Cut the model in half and look at one
++wall face-on, and the background shows through it.
++
++`--roi-void-stop 1` ("Voids block light", default on in the panel) closes
++that. Before each training forward, every camera ray stops where it first
++enters a void:
++
++- `data/RegionRaycast.h` casts the batch's cameras against the region on the
++  CPU: clip to the voids' bounding box (`region_void_bounds`, from the CSG
++  tree), march at 1/160 of its diagonal, bisect the first step that lands in a
++  void. Lens distortion (OpenCV, thin prism) is undone per pixel. The map is
++  512 px on its long side and is cached per camera pose, so after the first
++  epoch it costs nothing.
++- The engine uploads it (`fwd.void_depth`) and arms
++  `backend::void_stop()` (`backend/api/VoidStop.h`) for that one forward; the
++  Vulkan 2D raster (`rasterize_fwd_2d`, spec constant `kVoidStop`) ends a
++  pixel's ray at the first splat whose depth is past the void.
++- The backward needs no change: it replays each pixel from the forward's
++  `last_ids`, which already stop short of the void.
++- Light that gets through the near wall now meets the (random) background
++  instead of the far wall, so the alpha loss makes the near wall opaque by
++  itself, and the highlight has to live on its outer surface as SH.
++
++Previews, the viewer and exports never see the stop: the training step arms it
++immediately before its own forward and the forward disarms it.
++
++Limits: the Vulkan backend and the 2D primitives (3dgs, mip) only -- the
++trainer logs why and carries on without it otherwise; pinhole cameras (the
++warp paths are skipped); the region must have closed voids (a plain region of
++interest, whose outside reaches infinity, is refused).
++`SS_VOID_STOP_DUMP=<dir>` writes each cast map as a PGM plus its camera, to
++check the voids against the photos.
++
++## Choosing settings
++
++For a masked insect: random background, empty- and solid-area alpha weights
++0.5, a small opacity regularization (0.001), SH degree 3, and full checkpoints
++so the run can be paused and resumed around the void editing.
+diff --git a/docs/notes/lens-defocus.md b/docs/notes/lens-defocus.md
+new file mode 100644
+index 00000000..a8d46d4b
+--- /dev/null
++++ b/docs/notes/lens-defocus.md
+@@ -0,0 +1,51 @@
++# Thin-lens depth of field inside the projection
++
++`sr_set_lens` turns the pinhole projection into a thin lens for viewer renders
++(`apply_lens` in `src/backend/vulkan/shaders/projection_fwd.slang`).
++
++A lens point `d` (camera x/y, scene units), with the view sheared so the focus
++plane at distance `s` stays put, moves a point at depth `z` on the image by
++`f * d * (1/s - 1/z)` pixels (`f` = fx, fy). Over the whole pupil, a splat's
++image therefore moves by `f k mu` and spreads by `(f k)^2 Sigma`, with
++`k = 1/s - 1/z` and `mu`, `Sigma` the pupil's mean and covariance. Each splat
++gets that shift, that covariance added to its 2D footprint, opacity scaled by
++`sqrt(det before / det after)` (same energy, spread wider) and its colour by
++the pupil's light transmission. Occlusion stays exact: the blurred splats are
++still sorted and alpha-blended.
++
++Rendering several sub-pupils (cells) with the view sheared to each cell's
++centre and only the cell's own spread as blur converges to the exact lens:
++one cell is a live preview, dozens give the true bokeh shape.
++
++Layout (float4s):
++
++| index | contents |
++|---|---|
++| 0 | (on, 1/focus distance, aperture radius, 1 = moments from the table / 0 = isotropic) |
++| 1 | (isotropic variance in radius^2 units, 1 = field rows 34..36 present, -, max blur sigma in pixels) |
++| 2..33 | pupil at field radius `|q| = i/31 * 1.25` (q = 1 at the frame corner): (mean along q, variance along q, variance across q, light), in aperture radii |
++| 34 | focus over the field, added to 1/focus: (tilt per unit q x, y, radial curvature, tangential curvature at q = 1) |
++| 35 | (the cell's lens point in camera x/y, scene units; oval stop: pupil width / height, 0 = round; spherical aberration: extra 1/focus at the aperture's rim) |
++| 36 | (optical axis in this render's pixels x, y; field radius q = 1 in pixels; -) |
++| 37 | cells only: (cat's eye offset at q = 1, current aperture in wide-open radii, the cell's patch radius in aperture radii (0 = no barrel clipping here), -) |
++
++Mechanical vignetting clips off-axis pupils into cat's eyes: the table's
++anisotropic variance and mean shift are what make off-axis bokeh stretch
++and swirl.
++
++Focus off the axis (row 34) makes the blur per splat `F S F^T` with
++`F = diag(f) (k_r P + k_t Q)`, `P` and `Q` projecting along and across the
++field direction, `k_r`, `k_t` the radial and tangential defocus there. A
++tilted plane (a tilt lens) and a curved field (a Petzval's swirl: tangential
++focus far from radial smears off-axis blur round the centre) both come out
++of it. With cells, each cell's view is already sheared for the axial focus,
++so only the extra `f (M - k) d` moves its splats. Row 36 lets tiles of a big
++photo, and a shifted lens, measure the field from the real optical axis.
++
++A cell stands for a patch of lens (radius `h`). Where the barrel cuts it
++(row 37), the boundary near the patch is taken as a chord at `t h` from its
++centre: the patch keeps `kept = pi - (acos t - t sqrt(1 - t^2))` of `pi h^2`
++of its light, its centre moves `2/3 h (1 - t^2)^1.5 / kept` away from the
++chord and its spread across the chord narrows. Clipping whole cells instead
++left beads along cat's-eye edges, one per cell (one colour each with axial
++colour).
+diff --git a/docs/notes/training-capture.md b/docs/notes/training-capture.md
+new file mode 100644
+index 00000000..4cc5312b
+--- /dev/null
++++ b/docs/notes/training-capture.md
+@@ -0,0 +1,37 @@
++# Training animation capture
++
++The trainer's **Training animation capture** panel records the model as it
++trains, from cameras of its own, without touching the live preview
++(`app/gui/TrainCapture.h`).
++
++## Tracks
++
++Any number at once, each to `<run>/captures/<track>/`:
++
++- **Fixed views** -- one track per chosen training image, from that camera.
++- **Arc** -- a path through two or more training views in order. Position, up
++  vector and look-at target are interpolated between keyframes, so the camera
++  stays on the subject instead of drifting with the cameras' own aim.
++- **Orbit** -- a turn of `orbit_degrees` about the scene centre, starting at
++  one training view, about the cameras' mean up.
++
++A track's frames are spread over the run: frame k of n sits at u = k/(n-1)
++along the arc or orbit, so the motion and the training finish together.
++
++## Schedule and output
++
++A frame every `every_steps` steps, five times as often over the first ten
++intervals (`dense_start`), where the model changes most. HD, 2K or 4K. Output
++is PNG frames (RGBA over nothing, or RGB over black), a video, or both. Video
++is piped to ffmpeg (`render::open_pipe_sink`) as H.264 or H.265 at three
++quality levels; a 4K H.265 sequence is about 250x smaller than its PNGs.
++`frames.csv` maps each frame to its step.
++
++## Cost
++
++Frames are rendered on the training thread between steps, through the same
++forward the trainer uses (`set_camera_params`, `forward_3dgs`,
++`engine_copy_render_to_host`), so no second copy of the model exists on the
++device; measured about 10 MB of extra GPU memory and 0.37 s per 4K frame on an
++M2 Pro. PNG encoding and the ffmpeg pipe run on writer threads, off the
++training thread. Settings persist in `gui.conf` as `capture_*` keys.
+diff --git a/src/app/TrainerCore.cpp b/src/app/TrainerCore.cpp
+index 9165d3b9..718e4f52 100644
+--- a/src/app/TrainerCore.cpp
++++ b/src/app/TrainerCore.cpp
+@@ -19,6 +19,7 @@
+ #include "data/ScenePartition.h"
+ #include "data/Json.h"
+ #include "data/RegionProgram.h"
++#include "data/RegionRaycast.h"
+ #include "data/RoiDocument.h"
+ #include "data/LabelField.h"
+ #include "data/Knn.h"
+@@ -31,6 +32,9 @@
+ #include "external/stb_image_write.h"
+ 
+ #include <algorithm>
++#include <array>
++#include <map>
++#include <memory>
+ #include <cmath>
+ #include <condition_variable>
+ #include <cstdio>
+@@ -773,6 +777,7 @@ void TrainerSession::load_region() {
+ void TrainerSession::setup_region() {
+     if (!roi) {
+         engine_set_region({}, {}, {}, {}, {}, 1.0f);
++        engine_set_void_stop_provider({});
+         return;
+     }
+     // The region is in the dataset's frame, the splats in the training frame.
+@@ -798,6 +803,81 @@ void TrainerSession::setup_region() {
+                       tv(prog.field ? prog.field->seeds : none), tv(cams.nodes), tv(cams.seeds),
+                       cfg.roi_outside_weight, cfg.roi_outside_opacity_decay);
+     log(lfmt(lmsg::region_applied, {prog.num_nodes(), cfg.roi_outside_weight}));
++    setup_void_stop();
++}
++
++// SS_VOID_STOP_DUMP=<dir>: each cast map as a PGM (white = the ray enters a
++// void) plus the camera it was cast for, to check the voids against photos.
++static void dump_void_map(const std::vector<float>& m, int w, int h, const VoidRayCamera& cam,
++                          size_t n) {
++    const char* dir = spirula::env("VOID_STOP_DUMP");
++    if (!dir || !*dir) return;
++    const std::string base = std::string(dir) + "/void_" + std::to_string(n);
++    if (FILE* f = std::fopen((base + ".pgm").c_str(), "wb")) {
++        std::fprintf(f, "P5 %d %d 255\n", w, h);
++        for (float z : m) std::fputc(std::isfinite(z) ? 255 : 0, f);
++        std::fclose(f);
++    }
++    if (FILE* f = std::fopen((base + ".txt").c_str(), "w")) {
++        for (float v : cam.viewmat) std::fprintf(f, "%.9g ", v);
++        std::fprintf(f, "\n%.9g %.9g %.9g %.9g %d %d\n", cam.intrin[0], cam.intrin[1],
++                     cam.intrin[2], cam.intrin[3], cam.width, cam.height);
++        std::fclose(f);
++    }
++}
++
++// Voids block light: each training forward asks where its rays enter the
++// region's voids. A camera's map is cast once and kept, keyed by its pose.
++void TrainerSession::setup_void_stop() {
++    engine_set_void_stop_provider({});
++    if (!roi || !cfg.roi_void_stop) return;
++    std::string why;
++#ifndef SS_BACKEND_VULKAN
++    why = "needs the Vulkan backend";
++#endif
++    if (why.empty() && cfg.primitive != "3dgs" && cfg.primitive != "mip")
++        why = "needs the 3dgs or mip primitive";
++    if (why.empty() && region_void_bounds(*roi).unbounded())
++        why = "the region has no closed voids";
++    if (!why.empty()) {
++        log(lfmt(lmsg::void_stop_unsupported, {why}));
++        return;
++    }
++    const double rs = cfg.relative_scale.value_or(1.0f);
++    const std::array<double, 3> center = {ds.center[0], ds.center[1], ds.center[2]};
++    auto cache = std::make_shared<std::map<std::string, std::vector<float>>>();
++    std::shared_ptr<const Region> region = roi;
++    engine_set_void_stop_provider([region, rs, center, cache](const VoidStopCameras& c,
++                                                              std::vector<float>& map,
++                                                              int& mw, int& mh) {
++        if (c.model != "PINHOLE") return false;
++        constexpr int kLong = 512;
++        const double sc = (double)kLong / std::max(c.width, c.height);
++        mw = std::max(1, (int)std::lround(c.width * sc));
++        mh = std::max(1, (int)std::lround(c.height * sc));
++        const size_t per = (size_t)mw * mh;
++        map.resize(per * c.num);
++        for (int i = 0; i < c.num; i++) {
++            VoidRayCamera cam;
++            std::copy(c.viewmats + i * 16, c.viewmats + i * 16 + 16, cam.viewmat);
++            std::copy(c.intrins + i * 4, c.intrins + i * 4 + 4, cam.intrin);
++            std::copy(c.dist_coeffs + i * 8, c.dist_coeffs + i * 8 + 8, cam.dist);
++            cam.distortion = c.distortion == "OPENCV" ? 1 : c.distortion == "THIN_PRISM" ? 2 : 0;
++            cam.width = c.width;
++            cam.height = c.height;
++            std::string key((const char*)&cam, sizeof cam);
++            auto it = cache->find(key);
++            if (it == cache->end()) {
++                std::vector<float> m(per);
++                region_void_depth_map(*region, rs, center.data(), cam, mw, mh, m.data());
++                dump_void_map(m, mw, mh, cam, cache->size());
++                it = cache->emplace(std::move(key), std::move(m)).first;
++            }
++            std::copy(it->second.begin(), it->second.end(), map.begin() + per * i);
++        }
++        return true;
++    });
++    log(lmsg::void_stop_on.get());
+ }
+ 
+ // Unported-feature guards: fail early rather than ignore a flag.
+diff --git a/src/app/TrainerCore.h b/src/app/TrainerCore.h
+index c87c6843..0696fa81 100644
+--- a/src/app/TrainerCore.h
++++ b/src/app/TrainerCore.h
+@@ -262,6 +262,7 @@ public:
+     // Reads --roi-region into `roi`, writing back the file it picked.
+     void load_region();
+     void setup_region();
++    void setup_void_stop();
+ 
+     // Create the output dir, dump config.json, reset + seed the engine,
+     // set up the DataManager and bilagrid/PPISP. Requires load_dataset().
+diff --git a/src/app/gui/GuiApp.cpp b/src/app/gui/GuiApp.cpp
+index 6d1d22c2..af0a14cf 100644
+--- a/src/app/gui/GuiApp.cpp
++++ b/src/app/gui/GuiApp.cpp
+@@ -325,6 +325,7 @@ void GuiApp::shutdown() {
+     _geometry_panel.destroy_gl();
+     _partition_panel.destroy_gl();
+     _roi_editor.destroy_gl();
++    _void_editor.destroy_gl();
+     if (_merge_thread.joinable()) _merge_thread.join();
+     _colmap.cancel();
+     _sfm.cancel();
+@@ -411,6 +412,7 @@ void GuiApp::load_settings() {
+         // default, which is ON: the files are what makes a run resumable.
+         else if (k == "keep_intermediate") _sfm_job.keep_intermediate = v != "0";
+         else if (k == "save_full_checkpoint") _keep_full_ckpt = v != "0";
++        else if (k.rfind("capture_", 0) == 0) read_capture_setting(_capture, k, v);
+         else if (k.rfind(kDirPrefix, 0) == 0 && !v.empty())
+             _dialog_dirs[k.substr(sizeof kDirPrefix - 1)] = v;
+     }
+@@ -454,6 +456,7 @@ void GuiApp::save_settings() {
+     std::fprintf(f, "native_dialogs=%d\n", _dialog.native_enabled() ? 1 : 0);
+     std::fprintf(f, "keep_intermediate=%d\n", _sfm_job.keep_intermediate ? 1 : 0);
+     std::fprintf(f, "save_full_checkpoint=%d\n", _keep_full_ckpt ? 1 : 0);
++    write_capture_settings(f, _capture);
+     for (const auto& [key, dir] : _dialog_dirs)
+         std::fprintf(f, "%s%s=%s\n", kDirPrefix, key.c_str(), dir.c_str());
+     for (const auto& l : _accepted_licenses)
+@@ -1304,6 +1307,8 @@ void GuiApp::launch_training(const TrainConfig& cfg, const std::string& preset)
+     open_run_log(_train_log, data_dir, "train", run_log_stamp());
+     set_ss_env("UNREG_LOG", "");
+     write_run_settings(_train_log);
++    _capture.ffmpeg = _ffmpeg_exe.empty() ? std::string("ffmpeg") : _ffmpeg_exe;
++    _runner.set_capture(_capture);
+     _runner.start_training(cfg, preset);
+ }
+ 
+@@ -3063,6 +3068,7 @@ void GuiApp::frame() {
+                                    me && me->text_prompts && me->kind == MaskModelKind::Sam);
+         _mask_editor.draw();
+     }
++    _void_editor.draw();
+     // After every screen and the editor, so either can raise the one consent modal.
+     draw_license_modal();
+ 
+@@ -9621,6 +9627,9 @@ void GuiApp::draw_train_settings() {
+         if (!parse_settings_equal(parse_before, _cfg)) _parse_dirty = true;
+     }
+ 
++    draw_keep_out_panel();
++    draw_capture_panel();
++
+     // ---- controls + metrics ----
+     ui::SeparatorText(msg::section_training);
+     draw_train_controls();
+diff --git a/src/app/gui/GuiApp.h b/src/app/gui/GuiApp.h
+index 0ff5311d..511c2e61 100644
+--- a/src/app/gui/GuiApp.h
++++ b/src/app/gui/GuiApp.h
+@@ -7,6 +7,7 @@
+ #include "backend/api/BackendRuntime.h"
+ #include "config/TrainConfig.h"
+ #include "app/gui/BatchProcess.h"
++#include "app/gui/VoidEditor.h"
+ #include "app/gui/ColmapRunner.h"
+ #include "app/gui/CommandRunner.h"
+ #include "app/gui/CompareView.h"
+@@ -560,6 +561,9 @@ private:
+     void draw_preset_delete_modal();
+     void draw_basic_options();
+     void draw_train_controls();
++    void draw_capture_panel();
++    void draw_keep_out_panel();
++    std::string apply_keep_out_now(const std::string& region_file);
+     void draw_metrics();
+     void draw_status_strip();
+     // Right-aligned VRAM readout on the status strip; x0/avail describe the
+@@ -688,6 +692,12 @@ private:
+     // Persisted: the last value the user gave save_full_checkpoint by hand. A
+     // preset only overrides it by turning it on.
+     bool _keep_full_ckpt = false;
++    CaptureSettings _capture;
++    std::string _capture_filter;
++    std::string _keepout_note;
++    VoidEditor _void_editor;
++    std::string _keepout_file;
++    bool _keepout_block_light = true;   // voids also stop camera rays
+ 
+     // Saved presets, one picker per kind.
+     PresetPicker<TrainPreset> _train_presets;
+diff --git a/src/app/gui/KeepOutPanel.cpp b/src/app/gui/KeepOutPanel.cpp
+new file mode 100644
+index 00000000..7762f7d4
+--- /dev/null
++++ b/src/app/gui/KeepOutPanel.cpp
+@@ -0,0 +1,165 @@
++// KeepOutPanel.cpp -- the trainer screen's "Keep-out regions (insects)"
++// section (GuiApp::draw_keep_out_panel): the cross-section void editor, which
++// region to keep splats out of, whether its voids also block light, and
++// switching it on for the next run or a paused one.
++
++#include "app/gui/GuiApp.h"
++#include "app/gui/Layout.h"
++#include "app/gui/Ui.h"
++#include "checkpoint/SplatPly.h"
++#include "data/RoiDocument.h"
++#include "i18n/catalog/TrainFields.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <filesystem>
++
++namespace fs = std::filesystem;
++
++namespace gui {
++
++namespace {
++
++const ImVec4 kWarn(0.95f, 0.75f, 0.30f, 1.0f);
++const ImVec4 kOk(0.45f, 0.85f, 0.45f, 1.0f);
++constexpr float kKeepOutDecay = 0.7f;
++constexpr float kKeepOutWeight = 1e-4f;
++
++std::string dataset_dir(const std::string& data) {
++    fs::path p(data);
++    if (p.filename() == "images") p = p.parent_path();
++    return p.string();
++}
++
++// Densification is when the keep-out acts, so it has to run nearly to the end.
++int keep_out_refine_stop(const TrainConfig& c) {
++    return std::max(c.refine_stop_iter, (int)(0.875 * c.num_iterations));
++}
++
++// The newest run folder under <dataset>/outputs that holds a checkpoint.
++std::string latest_run(const std::string& ds) {
++    std::error_code ec;
++    fs::path best;
++    fs::file_time_type when{};
++    for (const auto& e : fs::directory_iterator(fs::path(ds) / "outputs", ec)) {
++        if (!e.is_directory(ec) || e.path().filename().string().rfind('.', 0) == 0) continue;
++        try { (void)spirula::find_splat_ply(e.path().string()); } catch (...) { continue; }
++        const auto t = fs::last_write_time(e.path(), ec);
++        if (best.empty() || t > when) { best = e.path(); when = t; }
++    }
++    return best.string();
++}
++
++}  // namespace
++
++std::string GuiApp::apply_keep_out_now(const std::string& region_file) {
++    spirula::TrainerSession* s = _runner.session();
++    if (!s || _runner.phase() != TrainRunner::Phase::Training || !_runner.paused())
++        return "Pause training first.";
++    try {
++        std::lock_guard<std::mutex> lk(s->engine_mutex);
++        s->cfg.roi_region = region_file;
++        s->cfg.roi_outside_weight = kKeepOutWeight;
++        s->cfg.roi_outside_opacity_decay = kKeepOutDecay;
++        s->cfg.refine_stop_iter = keep_out_refine_stop(s->cfg);
++        s->cfg.roi_void_stop = _keepout_block_light;
++        s->roi.reset();
++        s->load_region();
++        s->setup_region();
++    } catch (const std::exception& e) {
++        return std::string("Could not apply: ") + e.what();
++    }
++    return "Applied " + fs::path(region_file).filename().string() +
++           ": resume, and splats inside the voids fade out.";
++}
++
++void GuiApp::draw_keep_out_panel() {
++    // The editor is a window of its own; it asks, the app applies.
++    {
++        const bool paused = _runner.phase() == TrainRunner::Phase::Training && _runner.paused();
++        _void_editor.set_can_apply(paused, paused ? "" : "Pause training to apply the voids to the run.");
++        const std::string req = _void_editor.take_apply_request();
++        if (!req.empty()) {
++            _keepout_file = req;
++            _void_editor.set_note(apply_keep_out_now(req));
++        }
++    }
++    if (!ui::CollapsingHeaderRaw("Keep-out regions (insects)###keepout_header")) return;
++    ui::TextWrappedRaw("Keep splats out of voids inside the subject, so reflections on shiny "
++                       "bodies cannot be built as structure inside them and view-dependent "
++                       "colour stays on the surface. Train briefly, pause, outline the voids "
++                       "on cross sections of the model, apply, and resume.");
++
++    spirula::TrainerSession* s = _runner.session();
++    const bool have = s && !s->ds.image_filenames.empty();
++    const std::string dir = have ? dataset_dir(_cfg.data) : std::string();
++    const TrainRunner::Phase ph = _runner.phase();
++    const bool running = ph == TrainRunner::Phase::Training;
++    const bool paused = running && _runner.paused();
++
++    // ---- the void editor ----
++    ImGui::BeginDisabled(!have || (running && !paused) || ph == TrainRunner::Phase::Preparing);
++    if (ui::ButtonRaw("Cross-section void editor...###void_open")) {
++        std::string ply;
++        if (paused) {
++            // The model as it is now, written where the run keeps its checkpoints.
++            std::lock_guard<std::mutex> lk(s->engine_mutex);
++            s->save_checkpoint(s->cur_step.load());
++            ply = s->out_dir.string();
++        } else if (ph == TrainRunner::Phase::Done) {
++            ply = s->out_dir.string();
++        } else {
++            ply = latest_run(dir);
++        }
++        const double rs = _cfg.relative_scale.value_or(1.0f);
++        double focus[3];
++        cameras_focus(s->ds, rs, s->ds.center.data(), focus);
++        _void_editor.open(dir, ply, rs, s->ds.center.data(), focus);
++    }
++    ImGui::EndDisabled();
++    if (running && !paused) ui::TextDisabledRaw("Pause training to slice the model as it is now.");
++    else if (!running && have) ui::TextDisabledRaw("Not training: slices the newest saved run.");
++
++    // ---- which region, and switching it on ----
++    std::vector<std::string> files = have ? spirula::list_roi_files(dir) : std::vector<std::string>{};
++    if (!files.empty()) {
++        if (std::find(files.begin(), files.end(), _keepout_file) == files.end()) {
++            _keepout_file = files.front();
++            for (const std::string& f : files)
++                if (fs::path(f).filename() == "voids.json") _keepout_file = f;
++        }
++        ImGui::SetNextItemWidth(px(220.0f));
++        if (ui::BeginComboRaw("Keep-out region###keepout_file",
++                              fs::path(_keepout_file).stem().string().c_str())) {
++            for (const std::string& f : files)
++                if (ui::SelectableRaw(fs::path(f).stem().string(), f == _keepout_file)) _keepout_file = f;
++            ImGui::EndCombo();
++        }
++        ui::Checkbox(spirula::i18n::msg::field::roi_void_stop, &_keepout_block_light);
++        if (ImGui::IsItemHovered()) ui::SetTooltipWrapped(spirula::i18n::msg::field::roi_void_stop_help);
++        ImGui::BeginDisabled(running || ph == TrainRunner::Phase::Preparing);
++        if (ui::ButtonRaw("Use for the next run###keepout_use")) {
++            _cfg.roi_region = fs::path(_keepout_file).lexically_relative(dir).generic_string();
++            _cfg.roi_outside_weight = kKeepOutWeight;
++            _cfg.roi_outside_opacity_decay = kKeepOutDecay;
++            _cfg.roi_mask_pixels = false;
++            _cfg.refine_stop_iter = keep_out_refine_stop(_cfg);
++            _cfg.roi_void_stop = _keepout_block_light;
++            for (const char* k : {"roi_region", "roi_outside_weight", "roi_outside_opacity_decay",
++                                  "roi_mask_pixels", "refine_stop_iter", "roi_void_stop"})
++                _cfg_ui.touched.insert(k);
++            _parse_dirty = true;
++            _keepout_note = "The next run keeps splats out of " + fs::path(_keepout_file).stem().string() + ".";
++        }
++        ImGui::EndDisabled();
++        ImGui::SameLine();
++        ImGui::BeginDisabled(!paused);
++        if (ui::ButtonRaw("Apply to this run now###keepout_apply")) _keepout_note = apply_keep_out_now(_keepout_file);
++        ImGui::EndDisabled();
++    } else if (have) {
++        ui::TextDisabledRaw("No keep-out regions in this dataset's roi folder yet.");
++    }
++    if (!_keepout_note.empty()) ui::TextWrappedRaw(_keepout_note);
++}
++
++}  // namespace gui
+diff --git a/src/app/gui/TrainCapture.cpp b/src/app/gui/TrainCapture.cpp
+new file mode 100644
+index 00000000..1094f1c2
+--- /dev/null
++++ b/src/app/gui/TrainCapture.cpp
+@@ -0,0 +1,453 @@
++// TrainCapture.cpp -- see TrainCapture.h.
++
++#include "app/gui/TrainCapture.h"
++
++#include "app/TrainerCore.h"
++#include "app/gui/render/FrameSink.h"
++#include "core/Camera.h"
++#include "engine/Engine.h"
++#include "external/stb_image_write.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdlib>
++#include <cstdio>
++#include <filesystem>
++#include <fstream>
++
++namespace fs = std::filesystem;
++
++namespace gui {
++
++namespace {
++
++TorchTensorView tvp(const void* p, uint32_t elem_size, std::vector<int64_t> shape) {
++    return {(uint64_t)(uintptr_t)p, elem_size, std::move(shape)};
++}
++TorchTensorView tv_null() { return {0, 0, {}}; }
++
++void cross(const float a[3], const float b[3], float o[3]) {
++    o[0] = a[1] * b[2] - a[2] * b[1];
++    o[1] = a[2] * b[0] - a[0] * b[2];
++    o[2] = a[0] * b[1] - a[1] * b[0];
++}
++float norm3(const float a[3]) { return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); }
++void normalize3(float a[3]) {
++    const float n = norm3(a);
++    if (n > 1e-12f) for (int i = 0; i < 3; i++) a[i] /= n;
++}
++void transpose3(const float a[9], float o[9]) {
++    for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) o[c * 3 + r] = a[r * 3 + c];
++}
++void matmul3(const float a[9], const float b[9], float o[9]) {
++    for (int r = 0; r < 3; r++)
++        for (int c = 0; c < 3; c++)
++            o[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
++}
++void rot_axis(const float axis[3], float th, float o[9]) {
++    const float c = std::cos(th), s = std::sin(th), t = 1 - c;
++    const float x = axis[0], y = axis[1], z = axis[2];
++    const float m[9] = {t * x * x + c,     t * x * y - s * z, t * x * z + s * y,
++                        t * x * y + s * z, t * y * y + c,     t * y * z - s * x,
++                        t * x * z - s * y, t * y * z + s * x, t * z * z + c};
++    std::copy(m, m + 9, o);
++}
++
++void slerp(const double a[4], const double b_in[4], double t, double o[4]) {
++    double b[4] = {b_in[0], b_in[1], b_in[2], b_in[3]};
++    double d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
++    if (d < 0) { for (double& v : b) v = -v; d = -d; }
++    double wa = 1 - t, wb = t;
++    if (d < 0.9995) {
++        const double th = std::acos(d), s = std::sin(th);
++        wa = std::sin((1 - t) * th) / s;
++        wb = std::sin(t * th) / s;
++    }
++    double n = 0;
++    for (int i = 0; i < 4; i++) { o[i] = wa * a[i] + wb * b[i]; n += o[i] * o[i]; }
++    n = std::sqrt(n);
++    for (int i = 0; i < 4; i++) o[i] /= n;
++}
++
++// Point nearest every camera's optical axis: where a turntable capture aims.
++void axes_focus(const PostSplitCameras& post, float out[3]) {
++    double A[9] = {0}, b[3] = {0};
++    for (int64_t p = 0; p < post.n_post; p++) {
++        const float* vm = &post.viewmats[(size_t)p * 16];
++        const float R[9] = {vm[0], vm[1], vm[2], vm[4], vm[5], vm[6], vm[8], vm[9], vm[10]};
++        const float t[3] = {vm[3], vm[7], vm[11]};
++        double C[3], d[3] = {R[6], R[7], R[8]};
++        for (int i = 0; i < 3; i++) C[i] = -(R[i] * t[0] + R[3 + i] * t[1] + R[6 + i] * t[2]);
++        for (int r = 0; r < 3; r++)
++            for (int c = 0; c < 3; c++) {
++                const double m = (r == c ? 1.0 : 0.0) - d[r] * d[c];
++                A[r * 3 + c] += m;
++                b[r] += m * C[c];
++            }
++    }
++    const double det = A[0] * (A[4] * A[8] - A[5] * A[7]) - A[1] * (A[3] * A[8] - A[5] * A[6]) +
++                       A[2] * (A[3] * A[7] - A[4] * A[6]);
++    if (std::abs(det) < 1e-12) return;
++    const double inv[9] = {(A[4] * A[8] - A[5] * A[7]) / det, (A[2] * A[7] - A[1] * A[8]) / det,
++                           (A[1] * A[5] - A[2] * A[4]) / det, (A[5] * A[6] - A[3] * A[8]) / det,
++                           (A[0] * A[8] - A[2] * A[6]) / det, (A[2] * A[3] - A[0] * A[5]) / det,
++                           (A[3] * A[7] - A[4] * A[6]) / det, (A[1] * A[6] - A[0] * A[7]) / det,
++                           (A[0] * A[4] - A[1] * A[3]) / det};
++    for (int r = 0; r < 3; r++)
++        out[r] = (float)(inv[r * 3] * b[0] + inv[r * 3 + 1] * b[1] + inv[r * 3 + 2] * b[2]);
++}
++
++std::string safe_stem(const std::string& path) {
++    std::string s = fs::path(path).stem().string();
++    for (char& c : s)
++        if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '+')) c = '_';
++    return s;
++}
++
++}  // namespace
++
++
++void capture_frame_size(int resolution, int& W, int& H) {
++    switch (resolution) {
++        case 2:  W = 3840; H = 2160; break;
++        case 1:  W = 2560; H = 1440; break;
++        default: W = 1920; H = 1080; break;
++    }
++}
++
++std::vector<int> capture_schedule(const CaptureSettings& cs, int start, int total) {
++    std::vector<int> steps;
++    const int N = std::max(1, cs.every_steps);
++    const int dense = std::max(1, N / 5);
++    for (int st = start; st < total;) {
++        steps.push_back(st);
++        st += (cs.dense_start && st - start < 10 * N) ? dense : N;
++    }
++    if (total > start && steps.back() != total - 1) steps.push_back(total - 1);
++    return steps;
++}
++
++namespace {
++
++std::vector<std::string> split_names(const std::string& v) {
++    std::vector<std::string> out;
++    size_t a = 0;
++    while (a <= v.size()) {
++        const size_t b = v.find('|', a);
++        const std::string s = v.substr(a, b == std::string::npos ? std::string::npos : b - a);
++        if (!s.empty()) out.push_back(s);
++        if (b == std::string::npos) break;
++        a = b + 1;
++    }
++    return out;
++}
++std::string join_names(const std::vector<std::string>& v) {
++    std::string s;
++    for (const std::string& n : v) { if (!s.empty()) s += '|'; s += n; }
++    return s;
++}
++
++}  // namespace
++
++void read_capture_setting(CaptureSettings& cs, const std::string& k, const std::string& v) {
++    if (k == "capture_enabled") cs.enabled = v != "0";
++    else if (k == "capture_resolution") cs.resolution = std::clamp(std::atoi(v.c_str()), 0, 2);
++    else if (k == "capture_every") cs.every_steps = std::max(1, std::atoi(v.c_str()));
++    else if (k == "capture_dense") cs.dense_start = v != "0";
++    else if (k == "capture_transparent") cs.transparent = v != "0";
++    else if (k == "capture_fixed") cs.fixed_views = split_names(v);
++    else if (k == "capture_arc") cs.arc = v != "0";
++    else if (k == "capture_arc_views") cs.arc_views = split_names(v);
++    else if (k == "capture_orbit") cs.orbit = v != "0";
++    else if (k == "capture_orbit_view") cs.orbit_view = v;
++    else if (k == "capture_orbit_degrees") cs.orbit_degrees = (float)std::atof(v.c_str());
++    else if (k == "capture_output") cs.output = std::clamp(std::atoi(v.c_str()), 0, 2);
++    else if (k == "capture_codec") cs.codec = std::clamp(std::atoi(v.c_str()), 0, 1);
++    else if (k == "capture_quality") cs.quality = std::clamp(std::atoi(v.c_str()), 0, 2);
++    else if (k == "capture_fps") cs.fps = std::max(1.0f, (float)std::atof(v.c_str()));
++}
++
++void write_capture_settings(FILE* f, const CaptureSettings& cs) {
++    std::fprintf(f, "capture_enabled=%d\n", cs.enabled ? 1 : 0);
++    std::fprintf(f, "capture_resolution=%d\n", cs.resolution);
++    std::fprintf(f, "capture_every=%d\n", cs.every_steps);
++    std::fprintf(f, "capture_dense=%d\n", cs.dense_start ? 1 : 0);
++    std::fprintf(f, "capture_transparent=%d\n", cs.transparent ? 1 : 0);
++    std::fprintf(f, "capture_fixed=%s\n", join_names(cs.fixed_views).c_str());
++    std::fprintf(f, "capture_arc=%d\n", cs.arc ? 1 : 0);
++    std::fprintf(f, "capture_arc_views=%s\n", join_names(cs.arc_views).c_str());
++    std::fprintf(f, "capture_orbit=%d\n", cs.orbit ? 1 : 0);
++    std::fprintf(f, "capture_orbit_view=%s\n", cs.orbit_view.c_str());
++    std::fprintf(f, "capture_orbit_degrees=%.1f\n", cs.orbit_degrees);
++    std::fprintf(f, "capture_output=%d\n", cs.output);
++    std::fprintf(f, "capture_codec=%d\n", cs.codec);
++    std::fprintf(f, "capture_quality=%d\n", cs.quality);
++    std::fprintf(f, "capture_fps=%.2f\n", cs.fps);
++}
++
++TrainCapture::Pose TrainCapture::post_pose(const spirula::TrainerSession& s, int p) const {
++    const auto& post = s.post;
++    Pose o;
++    const float* vm = &post.viewmats[(size_t)p * 16];
++    const float R[9] = {vm[0], vm[1], vm[2], vm[4], vm[5], vm[6], vm[8], vm[9], vm[10]};
++    std::copy(R, R + 9, o.R);
++    for (int i = 0; i < 3; i++)
++        o.C[i] = -(R[i] * vm[3] + R[3 + i] * vm[7] + R[6 + i] * vm[11]);
++    for (int i = 0; i < 4; i++) o.intr[i] = post.intrins[(size_t)p * 4 + i];
++    o.w = post.post_widths[(size_t)p];
++    o.h = post.post_heights[(size_t)p];
++    o.model = camera_model_to_string((CameraModelType)post.post_models[(size_t)p]);
++    o.distortion = camera_distortion_to_string(
++        (CameraDistortionType)post.post_distortions[(size_t)p]);
++    for (int i = 0; i < 8; i++) o.dist[i] = post.dist_coeffs[(size_t)p * 8 + i];
++    return o;
++}
++
++TrainCapture::Pose TrainCapture::track_pose(const spirula::TrainerSession& s,
++                                            const Track& t, float u) const {
++    if (t.kind == 0) return post_pose(s, t.posts[0]);
++    if (t.kind == 2) {
++        Pose o = post_pose(s, t.posts[0]);
++        float Q[9], QT[9], R2[9];
++        rot_axis(_up, u * _cs.orbit_degrees * (float)M_PI / 180.0f, Q);
++        transpose3(Q, QT);
++        matmul3(o.R, QT, R2);
++        std::copy(R2, R2 + 9, o.R);
++        float d[3] = {o.C[0] - _center[0], o.C[1] - _center[1], o.C[2] - _center[2]};
++        for (int r = 0; r < 3; r++)
++            o.C[r] = _center[r] + Q[r * 3] * d[0] + Q[r * 3 + 1] * d[1] + Q[r * 3 + 2] * d[2];
++        o.distortion = "NONE";
++        return o;
++    }
++    // Arc: keyframes in order, swung around the focus point at lerped distance.
++    const int n = (int)t.posts.size();
++    const float f = std::clamp(u, 0.0f, 1.0f) * (float)(n - 1);
++    const int i = std::min((int)f, n - 2);
++    const float a = f - (float)i;
++    const Pose A = post_pose(s, t.posts[(size_t)i]), B = post_pose(s, t.posts[(size_t)i + 1]);
++    Pose o = A;
++    float da[3], db[3];
++    for (int k = 0; k < 3; k++) { da[k] = A.C[k] - _center[k]; db[k] = B.C[k] - _center[k]; }
++    const float la = norm3(da), lb = norm3(db);
++    double va[4] = {0, da[0], da[1], da[2]}, vb[4] = {0, db[0], db[1], db[2]};
++    // Direction slerp as a pure-vector quaternion: same great-circle arc.
++    for (int k = 1; k < 4; k++) { va[k] /= std::max(la, 1e-12f); vb[k] /= std::max(lb, 1e-12f); }
++    double v[4];
++    slerp(va, vb, a, v);
++    const float len = la + (lb - la) * a;
++    for (int k = 0; k < 3; k++) o.C[k] = _center[k] + (float)v[k + 1] * len;
++    // Aim at the lerp of each key's point nearest the focus, up lerped too:
++    // slerping the keys' rotations separately lets the subject leave frame.
++    auto aim = [&](const Pose& P, float T[3], float U[3]) {
++        const float f[3] = {P.R[6], P.R[7], P.R[8]};
++        const float d = (_center[0] - P.C[0]) * f[0] + (_center[1] - P.C[1]) * f[1] +
++                        (_center[2] - P.C[2]) * f[2];
++        for (int k = 0; k < 3; k++) { T[k] = P.C[k] + f[k] * d; U[k] = -P.R[3 + k]; }
++    };
++    float TA[3], UA[3], TB[3], UB[3], T[3], U[3];
++    aim(A, TA, UA);
++    aim(B, TB, UB);
++    for (int k = 0; k < 3; k++) { T[k] = TA[k] + (TB[k] - TA[k]) * a; U[k] = UA[k] + (UB[k] - UA[k]) * a; }
++    float z[3] = {T[0] - o.C[0], T[1] - o.C[1], T[2] - o.C[2]};
++    normalize3(z);
++    const float down[3] = {-U[0], -U[1], -U[2]};
++    float x[3], y[3];
++    cross(down, z, x);
++    normalize3(x);
++    cross(z, x, y);
++    for (int k = 0; k < 3; k++) { o.R[k] = x[k]; o.R[3 + k] = y[k]; o.R[6 + k] = z[k]; }
++    for (int k = 0; k < 4; k++) o.intr[k] = A.intr[k] + (B.intr[k] - A.intr[k]) * a;
++    o.distortion = "NONE";
++    return o;
++}
++
++void TrainCapture::begin(spirula::TrainerSession& s, const CaptureSettings& cs,
++                         int start_step, int total_steps) {
++    finish();
++    _cs = cs;
++    _tracks.clear();
++    _steps.clear();
++    _next = 0;
++    if (!cs.enabled || !cs.any_track()) return;
++    capture_frame_size(cs.resolution, _W, _H);
++
++    const auto& names = s.ds.image_filenames;
++    auto post_of = [&](const std::string& name) -> int {
++        for (size_t i = 0; i < names.size(); i++)
++            if (fs::path(names[i]).filename().string() == name)
++                return s.post.post_offsets.empty() ? (int)i : s.post.post_offsets[i];
++        return -1;
++    };
++    const fs::path root = s.out_dir / "captures";
++    for (const std::string& v : cs.fixed_views) {
++        const int p = post_of(v);
++        if (p >= 0) _tracks.push_back({(root / ("view_" + safe_stem(v))).string(), {p}, 0});
++    }
++    if (cs.arc) {
++        Track t{(root / "arc").string(), {}, 1};
++        for (const std::string& v : cs.arc_views)
++            if (int p = post_of(v); p >= 0) t.posts.push_back(p);
++        if (t.posts.size() >= 2) _tracks.push_back(std::move(t));
++    }
++    if (cs.orbit) {
++        if (int p = post_of(cs.orbit_view); p >= 0)
++            _tracks.push_back({(root / "orbit").string(), {p}, 2});
++    }
++    if (_tracks.empty()) return;
++
++    axes_focus(s.post, _center);
++    float up[3] = {0, 0, 0};
++    for (int64_t p = 0; p < s.post.n_post; p++)
++        for (int k = 0; k < 3; k++) up[k] -= s.post.viewmats[(size_t)p * 16 + 4 + k];
++    normalize3(up);
++    std::copy(up, up + 3, _up);
++
++    _steps = capture_schedule(cs, start_step, total_steps);
++    if (_steps.empty()) return;
++
++    _session = &s;
++    for (Track& t : _tracks) {
++        std::error_code ec;
++        fs::create_directories(t.dir, ec);
++        std::ofstream(fs::path(t.dir) / "frames.csv") << "frame,step\n";
++        if (cs.output == 0) continue;
++        render::Encoder e{render::Encoder::Ffmpeg, cs.ffmpeg, cs.codec == 0 ? "libx264" : "libx265"};
++        const std::string mp4 =
++            (fs::path(t.dir) / (fs::path(t.dir).filename().string() + ".mp4")).string();
++        t.video = render::open_pipe_sink(
++            render::encoder_argv(e, _W, _H, std::max(1.0f, cs.fps),
++                                 cs.codec == 0 ? render::Codec::H264 : render::Codec::H265,
++                                 cs.quality, false, mp4),
++            _W, _H);
++    }
++    stbi_write_png_compression_level = 4;
++    _closing = false;
++    for (int i = 0; i < 2; i++) _writers.emplace_back([this] { writer_loop(); });
++    char line[256];
++    std::snprintf(line, sizeof line,
++                  "Training capture: %d track(s), %d frames each at %dx%d (%s), into %s",
++                  (int)_tracks.size(), (int)_steps.size(), _W, _H,
++                  cs.output == 0 ? "PNG" : cs.output == 1 ? (cs.codec ? "H.265" : "H.264")
++                                                          : (cs.codec ? "PNG + H.265" : "PNG + H.264"),
++                  root.string().c_str());
++    s.log(line);
++}
++
++void TrainCapture::render(spirula::TrainerSession& s, const Pose& p, Job& job) {
++    const int W = _W, H = _H;
++    const float sc = std::min((float)W / (float)p.w, (float)H / (float)p.h);
++    const float intr[4] = {p.intr[0] * sc, p.intr[1] * sc,
++                           0.5f * W + (p.intr[2] - 0.5f * p.w) * sc,
++                           0.5f * H + (p.intr[3] - 0.5f * p.h) * sc};
++    float vm[16] = {0};
++    for (int r = 0; r < 3; r++) {
++        for (int c = 0; c < 3; c++) vm[r * 4 + c] = p.R[r * 3 + c];
++        vm[r * 4 + 3] = -(p.R[r * 3] * p.C[0] + p.R[r * 3 + 1] * p.C[1] + p.R[r * 3 + 2] * p.C[2]);
++    }
++    vm[15] = 1;
++    const int64_t npx = (int64_t)W * H;
++    _rgb.resize((size_t)npx * 3);
++    _ts.resize((size_t)npx);
++    {
++        std::lock_guard<std::mutex> lk(s.engine_mutex);
++        set_camera_params(W, H, p.model, p.distortion, tvp(vm, 4, {1, 4, 4}),
++                          tvp(intr, 4, {1, 4}), tvp(p.dist, 4, {1, 8}));
++        // The bare splats: training's random background would tint every
++        // half-transparent edge with that step's noise.
++        const bool bg = engine_set_background_enabled(false);
++        try {
++            forward_3dgs(s.cfg.primitive, 100, s.cfg.packed, false, 0);
++            engine_copy_render_to_host(tvp(_rgb.data(), 4, {1, H, W, 3}), tv_null(),
++                                       tvp(_ts.data(), 4, {1, H, W, 1}), tv_null(), tv_null());
++        } catch (...) {
++            engine_set_background_enabled(bg);
++            throw;
++        }
++        engine_set_background_enabled(bg);
++    }
++    job.W = W;
++    job.H = H;
++    job.ch = _cs.transparent ? 4 : 3;
++    const bool png = _cs.output != 1, video = _cs.output != 0;
++    if (png) job.px.resize((size_t)npx * job.ch);
++    if (video) job.rgb.resize((size_t)npx * 3);
++    auto to8 = [](float v) { return (uint8_t)(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
++    for (int64_t i = 0; i < npx; i++) {
++        const float a = std::clamp(1.0f - _ts[(size_t)i], 0.0f, 1.0f);
++        for (int c = 0; c < 3; c++) {
++            const float pre = std::min(_rgb[(size_t)i * 3 + c], a);
++            if (video) job.rgb[(size_t)i * 3 + c] = to8(pre);
++            // PNG alpha is straight, the render premultiplied.
++            if (png) job.px[(size_t)i * job.ch + c] =
++                to8(_cs.transparent ? (a > 1e-4f ? pre / a : 0.0f) : pre);
++        }
++        if (png && _cs.transparent) job.px[(size_t)i * 4 + 3] = to8(a);
++    }
++}
++
++void TrainCapture::on_step(spirula::TrainerSession& s, int step) {
++    if (_next >= _steps.size() || step < _steps[_next]) return;
++    while (_next + 1 < _steps.size() && _steps[_next + 1] <= step) _next++;
++    const int frame = (int)_next;
++    const float u = _steps.size() > 1 ? (float)frame / (float)(_steps.size() - 1) : 0.0f;
++    _next++;
++    for (Track& t : _tracks) {
++        Job job;
++        char name[64];
++        std::snprintf(name, sizeof name, "frame_%05d.png", frame);
++        job.path = (fs::path(t.dir) / name).string();
++        try {
++            render(s, track_pose(s, t, u), job);
++        } catch (const std::exception& e) {
++            s.log(std::string("Training capture: render failed: ") + e.what());
++            continue;
++        }
++        std::ofstream(fs::path(t.dir) / "frames.csv", std::ios::app) << frame << "," << step << "\n";
++        if (t.video && !t.video->push(std::move(job.rgb))) {
++            s.log("Training capture: video encoder stopped for " + t.dir + ": " + t.video->error());
++            t.video->cancel();
++            t.video.reset();
++        }
++        if (_cs.output == 1) continue;
++        std::unique_lock<std::mutex> lk(_mu);
++        _cv_room.wait(lk, [&] { return _queue.size() < 4; });
++        _queue.push_back(std::move(job));
++        _cv_job.notify_one();
++    }
++}
++
++void TrainCapture::writer_loop() {
++    for (;;) {
++        Job job;
++        {
++            std::unique_lock<std::mutex> lk(_mu);
++            _cv_job.wait(lk, [&] { return _closing || !_queue.empty(); });
++            if (_queue.empty()) return;
++            job = std::move(_queue.front());
++            _queue.pop_front();
++        }
++        _cv_room.notify_one();
++        stbi_write_png(job.path.c_str(), job.W, job.H, job.ch, job.px.data(), job.W * job.ch);
++    }
++}
++
++void TrainCapture::finish() {
++    {
++        std::lock_guard<std::mutex> lk(_mu);
++        _closing = true;
++    }
++    _cv_job.notify_all();
++    for (std::thread& t : _writers) if (t.joinable()) t.join();
++    _writers.clear();
++    _closing = false;
++    for (Track& t : _tracks) {
++        if (!t.video) continue;
++        const bool ok = t.video->finish();
++        if (_session)
++            _session->log(ok ? "Training capture: wrote " + fs::path(t.dir).filename().string() + ".mp4"
++                             : "Training capture: video failed for " + t.dir + ": " + t.video->error());
++        t.video.reset();
++    }
++}
++
++}  // namespace gui
+diff --git a/src/app/gui/TrainCapture.h b/src/app/gui/TrainCapture.h
+new file mode 100644
+index 00000000..bd95b15f
+--- /dev/null
++++ b/src/app/gui/TrainCapture.h
+@@ -0,0 +1,97 @@
++#pragma once
++
++// TrainCapture -- PNG image sequences of the model as it trains, rendered on
++// the training thread between steps from fixed training views, an arc through
++// several views, or an orbit about the scene. Independent of every preview.
++// Frames go to <run>/captures/<track>/: frame_%05d.png and/or <track>.mp4
++// (ffmpeg, H.264 or H.265), with frames.csv mapping frames to steps.
++
++#include <condition_variable>
++#include <cstdint>
++#include <cstdio>
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace spirula { class TrainerSession; }
++namespace gui::render { class FrameSink; }
++
++namespace gui {
++
++struct CaptureSettings {
++    bool enabled = false;
++    int resolution = 0;          // 0 HD 1920x1080, 1 2K 2560x1440, 2 4K 3840x2160
++    int every_steps = 100;
++    bool dense_start = true;     // 5x more often over the first 10 intervals
++    bool transparent = true;     // RGBA over nothing, else RGB over black
++    int output = 1;              // 0 PNG frames, 1 video, 2 both
++    int codec = 1;               // 0 H.264, 1 H.265 (video is always over black)
++    int quality = 1;             // 0 best, 1 balanced, 2 smallest
++    float fps = 30.0f;
++    std::string ffmpeg = "ffmpeg";   // set from the app's tool path, not saved
++    // Image file names (not indices) so a saved selection survives a re-parse.
++    std::vector<std::string> fixed_views;
++    bool arc = false;
++    std::vector<std::string> arc_views;   // keyframes, in order
++    bool orbit = false;
++    std::string orbit_view;
++    float orbit_degrees = 360.0f;
++
++    bool any_track() const {
++        return !fixed_views.empty() || (arc && arc_views.size() >= 2) ||
++               (orbit && !orbit_view.empty());
++    }
++};
++
++void capture_frame_size(int resolution, int& W, int& H);
++// The steps a run from `start` to `total` captures at, ascending.
++std::vector<int> capture_schedule(const CaptureSettings& cs, int start, int total);
++// gui.conf persistence: capture_* keys.
++void read_capture_setting(CaptureSettings& cs, const std::string& k, const std::string& v);
++void write_capture_settings(FILE* f, const CaptureSettings& cs);
++
++class TrainCapture {
++public:
++    ~TrainCapture() { finish(); }
++
++    // Training thread, after setup_engine(). Logs what it will write.
++    void begin(spirula::TrainerSession& s, const CaptureSettings& cs,
++               int start_step, int total_steps);
++    // Training thread, engine mutex NOT held: renders when `step` is due.
++    void on_step(spirula::TrainerSession& s, int step);
++    // Waits for the PNG writers to drain.
++    void finish();
++
++private:
++    struct Pose { float R[9]; float C[3]; float intr[4]; int w = 0, h = 0;
++                  std::string model, distortion; float dist[8]; };
++    struct Track { std::string dir; std::vector<int> posts; int kind = 0;
++                   std::shared_ptr<render::FrameSink> video; };
++    struct Job { std::string path; int W = 0, H = 0, ch = 4;
++                 std::vector<uint8_t> px, rgb; };   // rgb: over black, for video
++
++    Pose post_pose(const spirula::TrainerSession& s, int p) const;
++    Pose track_pose(const spirula::TrainerSession& s, const Track& t, float u) const;
++    void render(spirula::TrainerSession& s, const Pose& p, Job& job);
++    spirula::TrainerSession* _session = nullptr;   // for finish()'s log
++    void writer_loop();
++
++    CaptureSettings _cs;
++    std::vector<Track> _tracks;
++    std::vector<int> _steps;      // capture schedule, ascending
++    size_t _next = 0;             // index into _steps
++    int _W = 0, _H = 0;
++    float _center[3] = {0, 0, 0}, _up[3] = {0, 0, 1};
++    std::vector<float> _rgb, _ts; // host scratch, reused
++
++    std::mutex _mu;
++    std::condition_variable _cv_job, _cv_room;
++    std::deque<Job> _queue;
++    bool _closing = false;
++    std::vector<std::thread> _writers;
++};
++
++}  // namespace gui
+diff --git a/src/app/gui/TrainCapturePanel.cpp b/src/app/gui/TrainCapturePanel.cpp
+new file mode 100644
+index 00000000..dac47bac
+--- /dev/null
++++ b/src/app/gui/TrainCapturePanel.cpp
+@@ -0,0 +1,159 @@
++// TrainCapturePanel.cpp -- the trainer screen's "Training animation capture"
++// section (GuiApp::draw_capture_panel); the capture itself is TrainCapture.
++
++#include "app/gui/GuiApp.h"
++#include "app/gui/Layout.h"
++#include "app/gui/Ui.h"
++
++#include <algorithm>
++#include <cctype>
++#include <filesystem>
++
++namespace fs = std::filesystem;
++
++namespace gui {
++
++namespace {
++
++const ImVec4 kWarn(0.95f, 0.75f, 0.30f, 1.0f);
++
++bool has(const std::vector<std::string>& v, const std::string& s) {
++    return std::find(v.begin(), v.end(), s) != v.end();
++}
++void toggle(std::vector<std::string>& v, const std::string& s, bool on) {
++    v.erase(std::remove(v.begin(), v.end(), s), v.end());
++    if (on) v.push_back(s);
++}
++bool icontains(const std::string& hay, const std::string& needle) {
++    if (needle.empty()) return true;
++    auto it = std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
++                          [](char a, char b) { return std::tolower((unsigned char)a) ==
++                                                      std::tolower((unsigned char)b); });
++    return it != hay.end();
++}
++
++}  // namespace
++
++void GuiApp::draw_capture_panel() {
++    if (!ui::CollapsingHeaderRaw("Training animation capture###capture_header")) return;
++    const TrainRunner::Phase ph = _runner.phase();
++    const bool running = ph == TrainRunner::Phase::Preparing ||
++                         ph == TrainRunner::Phase::Training;
++    CaptureSettings& c = _capture;
++    bool dirty = false;
++
++    ImGui::BeginDisabled(running);
++    dirty |= ui::CheckboxRaw("Capture image sequences while training###cap_on", &c.enabled);
++    ImGui::BeginDisabled(!c.enabled);
++
++    const char* res[] = {"HD  1920 x 1080", "2K  2560 x 1440", "4K  3840 x 2160"};
++    ImGui::SetNextItemWidth(px(170.0f));
++    dirty |= ui::ComboRaw("Resolution###cap_res", &c.resolution, res, 3);
++    const char* outs[] = {"PNG frames", "Video (MP4)", "PNG frames + video"};
++    ImGui::SetNextItemWidth(px(170.0f));
++    dirty |= ui::ComboRaw("Output###cap_output", &c.output, outs, 3);
++    if (c.output != 0) {
++        const char* codecs[] = {"H.264", "H.265 (smaller)"};
++        ImGui::SetNextItemWidth(px(170.0f));
++        dirty |= ui::ComboRaw("Codec###cap_codec", &c.codec, codecs, 2);
++        const char* quals[] = {"Best", "Balanced", "Smallest"};
++        ImGui::SetNextItemWidth(px(170.0f));
++        dirty |= ui::ComboRaw("Quality###cap_quality", &c.quality, quals, 3);
++        ImGui::SetNextItemWidth(px(170.0f));
++        if (ui::InputFloatRaw("Frames per second###cap_fps", &c.fps, "%.0f")) {
++            c.fps = std::clamp(c.fps, 1.0f, 120.0f);
++            dirty = true;
++        }
++    }
++    if (c.output != 1) {
++        int bg = c.transparent ? 0 : 1;
++        const char* bgs[] = {"Transparent", "Black"};
++        ImGui::SetNextItemWidth(px(170.0f));
++        if (ui::ComboRaw("PNG background###cap_bg", &bg, bgs, 2)) { c.transparent = bg == 0; dirty = true; }
++    }
++    ImGui::SetNextItemWidth(px(170.0f));
++    if (ui::InputIntRaw("Capture every N steps###cap_every", &c.every_steps)) {
++        c.every_steps = std::max(1, c.every_steps);
++        dirty = true;
++    }
++    dirty |= ui::CheckboxRaw("5x as often for the first 10 captures' worth of steps###cap_dense",
++                             &c.dense_start);
++
++    dirty |= ui::CheckboxRaw("Arc: move through the views ticked under Arc, in tick order###cap_arc",
++                             &c.arc);
++    dirty |= ui::CheckboxRaw("Orbit: circle the subject from the view chosen under Orbit###cap_orbit",
++                             &c.orbit);
++    if (c.orbit) {
++        ImGui::SetNextItemWidth(px(170.0f));
++        dirty |= ui::InputFloatRaw("Orbit degrees over the run###cap_deg", &c.orbit_degrees, "%.0f");
++    }
++
++    spirula::TrainerSession* s = _runner.session();
++    const bool have = s && !s->ds.image_filenames.empty();
++    if (!have) {
++        ui::TextDisabledRaw("Open a dataset to choose views.");
++    } else {
++        ImGui::SetNextItemWidth(px(250.0f));
++        ui::InputTextRaw("Filter views###cap_filter", &_capture_filter);
++        const ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
++                                   ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit;
++        if (ImGui::BeginTable("##cap_views", 4, tf, ImVec2(0, px(220.0f)))) {
++            ImGui::TableSetupScrollFreeze(0, 1);
++            ui::TableSetupColumnRaw("View", ImGuiTableColumnFlags_WidthStretch);
++            ui::TableSetupColumnRaw("Fixed", 0, px(44.0f));
++            ui::TableSetupColumnRaw("Arc", 0, px(64.0f));
++            ui::TableSetupColumnRaw("Orbit", 0, px(44.0f));
++            ImGui::TableHeadersRow();
++            const auto& names = s->ds.image_filenames;
++            for (size_t i = 0; i < names.size(); i++) {
++                const std::string name = fs::path(names[i]).filename().string();
++                if (!icontains(name, _capture_filter)) continue;
++                ImGui::PushID((int)i);
++                ImGui::TableNextRow();
++                ImGui::TableSetColumnIndex(0);
++                ui::TextRaw(name);
++                ImGui::TableSetColumnIndex(1);
++                bool fixed_on = has(c.fixed_views, name);
++                if (ui::CheckboxRaw("##fixed", &fixed_on)) { toggle(c.fixed_views, name, fixed_on); dirty = true; }
++                ImGui::TableSetColumnIndex(2);
++                bool arc_on = has(c.arc_views, name);
++                if (ui::CheckboxRaw("##arc", &arc_on)) { toggle(c.arc_views, name, arc_on); dirty = true; }
++                if (arc_on) {
++                    const auto at = std::find(c.arc_views.begin(), c.arc_views.end(), name);
++                    ImGui::SameLine();
++                    ui::TextDisabledRaw(std::to_string(at - c.arc_views.begin() + 1));
++                }
++                ImGui::TableSetColumnIndex(3);
++                if (ui::RadioButtonRaw("##orbit", c.orbit_view == name)) {
++                    c.orbit_view = c.orbit_view == name ? std::string() : name;
++                    dirty = true;
++                }
++                ImGui::PopID();
++            }
++            ImGui::EndTable();
++        }
++        if (!c.arc_views.empty() && ui::ButtonRaw("Clear arc###cap_clear_arc")) {
++            c.arc_views.clear();
++            dirty = true;
++        }
++    }
++
++    const int frames = (int)capture_schedule(c, 0, std::max(1, _cfg.num_iterations)).size();
++    int tracks = (int)c.fixed_views.size() + (c.arc && c.arc_views.size() >= 2 ? 1 : 0) +
++                 (c.orbit && !c.orbit_view.empty() ? 1 : 0);
++    int W = 0, H = 0;
++    capture_frame_size(c.resolution, W, H);
++    ui::TextDisabledRaw(std::to_string(tracks) + " sequence(s), about " + std::to_string(frames) +
++                        " frames each at " + std::to_string(W) + " x " + std::to_string(H));
++    ui::TextDisabledRaw("Written to <run folder>/captures/ (view_<name>, arc, orbit)");
++    if (c.output != 0)
++        ui::TextDisabledRaw("Video is encoded by ffmpeg on the CPU, over a black background.");
++    if (c.arc && c.arc_views.size() < 2) ui::TextColoredRaw(kWarn, "The arc needs at least two views.");
++    if (c.orbit && c.orbit_view.empty()) ui::TextColoredRaw(kWarn, "Choose the orbit's starting view.");
++
++    ImGui::EndDisabled();
++    ImGui::EndDisabled();
++    if (dirty) save_settings();
++}
++
++}  // namespace gui
+diff --git a/src/app/gui/TrainRunner.cpp b/src/app/gui/TrainRunner.cpp
+index fdd94f5b..2a5d881b 100644
+--- a/src/app/gui/TrainRunner.cpp
++++ b/src/app/gui/TrainRunner.cpp
+@@ -164,12 +164,14 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
+                     {(long long)s->cfg.viewer_port}));
+             }
+ 
++            _capture.begin(*s, _capture_cfg, s->start_step, s->cfg.num_iterations);
+             _phase = Phase::Training;
+             spirula::TrainerCallbacks cb;
+             cb.on_data_error = [this](const std::string& what) {
+                 return await_data_decision(what);
+             };
+-            cb.on_step = [this](const spirula::TrainerProgress& p) {
++            cb.on_step = [this, s](const spirula::TrainerProgress& p) {
++                _capture.on_step(*s, p.step);
+                 std::lock_guard<std::mutex> lk(_mu);
+                 _latest = p;
+                 _latencies.push_back(p.step_latency);
+@@ -187,8 +189,10 @@ void TrainRunner::start_training(const TrainConfig& cfg, const std::string& pres
+                 _metrics.push_back(m);
+             };
+             s->train(cb);
++            _capture.finish();
+             _phase = Phase::Done;
+         } catch (const std::exception& e) {
++            _capture.finish();
+             std::lock_guard<std::mutex> lk(_mu);
+             _error = e.what();
+             _phase = Phase::TrainError;
+diff --git a/src/app/gui/TrainRunner.h b/src/app/gui/TrainRunner.h
+index dc005bae..24ba9889 100644
+--- a/src/app/gui/TrainRunner.h
++++ b/src/app/gui/TrainRunner.h
+@@ -14,6 +14,7 @@
+ //    RenderWorker attach.
+ 
+ #include "app/TrainerCore.h"
++#include "app/gui/TrainCapture.h"
+ #include "app/webviewer/Viewer.h"
+ 
+ #include <atomic>
+@@ -56,6 +57,9 @@ public:
+     // must detach viewers from the previous one first.
+     void start_training(const TrainConfig& cfg, const std::string& preset);
+ 
++    // Image-sequence capture for the next start_training().
++    void set_capture(const CaptureSettings& cs) { _capture_cfg = cs; }
++
+     void set_paused(bool p);
+     bool paused() const;
+     // Graceful: finish the step in flight, then save a final checkpoint
+@@ -116,6 +120,8 @@ private:
+ 
+     std::unique_ptr<spirula::TrainerSession> _session;
+     std::unique_ptr<ViewerServer> _web_viewer;
++    CaptureSettings _capture_cfg;
++    TrainCapture _capture;
+     std::thread _worker;
+     std::atomic<Phase> _phase{Phase::Idle};
+     std::atomic<bool> _engine_ready{false};
+diff --git a/src/app/gui/Ui.h b/src/app/gui/Ui.h
+index 04ca2e7e..7103ed77 100644
+--- a/src/app/gui/Ui.h
++++ b/src/app/gui/Ui.h
+@@ -334,6 +334,10 @@ inline bool BeginTabItem(const Msg& m, ImGuiTabItemFlags flags = 0) {
+ inline bool CollapsingHeader(const Msg& m, ImGuiTreeNodeFlags flags = 0) {
+     return ImGui::CollapsingHeader(detail::label(m), flags);
+ }
++inline bool CollapsingHeaderRaw(const char* id, ImGuiTreeNodeFlags flags = 0) {
++    return ImGui::CollapsingHeader(id, flags);
++}
++inline bool TreeNodeRaw(const char* id) { return ImGui::TreeNode(id); }
+ inline bool TreeNode(const Msg& m) { return ImGui::TreeNode(detail::label(m)); }
+ inline bool TreeNode(const Msg& m, std::initializer_list<Arg> a) {
+     return ImGui::TreeNode(detail::label(format(m, a), m));
+diff --git a/src/app/gui/VoidEditor.cpp b/src/app/gui/VoidEditor.cpp
+new file mode 100644
+index 00000000..ea8b2bff
+--- /dev/null
++++ b/src/app/gui/VoidEditor.cpp
+@@ -0,0 +1,408 @@
++// VoidEditor.cpp -- see VoidEditor.h.
++
++#include "app/gui/VoidEditor.h"
++
++#include "app/gui/Layout.h"
++#include "app/gui/Ui.h"
++#include "checkpoint/SplatPly.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <filesystem>
++
++namespace fs = std::filesystem;
++
++namespace gui {
++
++namespace {
++
++const ImU32 kBlobColours[] = {IM_COL32(255, 90, 90, 255),  IM_COL32(90, 200, 255, 255),
++                              IM_COL32(120, 230, 110, 255), IM_COL32(255, 200, 70, 255),
++                              IM_COL32(220, 120, 255, 255), IM_COL32(255, 150, 200, 255)};
++ImU32 blob_colour(int i, int alpha) {
++    const ImU32 c = kBlobColours[i % 6];
++    return (c & 0x00FFFFFF) | ((ImU32)alpha << 24);
++}
++const ImVec4 kWarn(0.95f, 0.75f, 0.30f, 1.0f);
++
++std::string drawing_path(const std::string& ds) { return (fs::path(ds) / "roi" / "voids.svoid").string(); }
++std::string region_path(const std::string& ds) { return (fs::path(ds) / "roi" / "voids.json").string(); }
++
++}  // namespace
++
++VoidEditor::~VoidEditor() {
++    if (_gen.valid()) _gen.wait();
++}
++
++void VoidEditor::destroy_gl() {
++    if (_tex) glDeleteTextures(1, &_tex);
++    _tex = 0;
++    _tex_slice = -1;
++}
++
++void VoidEditor::open(const std::string& dataset_dir, const std::string& ply, double rs,
++                      const double center[3], const double focus[3]) {
++    std::copy(focus, focus + 3, _focus);
++    _open = true;
++    _dataset = dataset_dir;
++    _rs = rs > 0 ? rs : 1;
++    std::copy(center, center + 3, _center);
++    _error.clear();
++    _note.clear();
++    VoidDoc saved;
++    std::string err;
++    const bool have_saved = load_void_doc(drawing_path(dataset_dir), saved, err);
++    _ply = ply.empty() && have_saved ? saved.source : ply;
++    if (_ply.empty()) { _error = "There is no model to slice yet: train for a while first."; return; }
++    if (have_saved) {
++        // Same model frame as before, so the blobs stay where they were drawn.
++        _doc = saved;
++        _axis = saved.f.axis;
++        _slices = saved.f.slices;
++        start(false);
++    } else {
++        _doc = VoidDoc{};
++        start(true);
++    }
++}
++
++void VoidEditor::start(bool new_frame) {
++    if (_gen.valid()) return;
++    _error.clear();
++    VoidDoc doc = _doc;
++    const std::string ply = _ply;
++    const double rs = _rs;
++    const double c[3] = {_center[0], _center[1], _center[2]};
++    const double fo[3] = {_focus[0], _focus[1], _focus[2]};
++    const int axis = _axis, slices = _slices, res = _res;
++    _gen = std::async(std::launch::async, [=]() mutable {
++        Gen g;
++        try {
++            const std::string path = spirula::find_splat_ply(ply).first;
++            const spirula::SplatCloud cloud = spirula::read_splat_ply(path, false);
++            // Recutting along the same axis keeps the frame, so the blobs stay
++            // where they were drawn; another axis starts over.
++            if (new_frame && !doc.blobs.empty() && doc.f.slices > 0 && doc.f.axis == axis) {
++                restack_blobs(doc, refine_void_frame(doc.f, slices, res));
++            } else if (new_frame) {
++                doc.f = make_void_frame(cloud, rs, c, fo, axis, slices, res);
++                doc.blobs.clear();
++            }
++            doc.source = path;
++            g.imgs = render_void_slices(cloud, rs, c, doc.f);
++            g.doc = std::move(doc);
++        } catch (const std::exception& e) {
++            g.error = e.what();
++        }
++        return g;
++    });
++}
++
++std::string VoidEditor::take_apply_request() {
++    std::string r;
++    r.swap(_apply_req);
++    return r;
++}
++
++void VoidEditor::save() {
++    std::error_code ec;
++    fs::create_directories(fs::path(_dataset) / "roi", ec);
++    save_void_doc(_doc, drawing_path(_dataset));
++    const std::string region = void_region_json(_doc);
++    if (region.empty()) {
++        fs::remove(region_path(_dataset), ec);
++        _note = "Saved the drawing; no blobs yet, so no region.";
++    } else {
++        FILE* f = std::fopen(region_path(_dataset).c_str(), "wb");
++        if (!f) { _error = "Cannot write " + region_path(_dataset); return; }
++        std::fwrite(region.data(), 1, region.size(), f);
++        std::fclose(f);
++        _note = "Saved " + region_path(_dataset);
++    }
++    _dirty = false;
++}
++
++void VoidEditor::draw() {
++    if (!_open) return;
++    if (_gen.valid() && _gen.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
++        Gen g = _gen.get();
++        if (!g.error.empty()) {
++            _error = g.error;
++        } else {
++            _doc = std::move(g.doc);
++            _imgs = std::move(g.imgs);
++            _slice = std::clamp(_slice, 0, std::max(0, _doc.f.slices - 1));
++            if (_blob >= (int)_doc.blobs.size()) _blob = (int)_doc.blobs.size() - 1;
++            _tex_slice = -1;
++        }
++    }
++    ImGui::SetNextWindowSize(ImVec2(px(1200.0f), px(820.0f)), ImGuiCond_FirstUseEver);
++    if (ImGui::Begin("Cross-section void editor###void_editor", &_open)) {
++        ImGui::BeginChild("##void_controls", ImVec2(px(340.0f), 0), ImGuiChildFlags_Borders);
++        draw_controls();
++        ImGui::EndChild();
++        ImGui::SameLine();
++        ImGui::BeginChild("##void_canvas_child", ImVec2(0, 0), ImGuiChildFlags_Borders,
++                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
++        draw_canvas();
++        ImGui::EndChild();
++    }
++    ImGui::End();
++}
++
++void VoidEditor::draw_controls() {
++    const bool busy = _gen.valid();
++    ui::TextWrappedRaw("Model: " + (_ply.empty() ? std::string("(none)") : _ply));
++    if (busy) ui::TextColoredRaw(kWarn, "Making cross sections...");
++
++    const char* axes[] = {"Across the body's long axis", "Across its middle axis", "Across its short axis",
++                          "Along dataset X", "Along dataset Y", "Along dataset Z"};
++    ImGui::SetNextItemWidth(-1);
++    ui::ComboRaw("##void_axis", &_axis, axes, 6);
++    ImGui::SetNextItemWidth(-1);
++    ui::SliderIntRaw("##void_slices", &_slices, 32, 256, "%d slices");
++    ImGui::SetNextItemWidth(-1);
++    ui::SliderIntRaw("##void_res", &_res, 256, 1024, "%d px images");
++    ImGui::BeginDisabled(busy || _ply.empty());
++    if (ui::ButtonRaw("Make new cross sections###void_regen")) start(true);
++    if (!_doc.blobs.empty())
++        ui::TextDisabledRaw(_axis == _doc.f.axis ? "Same axis: the blobs are kept and restacked."
++                                                 : "Another axis: the blobs are cleared.");
++    ImGui::EndDisabled();
++    ImGui::Separator();
++
++    const int n = _doc.f.slices;
++    if (n > 0 && !_imgs.empty()) {
++        if (ui::ArrowButtonRaw("##void_prev", ImGuiDir_Left) && _slice > 0) { _slice--; _drawing.clear(); }
++        ImGui::SameLine();
++        ImGui::SetNextItemWidth(px(230.0f));
++        if (ui::SliderIntRaw("##void_slice", &_slice, 0, n - 1, "slice %d")) _drawing.clear();
++        ImGui::SameLine();
++        if (ui::ArrowButtonRaw("##void_next", ImGuiDir_Right) && _slice < n - 1) { _slice++; _drawing.clear(); }
++        ui::TextDisabledRaw("Up/down arrow keys step slices too.");
++    }
++    ImGui::Separator();
++
++    ui::TextRaw("Void blobs");
++    for (int i = 0; i < (int)_doc.blobs.size(); i++) {
++        ImGui::PushID(i);
++        const ImVec2 p = ImGui::GetCursorScreenPos();
++        const float h = ImGui::GetTextLineHeight();
++        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + h, p.y + h), blob_colour(i, 255));
++        ImGui::Dummy(ImVec2(h, h));
++        ImGui::SameLine();
++        const std::string label = _doc.blobs[(size_t)i].name + "  (" +
++                                  std::to_string(_doc.blobs[(size_t)i].keys.size()) + " key slices)";
++        if (ui::SelectableRaw(label, _blob == i)) { _blob = i; _drawing.clear(); }
++        ImGui::PopID();
++    }
++    ImGui::BeginDisabled(_imgs.empty());
++    if (ui::ButtonRaw("New blob###void_new")) {
++        _doc.blobs.push_back({"Void " + std::to_string(_doc.blobs.size() + 1), {}});
++        _blob = (int)_doc.blobs.size() - 1;
++        _drawing.clear();
++        _dirty = true;
++    }
++    ImGui::EndDisabled();
++    if (_blob >= 0 && _blob < (int)_doc.blobs.size()) {
++        ImGui::SameLine();
++        if (ui::ButtonRaw("Delete blob###void_del")) {
++            _doc.blobs.erase(_doc.blobs.begin() + _blob);
++            _blob = std::min(_blob, (int)_doc.blobs.size() - 1);
++            _dirty = true;
++        }
++    }
++    if (_blob >= 0 && _blob < (int)_doc.blobs.size()) {
++        VoidBlob& b = _doc.blobs[(size_t)_blob];
++        ImGui::SetNextItemWidth(-1);
++        if (ui::InputTextRaw("##void_name", &b.name)) _dirty = true;
++        if (!b.keys.empty()) {
++            int first, last;
++            blob_span(b, _doc.f.pitch, first, last);
++            ui::TextDisabledRaw("Spans slices " + std::to_string(std::max(0, first)) + " to " +
++                                std::to_string(std::min(_doc.f.slices - 1, last)) +
++                                (b.round_ends ? " (ends rounded)" : " (ends at the first and last key)"));
++        }
++        if (ui::CheckboxRaw("Round the ends past the first and last key###void_round", &b.round_ends))
++            _dirty = true;
++        bool is_key = false;
++        const std::vector<VPt> here = blob_outline(b, _slice, _doc.f.pitch, &is_key);
++        ui::TextDisabledRaw(is_key ? "This slice: key outline (drag its points)"
++                            : here.empty() ? "This slice: blob not here"
++                                           : "This slice: interpolated");
++        if (is_key && ui::ButtonRaw("Remove outline from this slice###void_clear")) {
++            set_key(b, _slice, {});
++            _dirty = true;
++        }
++        if (!is_key && !here.empty() && ui::ButtonRaw("Make this outline a key###void_promote")) {
++            std::vector<VPt> pts;
++            for (size_t i = 0; i < here.size(); i += std::max<size_t>(1, here.size() / 12)) pts.push_back(here[i]);
++            set_key(b, _slice, pts);
++            _dirty = true;
++        }
++        if (!b.keys.empty()) {
++            ui::TextDisabledRaw("Key slices (click to go):");
++            for (size_t k = 0; k < b.keys.size(); k++) {
++                if (k % 6) ImGui::SameLine();
++                ImGui::PushID((int)k);
++                if (ui::ButtonRaw(std::to_string(b.keys[k].slice).c_str())) { _slice = b.keys[k].slice; _drawing.clear(); }
++                ImGui::PopID();
++            }
++        }
++    }
++    ImGui::Separator();
++
++    if (ui::ButtonRaw(_dirty ? "Save voids *###void_save" : "Save voids###void_save")) save();
++    ImGui::SameLine();
++    ImGui::BeginDisabled(!_can_apply);
++    if (ui::ButtonRaw("Apply to paused run###void_apply")) {
++        save();
++        if (_error.empty()) _apply_req = region_path(_dataset);
++    }
++    ImGui::EndDisabled();
++    if (!_can_apply && !_apply_why.empty()) ui::TextDisabledRaw(_apply_why);
++    if (!_note.empty()) ui::TextWrappedRaw(_note);
++    if (!_error.empty()) ui::TextColoredWrappedRaw(kWarn, _error);
++    ImGui::Separator();
++    ui::TextWrappedRaw("Drawing: pick or make a blob, then click around the void to place points. "
++                       "Click the first point, double-click or press Enter to close it. "
++                       "Right-click or Backspace removes the last point, Esc cancels. "
++                       "Outline the blob on a few slices; the slices between are interpolated "
++                       "and the ends rounded off. Wheel zooms, middle-drag pans.");
++}
++
++void VoidEditor::draw_canvas() {
++    const VoidFrame& f = _doc.f;
++    if (_imgs.empty() || f.W <= 0) {
++        ui::TextDisabledRaw(_gen.valid() ? "Making cross sections..." : "No cross sections.");
++        return;
++    }
++    if (_tex_slice != _slice && _slice < (int)_imgs.size()) {
++        if (!_tex) {
++            glGenTextures(1, &_tex);
++            glBindTexture(GL_TEXTURE_2D, _tex);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        }
++        glBindTexture(GL_TEXTURE_2D, _tex);
++        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, f.W, f.H, 0, GL_RGB, GL_UNSIGNED_BYTE,
++                     _imgs[(size_t)_slice].data());
++        _tex_slice = _slice;
++    }
++    const ImVec2 c0 = ImGui::GetCursorScreenPos();
++    ImVec2 avail = ImGui::GetContentRegionAvail();
++    avail.x = std::max(avail.x, 64.0f);
++    avail.y = std::max(avail.y, 64.0f);
++    ui::InvisibleButtonRaw("##void_canvas", avail, ImGuiButtonFlags_MouseButtonLeft |
++                                                       ImGuiButtonFlags_MouseButtonRight |
++                                                       ImGuiButtonFlags_MouseButtonMiddle);
++    const bool hovered = ImGui::IsItemHovered();
++    ImGuiIO& io = ImGui::GetIO();
++    const float base = std::min(avail.x / f.W, avail.y / f.H);
++    float scale = base * _zoom;
++    ImVec2 org(c0.x + (avail.x - f.W * scale) * 0.5f + _pan[0], c0.y + (avail.y - f.H * scale) * 0.5f + _pan[1]);
++    auto to_screen = [&](const VPt& p) {
++        return ImVec2(org.x + (float)((p[0] - f.u0) / f.px) * scale, org.y + (float)((p[1] - f.v0) / f.px) * scale);
++    };
++    auto to_uv = [&](ImVec2 s) -> VPt {
++        return {f.u0 + (s.x - org.x) / scale * f.px, f.v0 + (s.y - org.y) / scale * f.px};
++    };
++
++    if (hovered && io.MouseWheel != 0) {
++        const VPt at = to_uv(io.MousePos);
++        _zoom = std::clamp(_zoom * std::pow(1.15f, io.MouseWheel), 0.5f, 40.0f);
++        scale = base * _zoom;
++        org = ImVec2(c0.x + (avail.x - f.W * scale) * 0.5f + _pan[0], c0.y + (avail.y - f.H * scale) * 0.5f + _pan[1]);
++        const ImVec2 now = to_screen(at);
++        _pan[0] += io.MousePos.x - now.x;
++        _pan[1] += io.MousePos.y - now.y;
++        org = ImVec2(c0.x + (avail.x - f.W * scale) * 0.5f + _pan[0], c0.y + (avail.y - f.H * scale) * 0.5f + _pan[1]);
++    }
++    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
++        _pan[0] += io.MouseDelta.x;
++        _pan[1] += io.MouseDelta.y;
++    }
++    if (hovered || ImGui::IsWindowFocused()) {
++        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && _slice < f.slices - 1) { _slice++; _drawing.clear(); }
++        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && _slice > 0) { _slice--; _drawing.clear(); }
++    }
++
++    ImDrawList* dl = ImGui::GetWindowDrawList();
++    dl->PushClipRect(c0, ImVec2(c0.x + avail.x, c0.y + avail.y), true);
++    dl->AddImage((ImTextureID)(intptr_t)_tex, org, ImVec2(org.x + f.W * scale, org.y + f.H * scale));
++
++    for (int i = 0; i < (int)_doc.blobs.size(); i++) {
++        bool is_key = false;
++        const std::vector<VPt> o = blob_outline(_doc.blobs[(size_t)i], _slice, f.pitch, &is_key);
++        if (o.size() < 3) continue;
++        std::vector<ImVec2> pts;
++        for (const VPt& p : o) pts.push_back(to_screen(p));
++        const bool sel = i == _blob;
++        dl->AddPolyline(pts.data(), (int)pts.size(), blob_colour(i, sel ? 255 : 150), ImDrawFlags_Closed,
++                        is_key ? 2.5f : 1.2f);
++    }
++
++    VoidBlob* b = (_blob >= 0 && _blob < (int)_doc.blobs.size()) ? &_doc.blobs[(size_t)_blob] : nullptr;
++    VoidKey* key = nullptr;
++    if (b)
++        for (VoidKey& k : b->keys) if (k.slice == _slice) key = &k;
++    const float grab = 8.0f;
++    if (b && hovered) {
++        auto close = [&]() {
++            if (_drawing.size() >= 3) { set_key(*b, _slice, _drawing); _dirty = true; }
++            _drawing.clear();
++        };
++        if (!_drawing.empty()) {
++            const ImVec2 first = to_screen(_drawing.front());
++            const bool near_first = std::hypot(io.MousePos.x - first.x, io.MousePos.y - first.y) < grab;
++            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) close();
++            else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
++                if (near_first && _drawing.size() >= 3) close();
++                else _drawing.push_back(to_uv(io.MousePos));
++            }
++            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) || ImGui::IsKeyPressed(ImGuiKey_Backspace))
++                if (!_drawing.empty()) _drawing.pop_back();
++            if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) close();
++            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) _drawing.clear();
++        } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
++            _drag = -1;
++            if (key)
++                for (size_t i = 0; i < key->pts.size(); i++) {
++                    const ImVec2 s = to_screen(key->pts[i]);
++                    if (std::hypot(io.MousePos.x - s.x, io.MousePos.y - s.y) < grab) { _drag = (int)i; break; }
++                }
++            if (_drag < 0) _drawing.push_back(to_uv(io.MousePos));
++        }
++    }
++    if (_drag >= 0 && key && _drag < (int)key->pts.size()) {
++        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
++            key->pts[(size_t)_drag] = to_uv(io.MousePos);
++            _dirty = true;
++        } else {
++            _drag = -1;
++        }
++    }
++    if (key && b)
++        for (const VPt& p : key->pts) {
++            const ImVec2 s = to_screen(p);
++            dl->AddRectFilled(ImVec2(s.x - 3, s.y - 3), ImVec2(s.x + 3, s.y + 3), blob_colour(_blob, 255));
++        }
++    if (!_drawing.empty()) {
++        std::vector<ImVec2> pts;
++        for (const VPt& p : _drawing) pts.push_back(to_screen(p));
++        pts.push_back(io.MousePos);
++        dl->AddPolyline(pts.data(), (int)pts.size(), IM_COL32(255, 255, 255, 230), 0, 1.5f);
++        for (size_t i = 0; i + 1 < pts.size(); i++) dl->AddCircleFilled(pts[i], 3.5f, IM_COL32(255, 255, 255, 255));
++    }
++    char info[160];
++    std::snprintf(info, sizeof info, "slice %d / %d    %s", _slice, f.slices - 1,
++                  b ? b->name.c_str() : "no blob selected: make one to draw");
++    dl->AddText(ImVec2(c0.x + 8, c0.y + 6), IM_COL32(230, 230, 230, 255), info);
++    dl->PopClipRect();
++}
++
++}  // namespace gui
+diff --git a/src/app/gui/VoidEditor.h b/src/app/gui/VoidEditor.h
+new file mode 100644
+index 00000000..c39403bf
+--- /dev/null
++++ b/src/app/gui/VoidEditor.h
+@@ -0,0 +1,60 @@
++#pragma once
++
++// VoidEditor -- a floating window over the trainer: the model's cross
++// sections, and void blobs traced on them (VoidSlices). Saves the drawing as
++// <dataset>/roi/voids.svoid and the keep-out region as <dataset>/roi/voids.json.
++
++#include "app/gui/GlLoader.h"
++#include "app/gui/VoidSlices.h"
++
++#include <future>
++#include <string>
++#include <vector>
++
++namespace gui {
++
++class VoidEditor {
++public:
++    ~VoidEditor();
++    // `ply` is the model to slice (a splat.ply or a run/checkpoint folder);
++    // rs / center take its training frame to the dataset frame.
++    void open(const std::string& dataset_dir, const std::string& ply, double rs, const double center[3],
++              const double focus[3]);
++    bool is_open() const { return _open; }
++    void draw();
++    void destroy_gl();
++    // The region file the user asked to apply to the paused run; "" if none.
++    std::string take_apply_request();
++    // Whether the trainer can take one now (set by the app every frame).
++    void set_can_apply(bool can, const std::string& why) { _can_apply = can; _apply_why = why; }
++    void set_note(const std::string& s) { _note = s; }
++
++private:
++    struct Gen { VoidDoc doc; std::vector<std::vector<unsigned char>> imgs; std::string error; };
++    void start(bool new_frame);
++    void save();
++    void draw_controls();
++    void draw_canvas();
++
++    bool _open = false;
++    std::string _dataset, _ply;
++    double _rs = 1, _center[3] = {0, 0, 0}, _focus[3] = {0, 0, 0};
++    int _axis = 0, _slices = 96, _res = 640;
++
++    std::future<Gen> _gen;
++    VoidDoc _doc;
++    std::vector<std::vector<unsigned char>> _imgs;
++    std::string _error, _note, _apply_req, _apply_why;
++    bool _can_apply = false, _dirty = false;
++
++    int _slice = 0, _blob = -1;
++    std::vector<VPt> _drawing;      // a polygon being clicked out, (u, v)
++    int _drag = -1;                 // vertex of the current key being dragged
++    float _zoom = 1.0f;
++    float _pan[2] = {0, 0};
++
++    GLuint _tex = 0;
++    int _tex_slice = -1;
++};
++
++}  // namespace gui
+diff --git a/src/app/gui/VoidSlices.cpp b/src/app/gui/VoidSlices.cpp
+new file mode 100644
+index 00000000..50252199
+--- /dev/null
++++ b/src/app/gui/VoidSlices.cpp
+@@ -0,0 +1,572 @@
++// VoidSlices.cpp -- see VoidSlices.h.
++
++#include "app/gui/VoidSlices.h"
++
++#include "checkpoint/SplatPly.h"
++#include "data/DatasetParser.h"
++#include "data/Json.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <fstream>
++#include <stdexcept>
++
++namespace gui {
++
++namespace {
++
++constexpr double kC0 = 0.28209479177387814;
++constexpr int kInterpPoints = 64;
++constexpr int kRegionPoints = 40;
++
++double dot3(const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
++void cross3(const double* a, const double* b, double* o) {
++    o[0] = a[1] * b[2] - a[2] * b[1];
++    o[1] = a[2] * b[0] - a[0] * b[2];
++    o[2] = a[0] * b[1] - a[1] * b[0];
++}
++void norm3(double* a) {
++    const double n = std::sqrt(dot3(a, a));
++    if (n > 0) for (int i = 0; i < 3; i++) a[i] /= n;
++}
++
++// Symmetric 3x3 eigen-decomposition (Jacobi); columns of V, descending.
++void eig3(double A[9], double w[3], double V[9]) {
++    for (int i = 0; i < 9; i++) V[i] = i % 4 == 0 ? 1 : 0;
++    for (int sweep = 0; sweep < 50; sweep++) {
++        double off = std::fabs(A[1]) + std::fabs(A[2]) + std::fabs(A[5]);
++        if (off < 1e-20) break;
++        for (int p = 0; p < 2; p++)
++            for (int q = p + 1; q < 3; q++) {
++                const double apq = A[p * 3 + q];
++                if (std::fabs(apq) < 1e-30) continue;
++                const double th = 0.5 * std::atan2(2 * apq, A[q * 3 + q] - A[p * 3 + p]);
++                const double c = std::cos(th), s = std::sin(th);
++                for (int k = 0; k < 3; k++) {   // A = J^T A J
++                    const double akp = A[k * 3 + p], akq = A[k * 3 + q];
++                    A[k * 3 + p] = c * akp - s * akq;
++                    A[k * 3 + q] = s * akp + c * akq;
++                }
++                for (int k = 0; k < 3; k++) {
++                    const double apk = A[p * 3 + k], aqk = A[q * 3 + k];
++                    A[p * 3 + k] = c * apk - s * aqk;
++                    A[q * 3 + k] = s * apk + c * aqk;
++                }
++                for (int k = 0; k < 3; k++) {
++                    const double vkp = V[k * 3 + p], vkq = V[k * 3 + q];
++                    V[k * 3 + p] = c * vkp - s * vkq;
++                    V[k * 3 + q] = s * vkp + c * vkq;
++                }
++            }
++    }
++    int idx[3] = {0, 1, 2};
++    std::sort(idx, idx + 3, [&](int a, int b) { return A[a * 4] > A[b * 4]; });
++    double V2[9];
++    for (int j = 0; j < 3; j++) {
++        w[j] = A[idx[j] * 4];
++        for (int k = 0; k < 3; k++) V2[k * 3 + j] = V[k * 3 + idx[j]];
++    }
++    std::copy(V2, V2 + 9, V);
++}
++
++struct Splat {
++    double mu[3];      // frame coords (u, v, n)
++    double S[6];       // frame covariance: uu uv un vv vn nn
++    float rgb[3], op;
++};
++
++std::vector<Splat> to_frame(const spirula::SplatCloud& c, double rs, const double center[3],
++                            const VoidFrame* f) {
++    std::vector<Splat> out((size_t)c.num);
++#pragma omp parallel for schedule(static)
++    for (int64_t i = 0; i < c.num; i++) {
++        Splat& s = out[(size_t)i];
++        double p[3];
++        for (int k = 0; k < 3; k++) p[k] = c.means[(size_t)i * 3 + k] / rs + center[k];
++        const float* q = &c.quats[(size_t)i * 4];
++        double w = q[0], x = q[1], y = q[2], z = q[3];
++        const double qn = std::sqrt(w * w + x * x + y * y + z * z);
++        w /= qn; x /= qn; y /= qn; z /= qn;
++        const double R[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
++                             2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
++                             2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)};
++        double sc[3];
++        for (int k = 0; k < 3; k++) sc[k] = std::exp(c.scales[(size_t)i * 3 + k]) / rs;
++        double Sg[9];
++        for (int r = 0; r < 3; r++)
++            for (int cc = 0; cc < 3; cc++) {
++                double v = 0;
++                for (int k = 0; k < 3; k++) v += R[r * 3 + k] * sc[k] * sc[k] * R[cc * 3 + k];
++                Sg[r * 3 + cc] = v;
++            }
++        if (f) {
++            const double* B[3] = {f->u, f->v, f->n};
++            const double d[3] = {p[0] - f->o[0], p[1] - f->o[1], p[2] - f->o[2]};
++            for (int a = 0; a < 3; a++) s.mu[a] = dot3(B[a], d);
++            double T[9];   // B^T Sg B
++            for (int a = 0; a < 3; a++)
++                for (int b = 0; b < 3; b++) {
++                    double v = 0;
++                    for (int r = 0; r < 3; r++)
++                        for (int cc = 0; cc < 3; cc++) v += B[a][r] * Sg[r * 3 + cc] * B[b][cc];
++                    T[a * 3 + b] = v;
++                }
++            s.S[0] = T[0]; s.S[1] = T[1]; s.S[2] = T[2]; s.S[3] = T[4]; s.S[4] = T[5]; s.S[5] = T[8];
++        } else {
++            for (int k = 0; k < 3; k++) s.mu[k] = p[k];
++        }
++        for (int k = 0; k < 3; k++)
++            s.rgb[k] = (float)std::clamp(c.features_dc[(size_t)i * 3 + k] * kC0 + 0.5, 0.0, 1.0);
++        s.op = (float)(1.0 / (1.0 + std::exp(-(double)c.opacities[(size_t)i])));
++    }
++    return out;
++}
++
++double percentile(std::vector<double> v, double q) {
++    if (v.empty()) return 0;
++    const size_t k = std::min(v.size() - 1, (size_t)(q * (v.size() - 1)));
++    std::nth_element(v.begin(), v.begin() + k, v.end());
++    return v[k];
++}
++
++std::vector<VPt> resample(const std::vector<VPt>& poly, int m) {
++    const size_t n = poly.size();
++    std::vector<double> cum(n + 1, 0);
++    for (size_t i = 0; i < n; i++) {
++        const VPt& a = poly[i]; const VPt& b = poly[(i + 1) % n];
++        cum[i + 1] = cum[i] + std::hypot(b[0] - a[0], b[1] - a[1]);
++    }
++    std::vector<VPt> out((size_t)m);
++    const double L = cum[n];
++    size_t seg = 0;
++    for (int k = 0; k < m; k++) {
++        const double s = L * k / m;
++        while (seg + 1 < n && cum[seg + 1] < s) seg++;
++        const VPt& a = poly[seg]; const VPt& b = poly[(seg + 1) % n];
++        const double len = cum[seg + 1] - cum[seg];
++        const double t = len > 0 ? (s - cum[seg]) / len : 0;
++        out[(size_t)k] = {a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t};
++    }
++    return out;
++}
++
++double signed_area(const std::vector<VPt>& p) {
++    double a = 0;
++    for (size_t i = 0; i < p.size(); i++) {
++        const VPt& u = p[i]; const VPt& w = p[(i + 1) % p.size()];
++        a += u[0] * w[1] - w[0] * u[1];
++    }
++    return 0.5 * a;
++}
++
++// Closed Catmull-Rom through the clicked corners: a few clicks, a rounded outline.
++std::vector<VPt> smooth_closed(const std::vector<VPt>& p, int per_seg = 8) {
++    const size_t n = p.size();
++    if (n < 3) return p;
++    std::vector<VPt> out;
++    out.reserve(n * per_seg);
++    for (size_t i = 0; i < n; i++) {
++        const VPt& p0 = p[(i + n - 1) % n]; const VPt& p1 = p[i];
++        const VPt& p2 = p[(i + 1) % n];     const VPt& p3 = p[(i + 2) % n];
++        for (int s = 0; s < per_seg; s++) {
++            const double t = (double)s / per_seg, t2 = t * t, t3 = t2 * t;
++            VPt q;
++            for (int c = 0; c < 2; c++)
++                q[c] = 0.5 * (2 * p1[c] + (-p0[c] + p2[c]) * t + (2 * p0[c] - 5 * p1[c] + 4 * p2[c] - p3[c]) * t2 +
++                              (-p0[c] + 3 * p1[c] - 3 * p2[c] + p3[c]) * t3);
++            out.push_back(q);
++        }
++    }
++    return out;
++}
++
++// How many slices a rounded end cap spans: the outline's mean radius.
++int cap_slices(const std::vector<VPt>& p, double pitch) {
++    const double r = std::sqrt(std::fabs(signed_area(p)) / M_PI);
++    return std::max(1, (int)std::lround(r / pitch));
++}
++
++std::vector<VPt> shrink(const std::vector<VPt>& p, double s) {
++    double cx = 0, cy = 0;
++    for (const VPt& q : p) { cx += q[0]; cy += q[1]; }
++    cx /= p.size(); cy /= p.size();
++    std::vector<VPt> o(p.size());
++    for (size_t i = 0; i < p.size(); i++) o[i] = {cx + (p[i][0] - cx) * s, cy + (p[i][1] - cy) * s};
++    return o;
++}
++
++std::vector<VPt> interpolate(std::vector<VPt> a, std::vector<VPt> b, double t) {
++    if (signed_area(a) < 0) std::reverse(a.begin(), a.end());
++    if (signed_area(b) < 0) std::reverse(b.begin(), b.end());
++    a = resample(a, kInterpPoints);
++    b = resample(b, kInterpPoints);
++    int best = 0;
++    double bd = 1e300;
++    for (int s = 0; s < kInterpPoints; s++) {
++        double d = 0;
++        for (int k = 0; k < kInterpPoints; k++) {
++            const VPt& p = a[(size_t)k]; const VPt& q = b[(size_t)((k + s) % kInterpPoints)];
++            d += (p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]);
++        }
++        if (d < bd) { bd = d; best = s; }
++    }
++    std::vector<VPt> out((size_t)kInterpPoints);
++    for (int k = 0; k < kInterpPoints; k++) {
++        const VPt& p = a[(size_t)k]; const VPt& q = b[(size_t)((k + best) % kInterpPoints)];
++        out[(size_t)k] = {p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t};
++    }
++    return out;
++}
++
++void put(std::string& s, double x) {
++    char b[40];
++    std::snprintf(b, sizeof b, "%.17g", x);
++    s += b;
++}
++
++}  // namespace
++
++
++VoidFrame make_void_frame(const spirula::SplatCloud& c, double rs, const double center[3],
++                          const double focus[3], int axis, int slices, int long_px) {
++    VoidFrame f;
++    f.axis = axis;
++    std::vector<Splat> sp = to_frame(c, rs, center, nullptr);
++    {
++        // Distances from the focus; the subject ends at the first run of empty bins.
++        std::vector<double> d;
++        for (const Splat& s : sp)
++            if (s.op > 0.2f)
++                d.push_back(std::sqrt((s.mu[0] - focus[0]) * (s.mu[0] - focus[0]) +
++                                      (s.mu[1] - focus[1]) * (s.mu[1] - focus[1]) +
++                                      (s.mu[2] - focus[2]) * (s.mu[2] - focus[2])));
++        if (d.empty()) throw std::runtime_error("the model has no opaque splats to slice");
++        const double med = percentile(d, 0.5), bw = std::max(med / 8, 1e-12);
++        const int nb = 64;
++        std::vector<int> hist(nb, 0);
++        for (double x : d) if (x < bw * nb) hist[(size_t)(x / bw)]++;
++        // "Empty" allows the odd stray splat between subject and mount.
++        const int peak = *std::max_element(hist.begin(), hist.end());
++        const int few = std::max(2, peak / 300);
++        double R = bw * nb;
++        for (int k = (int)(med / bw); k + 2 < nb; k++)
++            if (hist[k] < few && hist[k + 1] < few && hist[k + 2] < few) { R = k * bw; break; }
++        for (Splat& s : sp) {
++            const double r2 = (s.mu[0] - focus[0]) * (s.mu[0] - focus[0]) + (s.mu[1] - focus[1]) * (s.mu[1] - focus[1]) +
++                              (s.mu[2] - focus[2]) * (s.mu[2] - focus[2]);
++            if (r2 > R * R) s.op = 0;
++        }
++    }
++    double m[3] = {0, 0, 0}, wsum = 0;
++    for (const Splat& s : sp)
++        if (s.op > 0.2f) { for (int k = 0; k < 3; k++) m[k] += s.op * s.mu[k]; wsum += s.op; }
++    if (wsum <= 0) throw std::runtime_error("the model has no opaque splats to slice");
++    for (double& x : m) x /= wsum;
++    double C[9] = {0}, w[3], V[9];
++    for (const Splat& s : sp) {
++        if (s.op <= 0.2f) continue;
++        const double d[3] = {s.mu[0] - m[0], s.mu[1] - m[1], s.mu[2] - m[2]};
++        for (int r = 0; r < 3; r++) for (int cc = 0; cc < 3; cc++) C[r * 3 + cc] += s.op * d[r] * d[cc];
++    }
++    eig3(C, w, V);
++    double ax[3][3];
++    for (int j = 0; j < 3; j++)
++        for (int k = 0; k < 3; k++) ax[j][k] = axis < 3 ? V[k * 3 + j] : (k == j ? 1.0 : 0.0);
++    const int ni = axis % 3;
++    std::copy(ax[ni], ax[ni] + 3, f.n);
++    std::copy(ax[(ni + 1) % 3], ax[(ni + 1) % 3] + 3, f.u);
++    cross3(f.n, f.u, f.v);
++    norm3(f.v);
++    std::copy(m, m + 3, f.o);
++
++    std::vector<double> pu, pv, pn;
++    for (const Splat& s : sp) {
++        if (s.op <= 0.2f) continue;
++        const double d[3] = {s.mu[0] - m[0], s.mu[1] - m[1], s.mu[2] - m[2]};
++        pu.push_back(dot3(f.u, d)); pv.push_back(dot3(f.v, d)); pn.push_back(dot3(f.n, d));
++    }
++    auto span = [](const std::vector<double>& v, double& lo, double& hi) {
++        lo = percentile(v, 0.005); hi = percentile(v, 0.995);
++        const double pad = 0.06 * (hi - lo);
++        lo -= pad; hi += pad;
++    };
++    double ulo, uhi, vlo, vhi, nlo, nhi;
++    span(pu, ulo, uhi); span(pv, vlo, vhi); span(pn, nlo, nhi);
++    f.slices = std::max(4, slices);
++    f.t0 = nlo;
++    f.pitch = (nhi - nlo) / f.slices;
++    f.px = std::max(uhi - ulo, vhi - vlo) / std::max(64, long_px);
++    f.u0 = ulo; f.v0 = vlo;
++    f.W = std::max(1, (int)std::ceil((uhi - ulo) / f.px));
++    f.H = std::max(1, (int)std::ceil((vhi - vlo) / f.px));
++    return f;
++}
++
++VoidFrame refine_void_frame(const VoidFrame& f, int slices, int long_px) {
++    VoidFrame g = f;
++    const double eu = f.W * f.px, ev = f.H * f.px;
++    g.slices = std::max(4, slices);
++    g.pitch = f.slices * f.pitch / g.slices;
++    g.px = std::max(eu, ev) / std::max(64, long_px);
++    g.W = std::max(1, (int)std::ceil(eu / g.px));
++    g.H = std::max(1, (int)std::ceil(ev / g.px));
++    return g;
++}
++
++void restack_blobs(VoidDoc& d, const VoidFrame& to) {
++    for (VoidBlob& b : d.blobs) {
++        VoidBlob nb = b;
++        nb.keys.clear();
++        for (const VoidKey& k : b.keys) {
++            const double t = d.f.t0 + (k.slice + 0.5) * d.f.pitch;
++            const int s = (int)std::lround((t - to.t0) / to.pitch - 0.5);
++            set_key(nb, std::clamp(s, 0, to.slices - 1), k.pts);
++        }
++        b = std::move(nb);
++    }
++    d.f = to;
++}
++
++std::vector<std::vector<unsigned char>> render_void_slices(const spirula::SplatCloud& c, double rs,
++                                                           const double center[3], const VoidFrame& f) {
++    const std::vector<Splat> sp = to_frame(c, rs, center, &f);
++    std::vector<std::vector<int>> bins((size_t)f.slices);
++    for (size_t i = 0; i < sp.size(); i++) {
++        const Splat& s = sp[i];
++        if (s.op < 0.01f) continue;
++        const double sn = std::sqrt(std::max(s.S[5], 1e-30)), r = 3 * sn + 0.5 * f.pitch;
++        const int a = std::max(0, (int)std::floor((s.mu[2] - r - f.t0) / f.pitch));
++        const int b = std::min(f.slices - 1, (int)std::floor((s.mu[2] + r - f.t0) / f.pitch));
++        for (int k = a; k <= b; k++) bins[(size_t)k].push_back((int)i);
++    }
++    std::vector<std::vector<unsigned char>> out((size_t)f.slices);
++    const double floor_var = 0.25 * f.px * f.px;
++#pragma omp parallel for schedule(dynamic)
++    for (int k = 0; k < f.slices; k++) {
++        std::vector<float> acc((size_t)f.W * f.H * 3, 0.0f), wsum((size_t)f.W * f.H, 0.0f);
++        const double t = f.t0 + (k + 0.5) * f.pitch;
++        for (int i : bins[(size_t)k]) {
++            const Splat& s = sp[(size_t)i];
++            const double snn = std::max(s.S[5], 1e-30), dn = t - s.mu[2];
++            const double a0 = s.op * std::exp(-0.5 * dn * dn / snn);
++            if (a0 < 1e-3) continue;
++            const double mu_u = s.mu[0] + s.S[2] * dn / snn, mu_v = s.mu[1] + s.S[4] * dn / snn;
++            double cuu = s.S[0] - s.S[2] * s.S[2] / snn + floor_var;
++            double cvv = s.S[3] - s.S[4] * s.S[4] / snn + floor_var;
++            double cuv = s.S[1] - s.S[2] * s.S[4] / snn;
++            const double det = cuu * cvv - cuv * cuv;
++            if (det <= 0) continue;
++            const double iuu = cvv / det, ivv = cuu / det, iuv = -cuv / det;
++            const double ru = 3 * std::sqrt(cuu), rv = 3 * std::sqrt(cvv);
++            const int x0 = std::max(0, (int)std::floor((mu_u - ru - f.u0) / f.px));
++            const int x1 = std::min(f.W - 1, (int)std::floor((mu_u + ru - f.u0) / f.px));
++            const int y0 = std::max(0, (int)std::floor((mu_v - rv - f.v0) / f.px));
++            const int y1 = std::min(f.H - 1, (int)std::floor((mu_v + rv - f.v0) / f.px));
++            for (int y = y0; y <= y1; y++) {
++                const double dv = f.v0 + (y + 0.5) * f.px - mu_v;
++                for (int x = x0; x <= x1; x++) {
++                    const double du = f.u0 + (x + 0.5) * f.px - mu_u;
++                    const double md = iuu * du * du + 2 * iuv * du * dv + ivv * dv * dv;
++                    if (md > 9) continue;
++                    const float a = (float)(a0 * std::exp(-0.5 * md));
++                    const size_t p = (size_t)y * f.W + x;
++                    wsum[p] += a;
++                    for (int c3 = 0; c3 < 3; c3++) acc[p * 3 + c3] += a * s.rgb[c3];
++                }
++            }
++        }
++        std::vector<unsigned char> img((size_t)f.W * f.H * 3);
++        for (size_t p = 0; p < wsum.size(); p++) {
++            const float cov = 1.0f - std::exp(-wsum[p]);
++            for (int c3 = 0; c3 < 3; c3++) {
++                const float col = wsum[p] > 0 ? acc[p * 3 + c3] / wsum[p] : 0.0f;
++                const float v = 0.07f * (1 - cov) + col * cov;
++                img[p * 3 + c3] = (unsigned char)std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f);
++            }
++        }
++        out[(size_t)k] = std::move(img);
++    }
++    return out;
++}
++
++std::vector<VPt> blob_outline(const VoidBlob& b, int slice, double pitch, bool* is_key) {
++    if (is_key) *is_key = false;
++    if (b.keys.empty()) return {};
++    const VoidKey* lo = nullptr;
++    const VoidKey* hi = nullptr;
++    for (const VoidKey& k : b.keys) {
++        if (k.slice == slice) { if (is_key) *is_key = true; return smooth_closed(k.pts); }
++        if (k.slice < slice) lo = &k;
++        if (k.slice > slice && !hi) hi = &k;
++    }
++    if (lo && hi)
++        return interpolate(smooth_closed(lo->pts), smooth_closed(hi->pts),
++                           (double)(slice - lo->slice) / (hi->slice - lo->slice));
++    // Past an end key: an elliptical cap closing on the outline's centre.
++    if (!b.round_ends) return {};
++    const VoidKey& end = lo ? *lo : *hi;
++    if (end.pts.size() < 3 || pitch <= 0) return {};
++    const std::vector<VPt> e = smooth_closed(end.pts);
++    const int L = cap_slices(e, pitch), d = std::abs(slice - end.slice);
++    if (d > L) return {};
++    const double x = (double)d / (L + 1);
++    return shrink(e, std::sqrt(1 - x * x));
++}
++
++void blob_span(const VoidBlob& b, double pitch, int& first, int& last) {
++    first = last = 0;
++    if (b.keys.empty()) return;
++    first = b.keys.front().slice;
++    last = b.keys.back().slice;
++    if (!b.round_ends) return;
++    first -= cap_slices(smooth_closed(b.keys.front().pts), pitch);
++    last += cap_slices(smooth_closed(b.keys.back().pts), pitch);
++}
++
++void set_key(VoidBlob& b, int slice, std::vector<VPt> pts) {
++    b.keys.erase(std::remove_if(b.keys.begin(), b.keys.end(),
++                                [&](const VoidKey& k) { return k.slice == slice; }),
++                 b.keys.end());
++    if (pts.size() >= 3) b.keys.push_back({slice, std::move(pts)});
++    std::sort(b.keys.begin(), b.keys.end(), [](const VoidKey& a, const VoidKey& c) { return a.slice < c.slice; });
++}
++
++void cameras_focus(const ParsedDataset& ds, double rs, const double center[3], double out[3]) {
++    double A[9] = {0}, b[3] = {0};
++    for (int64_t i = 0; i < ds.num_cameras; i++) {
++        const float* m = &ds.c2w[(size_t)i * 12];
++        double C[3], d[3];
++        for (int k = 0; k < 3; k++) { C[k] = m[k * 4 + 3] / rs + center[k]; d[k] = -m[k * 4 + 2]; }
++        for (int r = 0; r < 3; r++)
++            for (int cc = 0; cc < 3; cc++) {
++                const double mm = (r == cc ? 1.0 : 0.0) - d[r] * d[cc];
++                A[r * 3 + cc] += mm; b[r] += mm * C[cc];
++            }
++    }
++    const double det = A[0] * (A[4] * A[8] - A[5] * A[7]) - A[1] * (A[3] * A[8] - A[5] * A[6]) +
++                       A[2] * (A[3] * A[7] - A[4] * A[6]);
++    if (std::fabs(det) < 1e-18) { std::copy(center, center + 3, out); return; }
++    const double inv[9] = {(A[4] * A[8] - A[5] * A[7]) / det, (A[2] * A[7] - A[1] * A[8]) / det,
++                           (A[1] * A[5] - A[2] * A[4]) / det, (A[5] * A[6] - A[3] * A[8]) / det,
++                           (A[0] * A[8] - A[2] * A[6]) / det, (A[2] * A[3] - A[0] * A[5]) / det,
++                           (A[3] * A[7] - A[4] * A[6]) / det, (A[1] * A[6] - A[0] * A[7]) / det,
++                           (A[0] * A[4] - A[1] * A[3]) / det};
++    for (int r = 0; r < 3; r++) out[r] = inv[r * 3] * b[0] + inv[r * 3 + 1] * b[1] + inv[r * 3 + 2] * b[2];
++}
++
++std::string void_region_json(const VoidDoc& d) {
++    const VoidFrame& f = d.f;
++    std::string prisms;
++    int count = 0;
++    for (const VoidBlob& b : d.blobs) {
++        if (b.keys.empty()) continue;
++        int first, last;
++        blob_span(b, f.pitch, first, last);
++        for (int s = std::max(0, first); s <= std::min(f.slices - 1, last); s++) {
++            std::vector<VPt> poly = blob_outline(b, s, f.pitch);
++            if (poly.size() < 3) continue;
++            if (signed_area(poly) < 0) std::reverse(poly.begin(), poly.end());
++            if ((int)poly.size() > kRegionPoints) poly = resample(poly, kRegionPoints);
++            const double t = f.t0 + (s + 0.5) * f.pitch;
++            if (count++) prisms += ",";
++            prisms += "{\"type\":\"prism\",\"center\":[";
++            for (int k = 0; k < 3; k++) { if (k) prisms += ","; put(prisms, f.o[k] + f.n[k] * t); }
++            prisms += "],\"rotation\":[";
++            const double* rows[3] = {f.u, f.v, f.n};
++            for (int r = 0; r < 3; r++)
++                for (int k = 0; k < 3; k++) { if (r || k) prisms += ","; put(prisms, rows[r][k]); }
++            // Slabs overlap a hair so the stack has no gaps between them.
++            prisms += "],\"half_height\":";
++            put(prisms, 0.51 * f.pitch);
++            prisms += ",\"polygon\":[";
++            for (size_t i = 0; i < poly.size(); i++) {
++                if (i) prisms += ",";
++                put(prisms, poly[i][0]); prisms += ","; put(prisms, poly[i][1]);
++            }
++            prisms += "]}";
++        }
++    }
++    if (!count) return {};
++    return "{\"type\":\"complement\",\"children\":[{\"type\":\"union\",\"children\":[" + prisms + "]}]}";
++}
++
++void save_void_doc(const VoidDoc& d, const std::string& path) {
++    const VoidFrame& f = d.f;
++    std::string s = "{\"spirula_voids\":1,\"source\":\"";
++    for (char c : d.source) { if (c == '"' || c == '\\') s += '\\'; s += c; }
++    s += "\",\"frame\":{";
++    auto vec = [&](const char* k, const double* v, int n) {
++        s += "\""; s += k; s += "\":[";
++        for (int i = 0; i < n; i++) { if (i) s += ","; put(s, v[i]); }
++        s += "],";
++    };
++    vec("o", f.o, 3); vec("u", f.u, 3); vec("v", f.v, 3); vec("n", f.n, 3);
++    const double nums[6] = {f.t0, f.pitch, f.u0, f.v0, f.px, (double)f.axis};
++    vec("t0_pitch_u0_v0_px_axis", nums, 6);
++    s += "\"slices\":" + std::to_string(f.slices) + ",\"W\":" + std::to_string(f.W) +
++         ",\"H\":" + std::to_string(f.H) + "},\"blobs\":[";
++    for (size_t bi = 0; bi < d.blobs.size(); bi++) {
++        const VoidBlob& b = d.blobs[bi];
++        if (bi) s += ",";
++        s += "{\"name\":\"" + b.name + "\",\"round\":" + (b.round_ends ? "true" : "false") + ",\"keys\":[";
++        for (size_t ki = 0; ki < b.keys.size(); ki++) {
++            if (ki) s += ",";
++            s += "{\"slice\":" + std::to_string(b.keys[ki].slice) + ",\"pts\":[";
++            for (size_t i = 0; i < b.keys[ki].pts.size(); i++) {
++                if (i) s += ",";
++                put(s, b.keys[ki].pts[i][0]); s += ","; put(s, b.keys[ki].pts[i][1]);
++            }
++            s += "]}";
++        }
++        s += "]}";
++    }
++    s += "]}\n";
++    std::ofstream(path) << s;
++}
++
++bool load_void_doc(const std::string& path, VoidDoc& d, std::string& error) {
++    try {
++        const JsonValue v = json_parse_file(path);
++        const JsonValue* fr = v.find("frame");
++        if (!fr) { error = "not a void drawing"; return false; }
++        auto rd = [&](const char* k, double* out, size_t n) {
++            const JsonValue* a = fr->find(k);
++            if (!a || !a->is_array() || a->arr.size() < n) throw std::runtime_error(std::string("missing ") + k);
++            for (size_t i = 0; i < n; i++) out[i] = a->arr[i].as_double();
++        };
++        VoidDoc o;
++        rd("o", o.f.o, 3); rd("u", o.f.u, 3); rd("v", o.f.v, 3); rd("n", o.f.n, 3);
++        double nums[6];
++        rd("t0_pitch_u0_v0_px_axis", nums, 6);
++        o.f.t0 = nums[0]; o.f.pitch = nums[1]; o.f.u0 = nums[2]; o.f.v0 = nums[3]; o.f.px = nums[4];
++        o.f.axis = (int)nums[5];
++        o.f.slices = (int)fr->get_double("slices", 0);
++        o.f.W = (int)fr->get_double("W", 0);
++        o.f.H = (int)fr->get_double("H", 0);
++        if (const JsonValue* s = v.find("source")) o.source = s->as_string();
++        if (const JsonValue* bs = v.find("blobs"); bs && bs->is_array())
++            for (const JsonValue& bv : bs->arr) {
++                VoidBlob b;
++                if (const JsonValue* n = bv.find("name")) b.name = n->as_string();
++                if (const JsonValue* r = bv.find("round")) b.round_ends = r->as_bool();
++                if (const JsonValue* ks = bv.find("keys"); ks && ks->is_array())
++                    for (const JsonValue& kv : ks->arr) {
++                        VoidKey k;
++                        k.slice = (int)kv.get_double("slice", 0);
++                        if (const JsonValue* p = kv.find("pts"); p && p->is_array())
++                            for (size_t i = 0; i + 1 < p->arr.size(); i += 2)
++                                k.pts.push_back({p->arr[i].as_double(), p->arr[i + 1].as_double()});
++                        b.keys.push_back(std::move(k));
++                    }
++                o.blobs.push_back(std::move(b));
++            }
++        d = std::move(o);
++        return true;
++    } catch (const std::exception& e) {
++        error = e.what();
++        return false;
++    }
++}
++
++}  // namespace gui
+diff --git a/src/app/gui/VoidSlices.h b/src/app/gui/VoidSlices.h
+new file mode 100644
+index 00000000..edfc851e
+--- /dev/null
++++ b/src/app/gui/VoidSlices.h
+@@ -0,0 +1,71 @@
++#pragma once
++
++// VoidSlices -- cross sections of a splat model, and void blobs traced on
++// them. A blob is outlined on a few key slices and interpolated between, per
++// blob, so separate voids never merge. The voids become a keep-out region: the
++// complement of a stack of slab-thick outline prisms, in the dataset frame.
++
++#include <array>
++#include <string>
++#include <vector>
++
++namespace spirula { struct SplatCloud; }
++struct ParsedDataset;
++
++namespace gui {
++
++using VPt = std::array<double, 2>;   // (u, v) in dataset units
++
++// Slice k is the slab around t = t0 + (k + 0.5) * pitch along n.
++struct VoidFrame {
++    double o[3] = {0, 0, 0}, u[3] = {1, 0, 0}, v[3] = {0, 1, 0}, n[3] = {0, 0, 1};
++    double t0 = 0, pitch = 1;
++    int slices = 0;
++    double u0 = 0, v0 = 0, px = 1;   // image pixel (x, y) is at u0 + (x+.5)px, v0 + (y+.5)px
++    int W = 0, H = 0;
++    int axis = 0;                    // 0..2 body long/mid/short, 3..5 dataset X/Y/Z
++};
++
++struct VoidKey { int slice = 0; std::vector<VPt> pts; };
++// keys sorted by slice; the blob spans its first to last key, and only rounds
++// off past them when `round_ends` is set.
++struct VoidBlob { std::string name; std::vector<VoidKey> keys; bool round_ends = false; };
++
++struct VoidDoc {
++    VoidFrame f;
++    std::string source;              // the splat.ply the slices came from
++    std::vector<VoidBlob> blobs;
++};
++
++// p_dataset = p_train / rs + center. The frame keeps to the splats around
++// `focus` (where the cameras aim) up to the first clear gap, so a separate
++// mount or background does not stretch the slices.
++VoidFrame make_void_frame(const spirula::SplatCloud& c, double rs, const double center[3],
++                          const double focus[3], int axis, int slices, int long_px);
++// One RGB image per slice: each splat's cross section in the slice plane,
++// base colour, faded by opacity and by how far its centre is off the plane.
++std::vector<std::vector<unsigned char>> render_void_slices(const spirula::SplatCloud& c, double rs,
++                                                           const double center[3], const VoidFrame& f);
++
++// The blob's smoothed outline on `slice`: its key there, else interpolated
++// between the keys either side, else (round_ends) a rounded cap past an end.
++std::vector<VPt> blob_outline(const VoidBlob& b, int slice, double pitch, bool* is_key = nullptr);
++// First and last slice the blob reaches, caps included.
++void blob_span(const VoidBlob& b, double pitch, int& first, int& last);
++void set_key(VoidBlob& b, int slice, std::vector<VPt> pts);   // empty pts removes it
++
++// The same frame recut into `slices` slices, `long_px` on the long side, so
++// blobs keep their place; restack_blobs moves each key to the slice now at
++// its depth and adopts the new frame.
++VoidFrame refine_void_frame(const VoidFrame& f, int slices, int long_px);
++void restack_blobs(VoidDoc& d, const VoidFrame& to);
++
++// Where the dataset's cameras aim (least squares over their optical axes), in
++// the dataset frame. ds holds the training frame (see make_void_frame).
++void cameras_focus(const ParsedDataset& ds, double rs, const double center[3], double out[3]);
++
++std::string void_region_json(const VoidDoc& d);
++void save_void_doc(const VoidDoc& d, const std::string& path);
++bool load_void_doc(const std::string& path, VoidDoc& d, std::string& error);
++
++}  // namespace gui
+diff --git a/src/backend/api/VoidStop.h b/src/backend/api/VoidStop.h
+new file mode 100644
+index 00000000..0a255e36
+--- /dev/null
++++ b/src/backend/api/VoidStop.h
+@@ -0,0 +1,22 @@
++#pragma once
++
++// "Voids block light": per-pixel camera depths past which the next 2D raster
++// forward stops each ray. The engine fills it right before a training forward
++// and clears it right after, so previews and viewer renders never see it.
++// Only the Vulkan backend reads it (backend/vulkan/kernels/RasterizeFwd.cpp).
++
++#include <cstdint>
++
++namespace backend {
++
++struct VoidStop {
++    uint64_t depth = 0;   // device address of [I, height, width] floats, 0 = off
++    uint32_t width = 0, height = 0;
++};
++
++inline VoidStop& void_stop() {
++    static VoidStop s;
++    return s;
++}
++
++}  // namespace backend
+diff --git a/src/backend/vulkan/LensDefocus.h b/src/backend/vulkan/LensDefocus.h
+new file mode 100644
+index 00000000..db5034ae
+--- /dev/null
++++ b/src/backend/vulkan/LensDefocus.h
+@@ -0,0 +1,12 @@
++#pragma once
++// Thin-lens depth of field inside the 3DGS projection (projection_fwd.slang,
++// apply_lens): a device buffer of float4 lens parameters, or null for a pinhole.
++// Process-wide, for viewer renders only; training never sets it.
++
++namespace backend {
++namespace vk {
++
++void set_lens_defocus(const void* device_params);
++
++}  // namespace vk
++}  // namespace backend
+diff --git a/src/backend/vulkan/MetalInterop.cpp b/src/backend/vulkan/MetalInterop.cpp
+new file mode 100644
+index 00000000..8a4d4a21
+--- /dev/null
++++ b/src/backend/vulkan/MetalInterop.cpp
+@@ -0,0 +1,40 @@
++// See MetalInterop.h.
++
++#include "backend/vulkan/MetalInterop.h"
++
++#include "backend/vulkan/VulkanInternal.h"
++
++#if defined(__APPLE__)
++#include <vulkan/vulkan_metal.h>
++#endif
++
++namespace backend {
++namespace vk {
++
++void* metal_buffer_for(const void* device_ptr, size_t* offset) {
++#if defined(__APPLE__)
++    Allocation alloc;
++    VkDeviceSize off = 0;
++    bool is_device = false;
++    if (!resolve_pointer(device_ptr, &alloc, &off, &is_device) || !is_device)
++        return nullptr;
++    VkDevice dev = Context::get().device();
++    auto fn = (PFN_vkExportMetalObjectsEXT)vkGetDeviceProcAddr(
++        dev, "vkExportMetalObjectsEXT");
++    if (!fn) return nullptr;
++    VkExportMetalBufferInfoEXT buf{VK_STRUCTURE_TYPE_EXPORT_METAL_BUFFER_INFO_EXT};
++    buf.memory = alloc.memory;
++    VkExportMetalObjectsInfoEXT info{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
++    info.pNext = &buf;
++    fn(dev, &info);
++    if (offset) *offset = (size_t)off;
++    return (void*)buf.mtlBuffer;
++#else
++    (void)device_ptr;
++    (void)offset;
++    return nullptr;
++#endif
++}
++
++}  // namespace vk
++}  // namespace backend
+diff --git a/src/backend/vulkan/MetalInterop.h b/src/backend/vulkan/MetalInterop.h
+new file mode 100644
+index 00000000..1739ec0b
+--- /dev/null
++++ b/src/backend/vulkan/MetalInterop.h
+@@ -0,0 +1,16 @@
++#pragma once
++// Zero-copy display on Apple platforms: the Metal buffer behind a device
++// allocation (MoltenVK's VK_EXT_metal_objects). A host app that renders with
++// Metal reads it directly, on the same GPU, with no CPU readback.
++
++#include <cstddef>
++
++namespace backend {
++namespace vk {
++
++// Unretained id<MTLBuffer> behind the device_malloc allocation holding
++// `device_ptr` (+ its byte offset inside); null off MoltenVK.
++void* metal_buffer_for(const void* device_ptr, size_t* offset);
++
++}  // namespace vk
++}  // namespace backend
+diff --git a/src/backend/vulkan/VulkanContext.cpp b/src/backend/vulkan/VulkanContext.cpp
+index c6a86710..1c010f69 100644
+--- a/src/backend/vulkan/VulkanContext.cpp
++++ b/src/backend/vulkan/VulkanContext.cpp
+@@ -517,6 +517,12 @@ void Context::init() {
+         _caps.memory_budget = true;
+     }
+ 
++    // VK_EXT_metal_objects (MoltenVK): hands a host app the MTLBuffer behind
++    // a device allocation, so it can display renders without a CPU readback
++    // (backend/vulkan/MetalInterop.h).
++    if (has_extension(_physical, "VK_EXT_metal_objects"))
++        extensions.push_back("VK_EXT_metal_objects");
++
+     // Pin the compute subgroup size when the device lets us (see
+     // Capabilities::required_subgroup_size).
+     VkPhysicalDeviceSubgroupSizeControlFeaturesEXT fsgc{
+diff --git a/src/backend/vulkan/kernels/ProjectionFwd.cpp b/src/backend/vulkan/kernels/ProjectionFwd.cpp
+index ae0d78b6..e03ed10d 100644
+--- a/src/backend/vulkan/kernels/ProjectionFwd.cpp
++++ b/src/backend/vulkan/kernels/ProjectionFwd.cpp
+@@ -9,6 +9,8 @@
+ 
+ namespace {
+ 
++uint64_t g_lens_defocus = 0;   // backend/vulkan/LensDefocus.h
++
+ // Mirrors ProjectionFwdParams in shaders/projection_fwd.slang.
+ struct ProjectionFwdParams {
+     uint64_t means, quats, scales, opacities, features_dc, features_sh;
+@@ -23,8 +25,9 @@ struct ProjectionFwdParams {
+     uint32_t wgs_per_row;
+     uint32_t num_sh_buffer;
+     uint32_t _pad0;
++    uint64_t lens;
+ };
+-static_assert(sizeof(ProjectionFwdParams) == 16 * 8 + 8 * 4,
++static_assert(sizeof(ProjectionFwdParams) == 17 * 8 + 8 * 4,
+               "params layout must match the slang struct");
+ 
+ // Mirrors Projection3dgutParams in shaders/projection_fwd.slang.
+@@ -117,6 +120,7 @@ launch_projection_fwd_vk(
+     p.width = image_width;
+     p.height = image_height;
+     p.wgs_per_row = per_row;
++    p.lens = g_lens_defocus;
+ 
+     backend::vk::SpecList spec{cd.cam, (uint32_t)sh_degree,
+                                antialiased ? 1u : 0u, spec_bits, 0u, cd.dist};
+@@ -128,6 +132,10 @@ launch_projection_fwd_vk(
+ 
+ }  // namespace
+ 
++namespace backend::vk {
++void set_lens_defocus(const void* device_params) { g_lens_defocus = (uint64_t)device_params; }
++}  // namespace backend::vk
++
+ /* API definitions matching kernels/projection/ProjectionFwd.cuh */
+ 
+ std::tuple<
+diff --git a/src/backend/vulkan/kernels/RasterizeFwd.cpp b/src/backend/vulkan/kernels/RasterizeFwd.cpp
+index ef7b72da..9f612088 100644
+--- a/src/backend/vulkan/kernels/RasterizeFwd.cpp
++++ b/src/backend/vulkan/kernels/RasterizeFwd.cpp
+@@ -8,6 +8,7 @@
+ #include <kernels/raster/RasterizationFwd.cuh>
+ #include <kernels/raster/RasterizationEval3DFwd.cuh>
+ 
++#include "backend/api/VoidStop.h"
+ #include "backend/vulkan/kernels/KernelCommon.h"
+ 
+ namespace {
+@@ -17,10 +18,11 @@ struct RasterFwd2dParams {
+     uint64_t s_screen;
+     uint64_t tile_offsets, flatten_ids;
+     uint64_t out_rgb, out_depth, out_T, out_last_ids;
+-    uint64_t dist_rgb, dist_depth, out_median;
++    uint64_t dist_rgb, dist_depth, out_median, void_depth;
+     uint32_t I, n_isects, width, height, tile_width, tile_height, macro_log2;
++    uint32_t void_w, void_h;
+ };
+-static_assert(sizeof(RasterFwd2dParams) == 10 * 8 + 7 * 4 + 4 /*pad*/,
++static_assert(sizeof(RasterFwd2dParams) == 11 * 8 + 9 * 4 + 4 /*pad*/,
+               "params layout must match the slang struct");
+ 
+ // Mirrors RasterFwd3dgutParams in shaders/rasterize_fwd.slang.
+@@ -133,6 +135,13 @@ launch_raster_2d_fwd(
+     p.dist_rgb = (uint64_t)std::get<0>(o.distortions).data_ptr();
+     p.dist_depth = (uint64_t)std::get<1>(o.distortions).data_ptr();
+     p.out_median = (uint64_t)o.render_median.data_ptr();
++    // One shot: the stop applies to this forward only.
++    const backend::VoidStop vs = backend::void_stop();
++    backend::void_stop() = {};
++    const bool void_stop = vs.depth != 0 && vs.width > 0 && vs.height > 0;
++    p.void_depth = void_stop ? vs.depth : vkk::or_fallback(uint64_t{0});
++    p.void_w = void_stop ? vs.width : 0;
++    p.void_h = void_stop ? vs.height : 0;
+     p.I = (uint32_t)batch;
+     p.n_isects = (uint32_t)flatten_ids.size();
+     p.width = image_width;
+@@ -141,8 +150,11 @@ launch_raster_2d_fwd(
+     p.tile_height = tile_height;
+     p.macro_log2 = (uint32_t)macro_log2;
+ 
++    // Spec IDs: 0 = camera model, 1 = dist type, 2 = median,
++    // 3 = kRasterPacked, 4 = kVoidStop.
+     backend::vk::SpecList spec{0u, dist_spec(dist_type),
+-                               output_median ? 1u : 0u};
++                               output_median ? 1u : 0u, 0u,
++                               void_stop ? 1u : 0u};
+     static_assert(sizeof(RasterFwd2dParams) <= 128,
+                   "must stay under the push-constant floor");
+     dispatch_raster_push("rasterize_fwd.rasterize_fwd_2d", spec,
+@@ -279,10 +291,15 @@ std::tuple<
+     p.macro_log2 = (uint32_t)macro_log2;
+ 
+     // Spec IDs: 0 = camera model, 1 = dist type, 2 = median,
+-    // 3 = kRasterPacked (gaussian_ids present), 4 = distortion tier.
++    // 3 = kRasterPacked (gaussian_ids present), 4 = kVoidStop (2D only),
++    // 5 = distortion tier.
++    backend::VoidStop& vs = backend::void_stop();
++    if (vs.depth != 0)
++        throw std::runtime_error(
++            "Voids block light needs a 2D primitive (3dgs or mip), not 3dgut.");
+     backend::vk::SpecList spec{cd.cam, dist_spec(dist_type),
+                                output_median ? 1u : 0u,
+-                               gaussian_ids.data_ptr() ? 1u : 0u, cd.dist};
++                               gaussian_ids.data_ptr() ? 1u : 0u, 0u, cd.dist};
+     dispatch_raster("rasterize_fwd.rasterize_fwd_3dgut", spec,
+                     (uint32_t)batch, tile_width, tile_height, macro_log2, &p,
+                     sizeof(p));
+diff --git a/src/backend/vulkan/shaders/projection_fwd.slang b/src/backend/vulkan/shaders/projection_fwd.slang
+index 9c30e617..1e7fd40e 100644
+--- a/src/backend/vulkan/shaders/projection_fwd.slang
++++ b/src/backend/vulkan/shaders/projection_fwd.slang
+@@ -93,8 +93,113 @@ struct ProjectionFwdParams {
+     uint32_t wgs_per_row; // grid fold (flat id = wg.y * wgs_per_row*128 + x)
+     uint32_t num_sh_buffer;
+     uint32_t _pad0;
++    float4* lens;         // thin-lens defocus (apply_lens); null = pinhole
+ };
+ 
++// Thin-lens depth of field inside the render; layout of L in
++// docs/notes/lens-defocus.md. Pupil mean / covariance -> splat shift / blur.
++static const int kLensTable = 32;
++
++bool apply_lens(float4* L, float3 mean_c, float fx, float fy, uint W, uint H,
++                inout float2 xy, inout float3 conic, inout float opac,
++                inout float4 aabb, inout float3 rgb) {
++    float4 L0 = L[0];
++    float k = L0.y - 1.0f / mean_c.z;
++    float2 centre = float2(W, H) * 0.5f;
++    float radius = length(centre);
++    // Field rows (L[1].y = 1): focus varying over the frame, the cell's lens
++    // point, an oval aperture, and where the optical axis is in this render.
++    bool fieldRows = L[1].y > 0.5f;
++    float4 tilt = fieldRows ? L[kLensTable + 2] : float4(0);
++    float4 cellRow = fieldRows ? L[kLensTable + 3] : float4(0);
++    if (fieldRows) {
++        centre = L[kLensTable + 4].xy;
++        radius = L[kLensTable + 4].z;
++    }
++    float2 qv = (xy - centre) / radius;
++    float ql = length(qv);
++    float2 qd = ql > 1e-4f ? qv / ql : float2(1, 0);
++    float2 qp = float2(-qd.y, qd.x);
++    float a2 = L0.z * L0.z;
++    float2 mu = 0;
++    float2x2 S;
++    float light = 1;
++    if (L0.w > 0.5f) {
++        float t = clamp(ql / 1.25f, 0.0f, 1.0f) * float(kLensTable - 1);
++        int i0 = min(int(t), kLensTable - 2);
++        float4 m = lerp(L[2 + i0], L[3 + i0], t - float(i0));
++        mu = qd * (m.x * L0.z);
++        S = (m.y * a2) * float2x2(qd.x * qd.x, qd.x * qd.y, qd.x * qd.y, qd.y * qd.y) +
++            (m.z * a2) * float2x2(qp.x * qp.x, qp.x * qp.y, qp.x * qp.y, qp.y * qp.y);
++        light = m.w;
++    } else {
++        S = float2x2(L[1].x * a2, 0, 0, L[1].x * a2);
++    }
++    // The barrel cuts a cell's patch of lens with a chord: keep the part inside,
++    // centred where it is (row 37; maths in docs/notes/lens-defocus.md).
++    float4 barrel = fieldRows ? L[kLensTable + 5] : float4(0);
++    if (barrel.z > 0) {
++        float2 l0 = cellRow.xy / L0.z;
++        l0.x /= cellRow.z > 0 ? cellRow.z : 1.0f;
++        float2 b = l0 * barrel.y + barrel.x * qv;
++        float bl = length(b);
++        float t = clamp((1 - bl) / barrel.y / barrel.z, -1.0f, 1.0f);
++        if (t <= -1) return false;
++        if (t < 1) {
++            float r = sqrt(1 - t * t);
++            float kept = 3.14159265f - (acos(t) - t * r);
++            float2 n = b / max(bl, 1e-6f);
++            mu -= n * ((2.0f / 3.0f) * r * r * r / kept * barrel.z * L0.z);
++            rgb *= kept / 3.14159265f;
++            float w = kept / 3.14159265f;
++            S -= (1 - w * w) * S[0][0] * float2x2(n.x * n.x, n.x * n.y, n.x * n.y, n.y * n.y);
++        }
++    }
++    // Spherical aberration spreads a cell's neighbours apart radially: widen it to match.
++    if (cellRow.w != 0 && a2 > 0) {
++        float sa = cellRow.w * dot(cellRow.xy, cellRow.xy) / a2;
++        float g = clamp(abs(k + 2 * sa) / max(abs(k), 1e-6f), 1.0f, 8.0f);
++        float2 cd = normalize(cellRow.xy + float2(1e-9f, 0));
++        S += (g * g - 1) * S[0][0] * float2x2(cd.x * cd.x, cd.x * cd.y, cd.x * cd.y, cd.y * cd.y);
++    }
++    // An oval stop (an anamorphic-look insert) narrows the pupil across.
++    float sq = cellRow.z > 0 ? cellRow.z : 1.0f;
++    S[0][0] *= sq * sq;
++    S[0][1] *= sq;
++    S[1][0] *= sq;
++    mu.x *= sq;
++    // Focus off the axis: tilt and field curvature (docs/notes/lens-defocus.md).
++    float dk = tilt.x * qv.x + tilt.y * qv.y;
++    float kr = k + dk + tilt.z * ql * ql, kt = k + dk + tilt.w * ql * ql;
++    float2x2 P = float2x2(qd.x * qd.x, qd.x * qd.y, qd.x * qd.y, qd.y * qd.y);
++    float2x2 Q = float2x2(qp.x * qp.x, qp.x * qp.y, qp.x * qp.y, qp.y * qp.y);
++    float2x2 M = kr * P + kt * Q;
++    float2x2 F = float2x2(fx * M[0][0], fx * M[0][1], fy * M[1][0], fy * M[1][1]);
++    float2x2 B = mul(mul(F, S), transpose(F));
++    // A cell's view is already sheared for k; add the field's extra shift.
++    float2x2 E = M - float2x2(k, 0, 0, k);
++    xy += float2(fx, fy) * mul(E, cellRow.xy);
++    // Cap the blur so a wildly defocused splat cannot cover the whole frame.
++    float maxv = L[1].w * L[1].w;
++    float tr = B[0][0] + B[1][1];
++    if (tr > 2 * maxv) B *= 2 * maxv / tr;
++    float2x2 C = inverse(float2x2(conic.x, conic.y, conic.y, conic.z));
++    float det0 = determinant(C);
++    C += B;
++    float det1 = determinant(C);
++    if (!(det1 > 0)) return false;
++    opac *= sqrt(max(det0, 0.0f) / det1);   // same energy, spread wider
++    if (opac < ALPHA_THRESHOLD) return false;
++    float2x2 Ci = inverse(C);
++    conic = float3(Ci[0][0], Ci[0][1], Ci[1][1]);
++    xy += mul(F, mu);
++    rgb *= light;
++    float extend = min(3.33f, sqrt(2.0f * log(opac / ALPHA_THRESHOLD)));
++    float rx = extend * sqrt(C[0][0]), ry = extend * sqrt(C[1][1]);
++    aabb = float4(xy.x - rx, xy.y - ry, xy.x + rx, xy.y + ry);
++    return !(aabb.z <= 0 || aabb.x >= float(W) || aabb.w <= 0 || aabb.y >= float(H));
++}
++
+ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+     ProjectionFwdParams p, uint idx) {
+     uint cid = (idx / p.N) % p.C;
+@@ -130,12 +235,20 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+     float s_depth;
+     float3 s_conic;
+     float s_opac;
++    // With a lens, splats just outside the image blur into it: project as if
++    // the image were bigger by the largest blur, then shift back.
++    bool lensOn = !is_null(p.lens) && p.lens[0].x > 0.5f;
++    float m = lensOn ? min(3.0f * p.lens[1].w, 4096.0f) : 0.0f;
+     projection_3dgs<cam, D, false, false>(
+         kAntialiased != 0,
+         mean, quat, scale, in_opacity, R, t,
+-        intrin.x, intrin.y, intrin.z, intrin.w, dist,
+-        p.width, p.height,
++        intrin.x, intrin.y, intrin.z + m, intrin.w + m, dist,
++        p.width + uint(2 * m), p.height + uint(2 * m),
+         aabb, sorting_depth, radius, s_xy, s_depth, s_conic, s_opac);
++    if (m > 0) {
++        s_xy -= m;
++        if (aabb.z > aabb.x && aabb.w > aabb.y) aabb -= m;
++    }
+ 
+     // SH -> rgb, gated exactly like _Base3DGS::project.
+     float3 rgb = float3(0.0f);
+@@ -143,6 +256,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+         rgb = eval_splat_color(mean, R, t, dc, p.features_sh, p.sh_stride,
+                                gid, p.sh_packed, p.sh_bounds,
+                                p.num_sh_buffer, i64mem_get(p.sh_bounds_stride));
++    if (lensOn && aabb.z > aabb.x && aabb.w > aabb.y) {
++        float3 mean_c = mul(R, mean) + t;
++        if (!apply_lens(p.lens, mean_c, intrin.x, intrin.y, p.width, p.height,
++                        s_xy, s_conic, s_opac, aabb, rgb))
++            aabb = float4(0.0f);
++    }
+ 
+     // store (mirrors the kernel epilogue: clamp, degenerate cull, atomics)
+     aabb.x = clamp(aabb.x, 0.0f, float(p.width) - 1.0f);
+diff --git a/src/backend/vulkan/shaders/rasterize_fwd.slang b/src/backend/vulkan/shaders/rasterize_fwd.slang
+index 16a25dd5..40378811 100644
+--- a/src/backend/vulkan/shaders/rasterize_fwd.slang
++++ b/src/backend/vulkan/shaders/rasterize_fwd.slang
+@@ -42,6 +42,9 @@ const int kOutputMedian = 0;
+ // never sits behind a runtime branch (see backend README).
+ [SpecializationConstant]
+ const int kRasterPacked = 0;
++// Voids block light (2D entry only): void_depth is read only when this is 1.
++[SpecializationConstant]
++const int kVoidStop = 0;
+ 
+ groupshared uint _hit[TILE_AREA];
+ groupshared uint _done_count;
+@@ -76,6 +79,7 @@ struct RasterFwd2dParams {
+     float* dist_rgb;     // [I,H,W,3], kDistType == 2 only
+     float* dist_depth;   // [I,H,W],   kDistType != 0 only
+     float* out_median;   // [I,H,W],   kOutputMedian only
++    float* void_depth;   // [I,void_h,void_w], kVoidStop only
+     uint32_t I;
+     uint32_t n_isects;
+     uint32_t width;
+@@ -83,6 +87,8 @@ struct RasterFwd2dParams {
+     uint32_t tile_width;
+     uint32_t tile_height;
+     uint32_t macro_log2;
++    uint32_t void_w;
++    uint32_t void_h;
+ };
+ 
+ [shader("compute")]
+@@ -115,6 +121,15 @@ void rasterize_fwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+     float median_prev_z = 0.0f;
+     float median_prev_T = 1.0f;
+ 
++    // Voids block light: the ray ends where it enters a void, so splats
++    // behind it (the far wall) cannot cover for a see-through near wall.
++    float void_z = 3.0e38f;
++    if (kVoidStop != 0 && inside) {
++        uint vx = min(j * p.void_w / p.width, p.void_w - 1);
++        uint vy = min(i * p.void_h / p.height, p.void_h - 1);
++        void_z = p.void_depth[(image_id * p.void_h + vy) * p.void_w + vx];
++    }
++
+     // C = sum_j w_j c_j (raw) and S = sum_j w_j c_j^2 (RGB_D channels)
+     float3 pix_rgb = float3(0.0f);
+     float pix_depth = 0.0f;
+@@ -189,6 +204,11 @@ void rasterize_fwd_2d(uint3 wg: SV_GroupID, uint tid: SV_GroupThreadID,
+             if (done)
+                 continue;
+             Frag2d f = _batch_2d[t];
++            if (kVoidStop != 0 && f.depth >= void_z) {
++                done = true;
++                InterlockedAdd(_done_count, 1);
++                continue;
++            }
+ 
+             // FragmentFwd::evaluate_alpha(px, py)
+             float2 delta = float2(f.xy.x - px, f.xy.y - py);
+diff --git a/src/blender/SplatRenderC.cpp b/src/blender/SplatRenderC.cpp
+new file mode 100644
+index 00000000..969b4a82
+--- /dev/null
++++ b/src/blender/SplatRenderC.cpp
+@@ -0,0 +1,305 @@
++// A C interface to Spirula's 3DGS renderer, for loading into another process
++// (the Blender render engine add-on calls it through ctypes).
++//
++// Conventions are the engine's own, i.e. a trained PLY as stored:
++//   means [N,3], quats [N,4] w x y z, scales [N,3] log, opacities [N] logit,
++//   features_dc [N,3] SH DC, features_sh [N,K,3] higher SH, coefficient-major
++//   (K = (degree+1)^2 - 1), viewmat [16] world-to-camera, row-major, OpenCV
++//   axes (x right, y down, z forward).
++// Output per pixel: rgb premultiplied over transparent (no background), alpha
++// = 1 - transmittance, depth along the ray.
++//
++// Every call returns 0 on success; sr_last_error() explains a failure.
++
++#include <engine/Engine.h>
++#include <engine/EngineState.h>
++
++#include "backend/vulkan/LensDefocus.h"
++#include "backend/vulkan/MetalInterop.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstdlib>
++#include <exception>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace {
++
++std::string g_error;
++int64_t g_num = 0;
++int g_degree = 0;
++int g_render_degree = -1;   // -1: render with all loaded SH bands
++
++// GPU frames a Metal host displays directly (sr_shared_frames).
++struct SharedFrame {
++    void* ptr;
++    int w, h;
++};
++std::vector<SharedFrame> g_frames;
++
++void free_frames() {
++    for (auto& f : g_frames) backend::device_free(f.ptr);
++    g_frames.clear();
++}
++
++// Camera model for renders: "PINHOLE" or "FISHEYE" (equidistant), sr_set_camera_model.
++std::string g_camera_model = "PINHOLE";
++
++// Thin-lens parameters on the GPU (sr_set_lens).
++void* g_lens = nullptr;
++constexpr size_t kLensFloat4s = 64;
++
++int render_degree() {
++    return g_render_degree < 0 ? g_degree : std::min(g_render_degree, g_degree);
++}
++
++TorchTensorView ttv(const void* p, std::vector<int64_t> shape) {
++    return std::make_tuple((uint64_t)p, (uint32_t)4, std::move(shape));
++}
++TorchTensorView ttv_null() {
++    return std::make_tuple((uint64_t)0, 4u, std::vector<int64_t>{0});
++}
++
++template <class F>
++int guarded(F&& f) {
++    try {
++        g_error.clear();
++        f();
++        if (const char* err = backend::last_error()) {
++            g_error = err;
++            return 1;
++        }
++        return 0;
++    } catch (const std::exception& e) {
++        g_error = e.what();
++    } catch (...) {
++        g_error = "unknown error";
++    }
++    return 1;
++}
++
++}  // namespace
++
++// Only these functions leave the library (the engine and backend inside stay private).
++#if defined(_WIN32)
++#define SR_API __declspec(dllexport)
++#else
++#define SR_API __attribute__((visibility("default")))
++#endif
++
++extern "C" {
++
++SR_API const char* sr_last_error() { return g_error.c_str(); }
++
++// Load (or replace) the splats. A fresh world each time: the engine's
++// set_data_3dgs is a no-op on an initialised world.
++SR_API int sr_set_splats(int64_t num, int sh_degree, const float* means, const float* quats,
++                  const float* scales, const float* opacities, const float* features_dc,
++                  const float* features_sh) {
++    return guarded([&] {
++        const int64_t K = (int64_t)(sh_degree + 1) * (sh_degree + 1) - 1;
++        engine_reset();
++        set_data_3dgs(num, ttv(means, {num, 3}), ttv(quats, {num, 4}),
++                      ttv(scales, {num, 3}), ttv(opacities, {num, 1}),
++                      ttv(features_dc, {num, 3}),
++                      K > 0 ? ttv(features_sh, {num, K, 3}) : ttv_null());
++        g_num = num;
++        g_degree = sh_degree;
++        // Fixed small bins: the automatic choice starts at 64 px and only refines
++        // from training timings. SR_BIN_TILE (pixels, 0 = automatic) overrides.
++        int tile = 16;
++        if (const char* e = std::getenv("SR_BIN_TILE")) tile = std::atoi(e);
++        engine_set_bin_tile_size(tile);
++    });
++}
++
++// Render one pinhole view. out_rgb [H*W*3], out_alpha / out_depth [H*W] may be null.
++// primitive: "3dgs" (classic EWA splatting, what most trainers use), "mip", "3dgut".
++SR_API int sr_render(const float* viewmat, float fx, float fy, float cx, float cy, int width,
++              int height, const char* primitive, float* out_rgb, float* out_alpha,
++              float* out_depth) {
++    return guarded([&] {
++        if (g_num <= 0) throw std::runtime_error("no splats loaded");
++        const std::vector<float> intr = {fx, fy, cx, cy};
++        const std::vector<float> dist(kCameraDistortionParams, 0.0f);
++        set_camera_params(width, height, g_camera_model, "NONE", ttv(viewmat, {1, 4, 4}),
++                          ttv(intr.data(), {1, 4}),
++                          ttv(dist.data(), {1, kCameraDistortionParams}));
++        forward_3dgs(primitive ? primitive : "3dgs", render_degree(), false, false, 0);
++        backend::device_synchronize();
++        std::vector<float> Ts;
++        if (out_alpha) Ts.resize((size_t)width * height);
++        engine_copy_render_to_host(
++            out_rgb ? ttv(out_rgb, {1, height, width, 3}) : ttv_null(),
++            out_depth ? ttv(out_depth, {1, height, width, 1}) : ttv_null(),
++            out_alpha ? ttv(Ts.data(), {1, height, width, 1}) : ttv_null(), ttv_null(),
++            ttv_null());
++        if (out_alpha)
++            for (size_t i = 0; i < Ts.size(); i++) out_alpha[i] = 1.0f - Ts[i];
++    });
++}
++
++// Replace the splats' colours in place (same count and SH degree as loaded):
++// what relighting changes every frame, without re-uploading the geometry.
++SR_API int sr_set_colors(const float* features_dc, const float* features_sh) {
++    return guarded([&] {
++        if (g_num <= 0) throw std::runtime_error("no splats loaded");
++        auto& w = engine().world;
++        const int64_t K = (int64_t)(g_degree + 1) * (g_degree + 1) - 1;
++        if (features_dc)
++            backend::memcpy_sync(w.features_dc.data_ptr(), features_dc, g_num * 3 * sizeof(float),
++                                 backend::MemcpyKind::HostToDevice);
++        if (features_sh && K > 0) {
++            if (!w.features_sh.data_ptr())
++                throw std::runtime_error("SH is stored quantised; colour updates need fp32 SH");
++            backend::memcpy_sync(w.features_sh.data_ptr(), features_sh, g_num * K * 3 * sizeof(float),
++                                 backend::MemcpyKind::HostToDevice);
++        }
++    });
++}
++
++// sr_render plus the per-pixel median depth (where coverage reaches 50%): the
++// surface depth a shadow map wants. out_median [H*W] may be null.
++SR_API int sr_render_ex(const float* viewmat, float fx, float fy, float cx, float cy, int width,
++                 int height, const char* primitive, float* out_rgb, float* out_alpha,
++                 float* out_depth, float* out_median) {
++    return guarded([&] {
++        if (g_num <= 0) throw std::runtime_error("no splats loaded");
++        const std::vector<float> intr = {fx, fy, cx, cy};
++        const std::vector<float> dist(kCameraDistortionParams, 0.0f);
++        set_camera_params(width, height, g_camera_model, "NONE", ttv(viewmat, {1, 4, 4}),
++                          ttv(intr.data(), {1, 4}),
++                          ttv(dist.data(), {1, kCameraDistortionParams}));
++        forward_3dgs(primitive ? primitive : "3dgs", render_degree(), false, out_median != nullptr, 0);
++        backend::device_synchronize();
++        std::vector<float> Ts;
++        if (out_alpha) Ts.resize((size_t)width * height);
++        engine_copy_render_to_host(
++            out_rgb ? ttv(out_rgb, {1, height, width, 3}) : ttv_null(),
++            out_depth ? ttv(out_depth, {1, height, width, 1}) : ttv_null(),
++            out_alpha ? ttv(Ts.data(), {1, height, width, 1}) : ttv_null(), ttv_null(),
++            out_median ? ttv(out_median, {1, height, width, 1}) : ttv_null());
++        if (out_alpha)
++            for (size_t i = 0; i < Ts.size(); i++) out_alpha[i] = 1.0f - Ts[i];
++    });
++}
++
++// Render with at most this many SH bands (0 = base colour only, which is what a
++// fast interactive relight updates); -1 restores all loaded bands.
++SR_API void sr_set_render_degree(int degree) { g_render_degree = degree; }
++
++// Zero-copy output for a Metal host: `count` more GPU frames of this size,
++// numbered from *first_index; layout and out_* as for sr_shared_frames.
++SR_API int sr_add_shared_frames(int width, int height, int count, void** out_buffers,
++                                size_t* out_offsets, int* first_index) {
++    return guarded([&] {
++        if (width <= 0 || height <= 0 || count <= 0)
++            throw std::runtime_error("bad frame size or count");
++        if (first_index) *first_index = (int)g_frames.size();
++        const size_t bytes = (size_t)width * height * 5 * sizeof(float);
++        for (int i = 0; i < count; i++) {
++            void* f = backend::device_malloc_checked(bytes, "shared frame");
++            g_frames.push_back({f, width, height});
++            size_t off = 0;
++            void* mtl = backend::vk::metal_buffer_for(f, &off);
++            if (!mtl) throw std::runtime_error("the GPU cannot share buffers with Metal (needs MoltenVK)");
++            out_buffers[i] = mtl;
++            out_offsets[i] = off;
++        }
++    });
++}
++
++// Replaces all shared frames with `count` new ones: W*H float3 rgb, then W*H
++// transmittance, then W*H median depth; out_buffers[i] = unretained
++// id<MTLBuffer> (valid until freed / sr_shutdown) at out_offsets[i].
++SR_API int sr_shared_frames(int width, int height, int count, void** out_buffers,
++                            size_t* out_offsets) {
++    backend::device_synchronize();
++    free_frames();
++    return sr_add_shared_frames(width, height, count, out_buffers, out_offsets, nullptr);
++}
++
++// Render one pinhole view into shared frame `frame` (at that frame's size) and
++// wait for the GPU to finish, so the host may read it right after.
++SR_API int sr_render_to_frame(int frame, const float* viewmat, float fx, float fy, float cx,
++                              float cy, const char* primitive) {
++    return guarded([&] {
++        if (g_num <= 0) throw std::runtime_error("no splats loaded");
++        if (frame < 0 || frame >= (int)g_frames.size())
++            throw std::runtime_error("no such shared frame");
++        const int width = g_frames[frame].w, height = g_frames[frame].h;
++        const std::vector<float> intr = {fx, fy, cx, cy};
++        const std::vector<float> dist(kCameraDistortionParams, 0.0f);
++        set_camera_params(width, height, g_camera_model, "NONE", ttv(viewmat, {1, 4, 4}),
++                          ttv(intr.data(), {1, 4}),
++                          ttv(dist.data(), {1, kCameraDistortionParams}));
++        forward_3dgs(primitive ? primitive : "3dgs", render_degree(), false, true, 0);
++        const size_t px = (size_t)width * height;
++        auto* dst = (char*)g_frames[frame].ptr;
++        auto& rgb = std::get<0>(engine().fwd.renders);
++        auto& Ts = engine().fwd.render_Ts;
++        auto& median = engine().fwd.render_median;
++        if (!rgb.data_ptr() || !Ts.data_ptr() || !median.data_ptr())
++            throw std::runtime_error("render produced no image");
++        backend::memcpy_async(dst, rgb.data_ptr(), px * 3 * sizeof(float),
++                              backend::MemcpyKind::DeviceToDevice);
++        backend::memcpy_async(dst + px * 3 * sizeof(float), Ts.data_ptr(), px * sizeof(float),
++                              backend::MemcpyKind::DeviceToDevice);
++        backend::memcpy_async(dst + px * 4 * sizeof(float), median.data_ptr(), px * sizeof(float),
++                              backend::MemcpyKind::DeviceToDevice);
++        backend::device_synchronize();
++    });
++}
++
++// Depth of field inside the render: `count` float4s laid out as in
++// docs/notes/lens-defocus.md, or null for a pinhole. Applies to later renders.
++SR_API int sr_set_lens(const float* params, int count) {
++    return guarded([&] {
++        if (!params || count <= 0) {
++            backend::vk::set_lens_defocus(nullptr);
++            return;
++        }
++        if ((size_t)count > kLensFloat4s) throw std::runtime_error("lens table too long");
++        if (!g_lens) g_lens = backend::device_malloc_checked(kLensFloat4s * 16, "lens");
++        backend::memcpy_sync(g_lens, params, (size_t)count * 16, backend::MemcpyKind::HostToDevice);
++        backend::vk::set_lens_defocus(g_lens);
++    });
++}
++
++// The splats' SH DC colours [N,3] fp32 on the GPU, for a Metal host to relight
++// in place (render with sr_set_render_degree(0) after): unretained
++// id<MTLBuffer> and the byte offset of the colours inside it.
++SR_API int sr_color_buffer(void** out_buffer, size_t* out_offset) {
++    return guarded([&] {
++        if (g_num <= 0) throw std::runtime_error("no splats loaded");
++        void* p = engine().world.features_dc.data_ptr();
++        size_t off = 0;
++        void* mtl = p ? backend::vk::metal_buffer_for(p, &off) : nullptr;
++        if (!mtl) throw std::runtime_error("the colours cannot be shared with Metal");
++        *out_buffer = mtl;
++        *out_offset = off;
++    });
++}
++
++// "PINHOLE" (rectilinear, the default) or "FISHEYE" (equidistant: image
++// radius = f * angle off axis) for the renders that follow.
++SR_API int sr_set_camera_model(const char* name) {
++    return guarded([&] {
++        std::string m = name ? name : "PINHOLE";
++        if (m != "PINHOLE" && m != "FISHEYE") throw std::runtime_error("camera model must be PINHOLE or FISHEYE");
++        g_camera_model = m;
++    });
++}
++
++SR_API void sr_shutdown() {
++    backend::vk::set_lens_defocus(nullptr);
++    if (g_lens) backend::device_free(g_lens);
++    g_lens = nullptr;
++    free_frames();
++    engine_reset();
++    g_num = 0;
++}
++
++}  // extern "C"
+diff --git a/src/blender/exports.map b/src/blender/exports.map
+new file mode 100644
+index 00000000..c26317d3
+--- /dev/null
++++ b/src/blender/exports.map
+@@ -0,0 +1,4 @@
++{
++  global: sr_*;
++  local: *;
++};
+diff --git a/src/blender/exports.txt b/src/blender/exports.txt
+new file mode 100644
+index 00000000..76322aa2
+--- /dev/null
++++ b/src/blender/exports.txt
+@@ -0,0 +1,13 @@
++_sr_last_error
++_sr_set_splats
++_sr_render
++_sr_render_ex
++_sr_set_colors
++_sr_shutdown
++_sr_set_render_degree
++_sr_shared_frames
++_sr_render_to_frame
++_sr_set_lens
++_sr_add_shared_frames
++_sr_color_buffer
++_sr_set_camera_model
+diff --git a/src/config/TrainConfig.h b/src/config/TrainConfig.h
+index 04df5cd5..70178fb3 100644
+--- a/src/config/TrainConfig.h
++++ b/src/config/TrainConfig.h
+@@ -161,6 +161,7 @@ inline bool train_choices_free_form(const char* choices) {
+     X(float, roi_outside_weight, 1e-4f, "dataset", "advanced", "")           \
+     X(float, roi_outside_opacity_decay, 1.0f, "dataset", "advanced", "")     \
+     X(bool, roi_mask_pixels, true, "dataset", "advanced", "")                \
++    X(bool, roi_void_stop, false, "dataset", "advanced", "")                 \
+     X(float, train_resolution_divisor, 0.0f, "dataset", "basic", "")         \
+     X(std::string, downscale_rounding_mode, "floor", "dataset", "advanced", "floor|ceil|round") \
+     X(std::string, eval_mode, "all", "dataset", "advanced", "fraction|filename|interval|all") \
+diff --git a/src/core/PoolSlots.h b/src/core/PoolSlots.h
+index 04dcd6df..99e2a83f 100644
+--- a/src/core/PoolSlots.h
++++ b/src/core/PoolSlots.h
+@@ -189,6 +189,7 @@ enum class SaveClass : uint8_t {
+   X(IsectFlatA                     , "isect.flat_a",                      SplatXImg, Never) \
+   X(IsectFlatB                     , "isect.flat_b",                      SplatXImg, Never) \
+   X(IsectTileActive                , "isect.tile_active",                 Image    , Never) \
++  X(RenderVoidDepth                , "render.void_depth",                 Image    , Never) \
+   /* ---- render outputs ---- */ \
+   X(RenderTs                       , "render.Ts",                         Image    , Never) \
+   X(RenderLastIds                  , "render.last_ids",                   Image    , Never) \
+diff --git a/src/data/RegionRaycast.cpp b/src/data/RegionRaycast.cpp
+new file mode 100644
+index 00000000..5c7bd9d2
+--- /dev/null
++++ b/src/data/RegionRaycast.cpp
+@@ -0,0 +1,155 @@
++// RegionRaycast.cpp -- first entry of camera rays into a region's voids: clip
++// to the voids' bounding box, march at a fraction of its size, then bisect the
++// first step that lands in a void.
++
++#include "data/RegionRaycast.h"
++
++#include <algorithm>
++#include <cmath>
++#include <limits>
++#include <thread>
++
++namespace spirula {
++
++namespace {
++
++Aabb intersect(const Aabb& a, const Aabb& b) {
++    Aabb o;
++    for (int k = 0; k < 3; k++) {
++        o.lo[k] = std::max(a.lo[k], b.lo[k]);
++        o.hi[k] = std::min(a.hi[k], b.hi[k]);
++    }
++    return o;
++}
++
++Aabb join(const Aabb& a, const Aabb& b) {
++    if (a.unbounded() || b.unbounded()) return Aabb::everything();
++    Aabb o = a;
++    o.expand(b);
++    return o;
++}
++
++// The lens maps undistorted (u, v) to distorted; invert it by fixed point.
++void distort(const VoidRayCamera& c, double u, double v, double& du, double& dv) {
++    const float* k = c.dist;
++    const double r2 = u * u + v * v;
++    if (c.distortion == 1) {
++        const double radial = 1.0 + r2 * (k[0] + r2 * k[1]);
++        du = u * radial + 2.0 * k[2] * u * v + k[3] * (r2 + 2.0 * u * u);
++        dv = v * radial + 2.0 * k[3] * u * v + k[2] * (r2 + 2.0 * v * v);
++    } else if (c.distortion == 2) {
++        const double radial = 1.0 + r2 * (k[0] + r2 * (k[1] + r2 * (k[2] + r2 * k[3])));
++        du = u * radial + 2.0 * k[4] * u * v + k[5] * (r2 + 2.0 * u * u) + k[6] * r2;
++        dv = v * radial + 2.0 * k[5] * u * v + k[4] * (r2 + 2.0 * v * v) + k[7] * r2;
++    } else {
++        du = u;
++        dv = v;
++    }
++}
++
++void undistort(const VoidRayCamera& c, double xd, double yd, double& u, double& v) {
++    u = xd;
++    v = yd;
++    if (c.distortion == 0) return;
++    for (int it = 0; it < 20; it++) {
++        double du, dv;
++        distort(c, u, v, du, dv);
++        u += xd - du;
++        v += yd - dv;
++    }
++}
++
++}  // namespace
++
++Aabb region_void_bounds(const Region& r) {
++    const auto* csg = dynamic_cast<const CsgRegion*>(&r);
++    if (!csg) return Aabb::everything();
++    switch (csg->op) {
++        case CsgOp::Complement:
++            return csg->children.empty() ? Aabb() : csg->children[0]->bounds();
++        case CsgOp::Intersection: {   // outside any child
++            Aabb b;
++            for (const auto& c : csg->children) b = join(b, region_void_bounds(*c));
++            return b;
++        }
++        case CsgOp::Union: {          // outside every child
++            Aabb b = Aabb::everything();
++            for (const auto& c : csg->children) b = intersect(b, region_void_bounds(*c));
++            return b;
++        }
++        case CsgOp::Difference: {     // outside the first, or inside another
++            if (csg->children.empty()) return Aabb();
++            Aabb b = region_void_bounds(*csg->children[0]);
++            for (size_t i = 1; i < csg->children.size(); i++) b = join(b, csg->children[i]->bounds());
++            return b;
++        }
++    }
++    return Aabb::everything();
++}
++
++void region_void_depth_map(const Region& r, double rs, const double center[3],
++                           const VoidRayCamera& cam, int map_w, int map_h, float* out) {
++    const float inf = std::numeric_limits<float>::infinity();
++    std::fill(out, out + (size_t)map_w * map_h, inf);
++    const Aabb box = region_void_bounds(r);
++    if (box.empty() || box.unbounded() || map_w <= 0 || map_h <= 0) return;
++
++    // Camera centre and axes, then everything in the dataset frame.
++    const float* m = cam.viewmat;
++    const double Rw[9] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]};
++    const double t[3] = {m[3], m[7], m[11]};
++    double o[3];
++    for (int k = 0; k < 3; k++)
++        o[k] = -(Rw[k] * t[0] + Rw[3 + k] * t[1] + Rw[6 + k] * t[2]) / rs + center[k];
++    double diag = 0;
++    for (int k = 0; k < 3; k++) diag += (box.hi[k] - box.lo[k]) * (box.hi[k] - box.lo[k]);
++    const double step = std::sqrt(diag) / 160.0;
++
++    auto row = [&](int y) {
++        for (int x = 0; x < map_w; x++) {
++            const double px = (x + 0.5) * cam.width / map_w, py = (y + 0.5) * cam.height / map_h;
++            double u, v;
++            undistort(cam, (px - cam.intrin[2]) / cam.intrin[0], (py - cam.intrin[3]) / cam.intrin[1], u, v);
++            // d: dataset-frame change per unit of camera z
++            double d[3];
++            for (int k = 0; k < 3; k++) d[k] = (Rw[k] * u + Rw[3 + k] * v + Rw[6 + k]) / rs;
++            double s0 = 1e-9, s1 = 1e300;
++            for (int k = 0; k < 3 && s0 <= s1; k++) {
++                if (std::fabs(d[k]) < 1e-300) {
++                    if (o[k] < box.lo[k] || o[k] > box.hi[k]) s1 = -1;
++                    continue;
++                }
++                double a = (box.lo[k] - o[k]) / d[k], b = (box.hi[k] - o[k]) / d[k];
++                if (a > b) std::swap(a, b);
++                s0 = std::max(s0, a);
++                s1 = std::min(s1, b);
++            }
++            if (s0 > s1) continue;
++            const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
++            const double ds = step / len;
++            auto in_void = [&](double s) {
++                const double p[3] = {o[0] + s * d[0], o[1] + s * d[1], o[2] + s * d[2]};
++                return !r.contains(p);
++            };
++            double prev = s0;
++            if (in_void(s0)) { out[(size_t)y * map_w + x] = (float)s0; continue; }
++            for (double s = s0 + ds; s <= s1 + ds; s += ds) {
++                if (!in_void(s)) { prev = s; continue; }
++                double lo = prev, hi = s;
++                for (int it = 0; it < 12; it++) {
++                    const double mid = 0.5 * (lo + hi);
++                    (in_void(mid) ? hi : lo) = mid;
++                }
++                out[(size_t)y * map_w + x] = (float)hi;
++                break;
++            }
++        }
++    };
++    const int n = std::max(1, std::min<int>(map_h, (int)std::thread::hardware_concurrency()));
++    std::vector<std::thread> pool;
++    for (int w = 0; w < n; w++)
++        pool.emplace_back([&, w] { for (int y = w; y < map_h; y += n) row(y); });
++    for (auto& th : pool) th.join();
++}
++
++}  // namespace spirula
+diff --git a/src/data/RegionRaycast.h b/src/data/RegionRaycast.h
+new file mode 100644
+index 00000000..638a6f6f
+--- /dev/null
++++ b/src/data/RegionRaycast.h
+@@ -0,0 +1,35 @@
++#pragma once
++
++// Where camera rays first enter a region's voids -- the points it leaves out.
++// Training can stop each ray there ("voids block light"), so a shell around a
++// void has to be opaque on its own instead of leaning on the wall behind it.
++
++#include "data/Region.h"
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace spirula {
++
++// Where `contains` can be false. Unbounded (Aabb::everything) when the voids
++// reach infinity, as for a plain region of interest.
++Aabb region_void_bounds(const Region& r);
++
++// One camera as the trainer holds it: world-to-camera rows (training frame),
++// fx fy cx cy in pixels, and the lens tier's coefficients (core/CameraModel.h).
++struct VoidRayCamera {
++    float viewmat[16];
++    float intrin[4];
++    float dist[8];
++    int distortion = 0;   // CameraDistortionType: 0 none, 1 OpenCV, 2 thin prism
++    int width = 0, height = 0;
++};
++
++// Camera depth (z) at which each ray of a map_w x map_h grid spanning the
++// image first enters a void, or +inf where it misses. The region is in the
++// dataset frame: p_dataset = p_train / rs + center. Pinhole cameras only.
++void region_void_depth_map(const Region& r, double rs, const double center[3],
++                           const VoidRayCamera& cam, int map_w, int map_h, float* out);
++
++}  // namespace spirula
+diff --git a/src/data/RoiDocument.cpp b/src/data/RoiDocument.cpp
+index 843ecb52..7308aef8 100644
+--- a/src/data/RoiDocument.cpp
++++ b/src/data/RoiDocument.cpp
+@@ -377,6 +377,8 @@ std::vector<std::string> list_roi_files(const std::string& dataset_dir) {
+     std::error_code ec;
+     for (const fs::directory_entry& e : fs::directory_iterator(roi_folder(dataset_dir), ec)) {
+         if (!e.is_regular_file(ec)) continue;
++        // macOS writes "._name" AppleDouble files beside everything on a non-Mac volume.
++        if (e.path().filename().string().rfind('.', 0) == 0) continue;
+         std::string ext = e.path().extension().string();
+         for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+         if (ext == ".json") out.push_back(e.path().lexically_normal().string());
+diff --git a/src/engine/Engine.h b/src/engine/Engine.h
+index 49b68fb0..c1d5c6d8 100644
+--- a/src/engine/Engine.h
++++ b/src/engine/Engine.h
+@@ -2,6 +2,10 @@
+ 
+ #include "core/Tensor.h"
+ 
++#include <functional>
++#include <string>
++#include <vector>
++
+ #include "kernels/tile/IntersectTile.cuh"
+ #include "kernels/background/BackgroundSphericalHarmonics.cuh"
+ #include "kernels/loss/PerSplatLoss.cuh"
+@@ -64,6 +68,20 @@ void engine_set_region(TorchTensorView program, TorchTensorView field_bvh,
+                        TorchTensorView camera_seeds, float outside_weight,
+                        float outside_opacity_decay = 1.0f);
+ 
++// "Voids block light": before each training forward the provider gets the
++// batch's cameras (host copies) and fills a [num, map_h, map_w] map of camera
++// depths where rays enter a void; false skips the stop. Empty = off.
++struct VoidStopCameras {
++    int num = 0, width = 0, height = 0;
++    std::string model, distortion;
++    const float* viewmats = nullptr;      // [num, 16] world-to-camera rows
++    const float* intrins = nullptr;       // [num, 4] fx fy cx cy
++    const float* dist_coeffs = nullptr;   // [num, 8]
++};
++using VoidStopProvider =
++    std::function<bool(const VoidStopCameras&, std::vector<float>&, int&, int&)>;
++void engine_set_void_stop_provider(VoidStopProvider provider);
++
+ void set_camera_params(
+     int width,
+     int height,
+@@ -293,6 +311,9 @@ void engine_background_optim_step(int step, const BackgroundStepConfig& cfg);
+ // (..., H, W, 3) float buffer: SH gives the last forward's skybox, Color and
+ // the randomized modes a flat fill. 0 when no background is active.
+ int engine_copy_background_to_host(TorchTensorView out_image);
++// Turns the background blend on or off for the forwards that follow and returns
++// whether it was on: side renders (training capture) want the bare splats.
++bool engine_set_background_enabled(bool on);
+ 
+ // --- Linear / wide-gamut color space ---
+ //
+diff --git a/src/engine/EngineForward.cpp b/src/engine/EngineForward.cpp
+index 68b09f5d..82c9569a 100644
+--- a/src/engine/EngineForward.cpp
++++ b/src/engine/EngineForward.cpp
+@@ -6,6 +6,7 @@
+ #include "engine/EngineState.h"
+ 
+ #include "core/Env.h"
++#include "backend/api/VoidStop.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -382,6 +383,12 @@ void forward_3dgs(
+     DeviceTensor3D<int32_t> last_ids;
+     DeviceTensor3D<float> render_median;
+ 
++    // Voids block light: armed by a training step for this forward only.
++    if (engine().fwd.void_w > 0)
++        backend::void_stop() = {(uint64_t)engine().fwd.void_depth.data_ptr(),
++                                engine().fwd.void_w, engine().fwd.void_h};
++    engine().fwd.void_w = engine().fwd.void_h = 0;
++
+     if (primitive == "3dgs") {
+         auto [r, rTs, lids, dist, med] = rasterize_to_pixels_3dgs_fwd(
+             engine().cur_num_splats,
+@@ -412,6 +419,8 @@ void forward_3dgs(
+         renders = r; render_Ts = rTs; last_ids = lids; render_median = med; distortions = dist;
+     }
+ 
++    backend::void_stop() = {};
++
+     engine().fwd.renders = renders;
+     engine().fwd.distortions = distortions;
+     engine().fwd.dist_type = dist_type;
+@@ -443,6 +452,12 @@ void forward_3dgs(
+ }
+ 
+ 
++bool engine_set_background_enabled(bool on) {
++    const bool was = engine().background.enabled;
++    engine().background.enabled = on;
++    return was;
++}
++
+ void engine_debug_forward(
+     TorchTensorView override_features_dc,
+     int override_sh_degree,
+diff --git a/src/engine/EngineState.h b/src/engine/EngineState.h
+index 615470be..79903143 100644
+--- a/src/engine/EngineState.h
++++ b/src/engine/EngineState.h
+@@ -141,6 +141,10 @@ struct ForwardCache {
+     // out of the intersections, so the raster gets an empty range for them.
+     // Empty unless a training step asked for it (engine_set_tile_skip_mask).
+     DeviceVector<int32_t>             tile_active;
++    // [C, void_h, void_w] camera depth where each ray enters a void ("voids
++    // block light"); set by a training step for its forward only.
++    DeviceVector<float>               void_depth;
++    uint32_t                          void_w = 0, void_h = 0;
+     DeviceTensor3D<float>             render_Ts;
+     DeviceTensor3D<float>             render_median; // [C,H,W] median depth, empty if not requested
+     DeviceTensor3D<int32_t>           last_ids;
+diff --git a/src/engine/EngineTrainStep.cpp b/src/engine/EngineTrainStep.cpp
+index 71a405c4..363d19c6 100644
+--- a/src/engine/EngineTrainStep.cpp
++++ b/src/engine/EngineTrainStep.cpp
+@@ -81,6 +81,51 @@ static void _visit_accumulate_camera_stats(const std::string& primitive) {
+ // No optimizer / densify. Used both as a per-sub-batch step in split mode
+ // and as the inner of the single-batch path. Returns the loss_dict from
+ // engine_compute_loss_backward; callers aggregate across sub-batches.
++static VoidStopProvider& _void_stop_provider() {
++    static VoidStopProvider p;
++    return p;
++}
++
++void engine_set_void_stop_provider(VoidStopProvider provider) {
++    _void_stop_provider() = std::move(provider);
++}
++
++// Asks the provider for this batch's void depths and uploads them; forward_3dgs
++// hands them to the raster and clears them, so only this forward stops rays.
++static void _prepare_void_stop() {
++    auto& fwd = engine().fwd;
++    fwd.void_w = fwd.void_h = 0;
++    const VoidStopProvider& prov = _void_stop_provider();
++    const CameraTable& cam = engine().camera;
++    if (!prov || cam.num <= 0) return;
++    const size_t n = (size_t)cam.num;
++    std::vector<float> vm(n * 16), in(n * 4), dc(n * 8, 0.0f);
++    backend::memcpy_sync(vm.data(), cam.viewmats.data_ptr(), vm.size() * sizeof(float),
++                         backend::MemcpyKind::DeviceToHost);
++    backend::memcpy_sync(in.data(), cam.intrins.data_ptr(), in.size() * sizeof(float),
++                         backend::MemcpyKind::DeviceToHost);
++    if (cam.dist_coeffs.data_ptr() && cam.dist_coeffs.numel() >= (int64_t)dc.size())
++        backend::memcpy_sync(dc.data(), cam.dist_coeffs.data_ptr(), dc.size() * sizeof(float),
++                             backend::MemcpyKind::DeviceToHost);
++    VoidStopCameras c;
++    c.num = cam.num;
++    c.width = cam.width;
++    c.height = cam.height;
++    c.model = cam.model_str;
++    c.distortion = cam.distortion_str;
++    c.viewmats = vm.data();
++    c.intrins = in.data();
++    c.dist_coeffs = dc.data();
++    std::vector<float> map;
++    int mw = 0, mh = 0;
++    if (!prov(c, map, mw, mh) || mw <= 0 || mh <= 0 || map.size() != n * mw * mh) return;
++    fwd.void_depth.resize(PoolSlot::RenderVoidDepth, (int64_t)map.size());
++    backend::memcpy_sync(fwd.void_depth.data_ptr(), map.data(), map.size() * sizeof(float),
++                         backend::MemcpyKind::HostToDevice);
++    fwd.void_w = (uint32_t)mw;
++    fwd.void_h = (uint32_t)mh;
++}
++
+ static std::map<std::string, float> _engine_step_fwd_bwd_only(
+     int step,
+     std::string primitive,
+@@ -165,6 +210,7 @@ static std::map<std::string, float> _engine_step_fwd_bwd_only(
+ 
+     {
+         SplatStageTimer stage_timer;
++        _prepare_void_stop();
+         forward_3dgs(primitive, sh_degree, packed, /*output_median=*/false, (int)dist_type);
+     }
+ 
+diff --git a/src/i18n/catalog/Log.h b/src/i18n/catalog/Log.h
+index c1b93f22..5f0f1ad3 100644
+--- a/src/i18n/catalog/Log.h
++++ b/src/i18n/catalog/Log.h
+@@ -1963,6 +1963,33 @@ SS_MSG(region_applied,
+     NL("Interessegebied: programmaknopen {0}; splats erbuiten loten met gewicht {1}"),
+     RU("Область интереса: узлов программы {0}; сплаты снаружи участвуют в выборке с весом {1}"),
+     TR("İlgi bölgesi: program düğümü {0}; dışarıdaki splatlar {1} ağırlığıyla çekilir"));
++SS_MSG(void_stop_on,
++    EN("Voids block light: camera rays stop where they enter the region's voids"),
++    JA("空洞で光を止める: カメラ光線は領域の空洞に入った所で止まります"),
++    ZH_HANS("空洞阻挡光线：相机光线在进入区域空洞处停止"),
++    ZH_HANT("空洞阻擋光線：相機光線在進入區域空洞處停止"),
++    KO("빈 공간이 빛을 막음: 카메라 광선이 영역의 빈 공간에 들어가는 곳에서 멈춥니다"),
++    DE("Hohlräume blockieren Licht: Kamerastrahlen enden beim Eintritt in die Hohlräume"),
++    FR("Les vides bloquent la lumière : les rayons s'arrêtent à l'entrée des vides"),
++    ES("Los huecos bloquean la luz: los rayos se detienen al entrar en los huecos"),
++    PT("Os vazios bloqueiam a luz: os raios param ao entrar nos vazios da região"),
++    IT("I vuoti bloccano la luce: i raggi si fermano all'ingresso nei vuoti"),
++    NL("Holtes houden licht tegen: stralen stoppen waar ze de holtes binnengaan"),
++    RU("Пустоты задерживают свет: лучи останавливаются при входе в пустоты области"),
++    TR("Boşluklar ışığı keser: ışınlar bölgenin boşluklarına girdiği yerde durur"));
++SS_MSG(void_stop_unsupported,
++    EN("Voids block light is off: {0}"),
++    JA("空洞で光を止める は無効です: {0}"),
++    ZH_HANS("空洞阻挡光线已关闭：{0}"), ZH_HANT("空洞阻擋光線已關閉：{0}"),
++    KO("빈 공간이 빛을 막음 꺼짐: {0}"),
++    DE("Hohlräume blockieren Licht ist aus: {0}"),
++    FR("Les vides bloquent la lumière est désactivé : {0}"),
++    ES("Los huecos bloquean la luz está desactivado: {0}"),
++    PT("Os vazios bloqueiam a luz está desligado: {0}"),
++    IT("I vuoti bloccano la luce è disattivato: {0}"),
++    NL("Holtes houden licht tegen staat uit: {0}"),
++    RU("Пустоты задерживают свет выключено: {0}"),
++    TR("Boşluklar ışığı keser kapalı: {0}"));
+ 
+ SS_MSG(roi_file,
+     EN("Region of interest: {0}"), JA("関心領域: {0}"), ZH_HANS("感兴趣区域：{0}"),
+diff --git a/src/i18n/catalog/TrainFields.h b/src/i18n/catalog/TrainFields.h
+index 962a0214..c21b5e9c 100644
+--- a/src/i18n/catalog/TrainFields.h
++++ b/src/i18n/catalog/TrainFields.h
+@@ -3364,6 +3364,66 @@ SS_MSG(roi_outside_opacity_decay_help,
+     TR("Her yoğunlaştırma adımında ilgi bölgesi dışındaki splat'ler opaklıklarının "
+        "bu payını korur. Görüntülerin hâlâ ihtiyaç duyduğu geri kazanır; kalanlar "
+        "içeri taşınana dek solar. 1 kapatır."));
++SS_MSG(roi_void_stop,
++    EN("Voids block light"), JA("空洞で光を止める"),
++    ZH_HANS("空洞阻挡光线"), ZH_HANT("空洞阻擋光線"), KO("빈 공간이 빛을 막음"),
++    DE("Hohlräume blockieren Licht"), FR("Les vides bloquent la lumière"),
++    ES("Los huecos bloquean la luz"), PT("Os vazios bloqueiam a luz"),
++    IT("I vuoti bloccano la luce"), NL("Holtes houden licht tegen"),
++    RU("Пустоты задерживают свет"), TR("Boşluklar ışığı keser"));
++SS_MSG(roi_void_stop_help,
++    EN("While training, each camera ray stops where it first enters a void the "
++       "region leaves out, so splats behind the void cannot show through. A shell "
++       "around a void then has to be opaque by itself, and reflections stay on its "
++       "outer surface. For keep-out regions with closed voids; 3dgs and mip only."),
++    JA("学習中、各カメラ光線は領域が除外する空洞に最初に入った所で止まり、空洞の"
++       "奥のスプラットは透けて見えません。空洞を囲む殻はそれ自体で不透明になり、"
++       "反射は外側の表面に残ります。閉じた空洞のある除外領域用。3dgs と mip のみ。"),
++    ZH_HANS("训练时，每条相机光线在首次进入区域排除的空洞处停止，空洞后面的泼溅无法"
++            "透出。包围空洞的外壳必须自身不透明，反射留在外表面。用于带封闭空洞的"
++            "排除区域；仅限 3dgs 和 mip。"),
++    ZH_HANT("訓練時，每條相機光線在首次進入區域排除的空洞處停止，空洞後面的潑濺無法"
++            "透出。包圍空洞的外殼必須自身不透明，反射留在外表面。用於帶封閉空洞的"
++            "排除區域；僅限 3dgs 和 mip。"),
++    KO("학습 중 각 카메라 광선은 영역이 제외한 빈 공간에 처음 들어가는 곳에서 멈추므로 "
++       "그 뒤의 스플랫이 비쳐 보이지 않습니다. 빈 공간을 둘러싼 껍질은 스스로 불투명해야 "
++       "하고 반사는 바깥 표면에 남습니다. 닫힌 빈 공간이 있는 제외 영역용, 3dgs와 mip만."),
++    DE("Beim Training endet jeder Kamerastrahl dort, wo er zuerst in einen vom "
++       "Bereich ausgelassenen Hohlraum eintritt, sodass Splats dahinter nicht "
++       "durchscheinen. Eine Hülle um den Hohlraum muss dann selbst deckend sein, und "
++       "Spiegelungen bleiben außen. Für Ausschlussbereiche mit geschlossenen "
++       "Hohlräumen; nur 3dgs und mip."),
++    FR("Pendant l'entraînement, chaque rayon s'arrête là où il entre dans un vide "
++       "exclu par la région : les splats derrière ne transparaissent plus. La coque "
++       "autour du vide doit alors être opaque d'elle-même et les reflets restent sur "
++       "sa surface extérieure. Pour les régions d'exclusion à vides fermés ; 3dgs et "
++       "mip seulement."),
++    ES("Al entrenar, cada rayo de cámara se detiene donde entra por primera vez en un "
++       "hueco que la región excluye, así los splats de detrás no se transparentan. La "
++       "cáscara alrededor del hueco debe ser opaca por sí misma y los reflejos quedan "
++       "en su superficie exterior. Para regiones de exclusión con huecos cerrados; "
++       "solo 3dgs y mip."),
++    PT("Durante o treino, cada raio de câmara para onde entra pela primeira vez num "
++       "vazio que a região exclui, pelo que os splats atrás não transparecem. A casca "
++       "à volta do vazio tem de ser opaca por si só e os reflexos ficam na superfície "
++       "exterior. Para regiões de exclusão com vazios fechados; só 3dgs e mip."),
++    IT("Durante l'addestramento ogni raggio si ferma dove entra per la prima volta in "
++       "un vuoto escluso dalla regione, così gli splat dietro non traspaiono. Il "
++       "guscio attorno al vuoto deve essere opaco da solo e i riflessi restano sulla "
++       "superficie esterna. Per regioni di esclusione con vuoti chiusi; solo 3dgs e mip."),
++    NL("Tijdens het trainen stopt elke camerastraal waar hij voor het eerst een holte "
++       "binnengaat die het gebied uitsluit, zodat splats erachter niet doorschijnen. "
++       "De schil rond de holte moet dan zelf dekkend zijn en reflecties blijven aan de "
++       "buitenkant. Voor uitsluitgebieden met gesloten holtes; alleen 3dgs en mip."),
++    RU("При обучении каждый луч камеры останавливается там, где впервые входит в "
++       "исключённую областью пустоту, и сплаты за ней не просвечивают. Оболочка "
++       "вокруг пустоты должна быть непрозрачной сама, а отражения остаются на её "
++       "внешней поверхности. Для областей исключения с замкнутыми пустотами; только "
++       "3dgs и mip."),
++    TR("Eğitimde her kamera ışını, bölgenin dışarıda bıraktığı bir boşluğa ilk girdiği "
++       "yerde durur; böylece arkadaki splat'ler görünmez. Boşluğu saran kabuk kendi "
++       "başına opak olmalı, yansımalar dış yüzeyde kalır. Kapalı boşluklu dışlama "
++       "bölgeleri için; yalnızca 3dgs ve mip."));
+ SS_MSG(roi_outside_weight_help,
+     EN("What a splat outside the region of interest counts for when "
+        "densification picks where to relocate or add splats, relative to 1 "
