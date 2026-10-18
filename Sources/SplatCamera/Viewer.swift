@@ -71,7 +71,9 @@ final class Viewer: NSObject, MTKViewDelegate {
 
     /// What the controls are doing: the camera, placing lights, or the contact sheet.
     enum Mode { case camera, lighting, sheet }
-    private(set) var mode = Mode.camera
+    /// Flying a light only belongs to lighting: leaving it (by any way, the
+    /// light table included) puts you back behind the camera, focusing aids and all.
+    private(set) var mode = Mode.camera { didSet { if mode != .lighting { pov = nil } } }
     var lighting = LightingPlot()
     /// The light being flown (seen from), if any, and the view from its lens.
     private(set) var pov: Int?
