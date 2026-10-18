@@ -64,12 +64,29 @@ struct CameraBody {
     var shutter: (label: String, seconds: Float) { shutterSpeeds[shutterIndex] }
     var framesLeft: Int { stock.exposures - framesShot }
 
+    /// The scan calibrated against mid grey: stops that bring its own middle
+    /// tone (whatever its capture camera made of it) to 0.18, so `sceneEV`
+    /// is the light on the scene's middle tone, as a reflected meter reads it.
+    var calibration: Float = 0
+
     /// Stops over (+) or under (-) the exposure the scan was captured at.
     var exposureStops: Float {
         let n = takingAperture, t = shutter.seconds
         let ev = log2(n * n / t) - log2(ratedEI / 100)
-        return sceneEV - ev
+        return sceneEV + calibration - ev
     }
+
+    /// Reciprocity failure: past about 1/4 s film answers less than the time
+    /// suggests (black-and-white about a stop down at 1 s, colour about half).
+    /// Meters know nothing of it, as on a real camera.
+    var reciprocityLoss: Float {
+        let t = shutter.seconds
+        guard t > 0.25 else { return 0 }
+        return (stock.blackAndWhite ? 0.5 : 0.25) * log2(t / 0.25)
+    }
+
+    /// The exposure the film actually gets (the meter's, less reciprocity failure).
+    var filmStops: Float { exposureStops - reciprocityLoss }
 
     /// Sets the shutter speed that best matches the meter reading.
     mutating func meterShutter(sceneLuminance lum: Float) {

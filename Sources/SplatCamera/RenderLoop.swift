@@ -412,7 +412,7 @@ final class RenderLoop {
             SIMD4(l.focalMM / 1000, n, l.maxAperture, Float(l.blades)),
             SIMD4(l.catsEye, l.soapBubble, l.bladeRotation, l.vignette),
             background,
-            SIMD4(0, 1, Float(b.rollNumber * 100 + e.frameNumber), b.exposureStops),
+            SIMD4(0, 1, Float(b.rollNumber * 100 + e.frameNumber), b.filmStops),
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(h) / 2 : 0, l.obstruction),
             SIMD4(0, 0, 0, 0),
             SIMD4(l.squeeze, 0, 0, 0),

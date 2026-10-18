@@ -12,6 +12,38 @@ struct SplatModel {
     var dc: [Float] = []           // [N,3]
     var sh: [Float] = []           // [N,K,3] coefficient-major
 
+    /// The scan's middle tone, as linear luminance: what its camera's exposure
+    /// made of the scene's average. A reflected-light meter averages light
+    /// (it does not take a log-average), so this is the average of every
+    /// splat's colour (the DC term, as the sRGB the scan was trained on, made
+    /// linear), weighted by how much it covers (opacity x area, the largest
+    /// capped so a few huge background splats cannot decide it). Mid grey is 0.18.
+    func middleTone() -> Float {
+        guard count > 0 else { return 0.18 }
+        let stride = max(1, count / 400_000)
+        var area: [Float] = []
+        for i in Swift.stride(from: 0, to: count, by: stride) {
+            area.append(exp((scales[3 * i] + scales[3 * i + 1] + scales[3 * i + 2]) * (2.0 / 3.0)))
+        }
+        let cap = area.sorted()[min(area.count - 1, Int(Float(area.count) * 0.95))]
+        let c0: Float = 0.28209479
+        func linear(_ v: Float) -> Float { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        var sumW: Double = 0, sumLum: Double = 0
+        var k = 0
+        for i in Swift.stride(from: 0, to: count, by: stride) {
+            let o = 1 / (1 + exp(-opacities[i]))
+            let w = Double(o * min(area[k], cap))
+            k += 1
+            let r = linear(max(0, min(1, 0.5 + c0 * dc[3 * i])))
+            let g = linear(max(0, min(1, 0.5 + c0 * dc[3 * i + 1])))
+            let b = linear(max(0, min(1, 0.5 + c0 * dc[3 * i + 2])))
+            let lum = max(0.002, 0.2126 * r + 0.7152 * g + 0.0722 * b)
+            sumW += w
+            sumLum += w * Double(lum)
+        }
+        return sumW > 0 ? Float(sumLum / sumW) : 0.18
+    }
+
     /// Robust centre and radius of the splat cloud (median, 90th-percentile
     /// distance), so the camera starts on the subject and not on stray floaters.
     func bounds() -> (center: SIMD3<Float>, radius: Float) {

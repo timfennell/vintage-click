@@ -62,6 +62,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     var onSwitchKind: (() -> Void)?
     /// The scan's light changed in the menu: remember it with the file.
     var onSceneLight: ((Float) -> Void)?
+    /// The scan's own middle tone (linear), measured when it loaded.
+    private(set) var middleTone: Float = 0.18
     private var menuOpen = false
     private var menuStick: Float = 0
     private var focusTurned: Float = 0
@@ -162,6 +164,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         super.init()
 
         body.metresPerUnit = metresPerUnit
+        // Calibrate the scan against mid grey: its middle tone to 0.18.
+        middleTone = model.middleTone()
+        body.calibration = max(-4, min(4, log2(0.18 / middleTone)))
+        print(String(format: "Calibrated against mid grey: the scan's middle tone %.3f, %+.2f stops", middleTone,
+                     body.calibration))
         print(String(format: "Scene scale: %.4g m per unit (subject radius %.2f m); photos %dx%d",
                      body.metresPerUnit, radius * body.metresPerUnit, photo.0, photo.1))
         // A new session loads a new roll after the ones already in the darkroom.
@@ -333,8 +340,11 @@ final class Viewer: NSObject, MTKViewDelegate {
             cb.commit()
             return
         }
-        // Eyes adapt, but not all the way: night stays night in the finder.
-        let want = max(1, min(24, 0.06 / max(meterLum, 1e-6)))
+        // Eyes adapt, but not all the way: night stays night in the finder,
+        // and a dim interior looks dimmer than a sunlit street (the scene's
+        // real light, EV 13 as the reference, felt about a third as strongly).
+        let light = pow(2, (body.sceneEV + body.calibration - 13) * 0.35)
+        let want = max(1, min(24, 0.06 / max(meterLum, 1e-6))) * max(0.2, min(1.6, light))
         finderGain *= pow(want / finderGain, min(1, Float(dt) * 0.8))
         var o = finderOptics(frame.job, seed: UInt32(displayFrame))
         o[5].y *= finderGain
@@ -1054,7 +1064,8 @@ final class Viewer: NSObject, MTKViewDelegate {
                 self?.menu?.showingHelp = true },
             .init(title: "Scene light: " + (sceneLightChoices.first { $0.1 == body.sceneEV }?.0
                                             ?? String(format: "EV %.0f", body.sceneEV)),
-                  detail: "the light the scan was made in: what the meter reads (select to change)") { [weak self] in
+                  detail: String(format: "the light on the scene's middle tone (calibrated: the scan's %.2f → mid grey, %+.1f stops) · select to change",
+                                 middleTone, body.calibration)) { [weak self] in
                 guard let self else { return }
                 let i = sceneLightChoices.firstIndex { $0.1 == self.body.sceneEV } ?? -1
                 let next = sceneLightChoices[(i + 1) % sceneLightChoices.count].1
@@ -1294,7 +1305,8 @@ final class Viewer: NSObject, MTKViewDelegate {
             "lens": b.lens.name, "lens_inspired_by": b.lens.inspiredBy,
             "aperture": b.takingAperture, "shutter": "1/\(b.shutter.label)",
             "film": b.stock.name, "iso": b.stock.iso, "rated_ei": b.ratedEI, "push": b.push, "focus_m": b.focusM,
-            "exposure_stops": b.exposureStops, "sub_pupils": job.cells.count,
+            "exposure_stops": b.exposureStops, "reciprocity_loss_stops": b.reciprocityLoss,
+            "scene_ev": b.sceneEV, "mid_grey_calibration_stops": b.calibration, "sub_pupils": job.cells.count,
             "metres_per_unit": b.metresPerUnit, "width": image.width, "height": image.height,
             "negative": job.negative == nil ? "" : url.deletingPathExtension().appendingPathExtension("dng").lastPathComponent,
         ]
