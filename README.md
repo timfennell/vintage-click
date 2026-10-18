@@ -117,14 +117,12 @@ folder name and each frame's .json.
 
 ## Sounds
 
-The camera plays your own recordings: put them in
-`~/Library/Application Support/Vintage Click/Sounds` (menu > Camera sounds
-opens it; a README there lists the names), one sound per file, several
-takes each: `shutter-1.wav`, `advance-1.wav` ... `advance-8.wav`, and
-optionally `shutter-open-*` + `shutter-close-*` (slow speeds come apart by
-the exposure time), `mirror-*`, `rewind-*`, `back-*`, `aperture-*`,
-`focus-*`. Each event plays a random take, never the same twice running,
-slightly varied in speed and level. Menu > Reload sounds picks up changes.
+The camera sounds are a real Nikon, recorded for the game (Resources/Sounds):
+the shutter at every speed from 1/2000 to 1 s (the recording nearest the
+speed set plays), thirteen takes of the film advance lever, the aperture
+ring, the shutter-speed dial, lens changes and loading film. Each event
+plays a random take, never the same twice running, slightly varied in
+speed and level. Menu > Camera sounds turns them on or off.
 
 ## The menu
 

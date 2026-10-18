@@ -127,7 +127,14 @@ final class Sounds {
         play(data, after: delay, volume: volume)
     }
 
+    /// Camera sounds on or off (the menu's toggle), remembered.
+    var enabled: Bool {
+        get { UserDefaults.standard.object(forKey: "cameraSounds") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "cameraSounds") }
+    }
+
     private func play(_ data: Data, after delay: Double, volume: Float) {
+        guard enabled else { return }
         let start = { [weak self] in
             guard let self, let p = try? AVAudioPlayer(data: data) else { return }
             p.enableRate = true

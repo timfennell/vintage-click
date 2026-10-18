@@ -1086,13 +1086,14 @@ final class Viewer: NSObject, MTKViewDelegate {
                 self?.appActions?.chooseRolls()
                 self?.openMenu()
             },
-            .init(title: "Camera sounds…", detail: "your recordings: shutter, film advance and more (opens the folder)") { [weak self] in
-                NSWorkspace.shared.open(Sounds.folder)
-                self?.closeMenu() },
-            .init(title: "Reload sounds", detail: "after adding or changing recordings") { [weak self] in
-                Sounds.shared.reload()
-                self?.hud?.flash("SOUNDS RELOADED")
-                self?.closeMenu() },
+            .init(title: "Camera sounds: " + (Sounds.shared.enabled ? "on" : "off"),
+                  detail: "shutter, film advance, lens and dial: a real Nikon (select to turn \(Sounds.shared.enabled ? "off" : "on"))") { [weak self] in
+                guard let self else { return }
+                Sounds.shared.enabled.toggle()
+                let keep = self.menu?.selected ?? 0
+                self.openMenu()
+                self.menu?.selected = keep
+            },
             .init(title: "Quit", detail: "") { [weak self] in self?.appActions?.quit() },
         ]
         menu.items = items
