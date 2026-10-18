@@ -122,8 +122,8 @@ final class MenuOverlay: NSView {
     private func text(_ s: String, _ p: NSPoint, size: CGFloat, color: NSColor, weight: NSFont.Weight = .medium) {
         let c = light(color)
         let glow = NSShadow()
-        glow.shadowColor = c.withAlphaComponent(0.55)
-        glow.shadowBlurRadius = size * 0.35
+        glow.shadowColor = c.withAlphaComponent(0.3)
+        glow.shadowBlurRadius = size * 0.14
         glow.shadowOffset = .zero
         let attrs: [NSAttributedString.Key: Any] = [.font: Self.glowFont(size * 1.05, bold: weight == .bold),
                                                     .foregroundColor: c, .shadow: glow]
@@ -151,9 +151,9 @@ final class MenuOverlay: NSView {
         NSGraphicsContext.restoreGraphicsState()
         guard let sharp = ctx.makeImage() else { return }
         let img = CIImage(cgImage: sharp)
-        let soft = img.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 0.45 * scale])
+        let soft = img.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 0.3 * scale])
             .cropped(to: img.extent)
-        let bloomed = soft.applyingFilter("CIBloom", parameters: [kCIInputRadiusKey: 5 * scale, kCIInputIntensityKey: 0.45])
+        let bloomed = soft.applyingFilter("CIBloom", parameters: [kCIInputRadiusKey: 3 * scale, kCIInputIntensityKey: 0.15])
             .cropped(to: img.extent)
         if let out = ci.createCGImage(bloomed, from: img.extent) {
             NSImage(cgImage: out, size: bounds.size).draw(in: bounds)
@@ -163,18 +163,20 @@ final class MenuOverlay: NSView {
     private func drawContent(_ dirtyRect: NSRect) {
         NSColor(white: 0, alpha: 0.72).setFill()
         bounds.fill()
-        let u = bounds.height / 60
+        var u = bounds.height / 70
         if showingHelp { drawHelp(u); return }
         if showingFilm { drawFilm(u); return }
         if showingLenses { drawLenses(u); return }
-        let w = min(bounds.width * 0.6, 46 * u * 1.4), rowH = 3.4 * u
+        // The whole list fits the window, however many items there are.
+        u = min(u, bounds.height * 0.92 / (CGFloat(items.count) * 2.9 + 9))
+        let w = min(bounds.width * 0.5, 40 * u * 1.4), rowH = 2.9 * u
         let h = CGFloat(items.count) * rowH + 9 * u
         let panel = NSRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
         NSColor(white: 0.08, alpha: 0.95).setFill()
         NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).fill()
         amber.withAlphaComponent(0.5).setStroke()
         NSBezierPath(roundedRect: panel, xRadius: u, yRadius: u).stroke()
-        text("SPLAT CAMERA", NSPoint(x: panel.minX + 2 * u, y: panel.minY + 1.6 * u), size: 1.5 * u, color: amber, weight: .bold)
+        text("CRANK & CLICK", NSPoint(x: panel.minX + 2 * u, y: panel.minY + 1.6 * u), size: 1.5 * u, color: amber, weight: .bold)
         text("now: \(currentMode)", NSPoint(x: panel.maxX - 16 * u, y: panel.minY + 1.9 * u), size: 1.0 * u,
              color: NSColor(white: 0.6, alpha: 1))
         itemRects = []
@@ -185,9 +187,9 @@ final class MenuOverlay: NSView {
                 amber.withAlphaComponent(0.18).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
             }
-            text((i == selected ? "▶ " : "  ") + item.title, NSPoint(x: r.minX + u, y: r.minY + 0.5 * u), size: 1.3 * u,
+            text((i == selected ? "▶ " : "  ") + item.title, NSPoint(x: r.minX + u, y: r.minY + 0.35 * u), size: 1.15 * u,
                  color: i == selected ? amber : .white)
-            text(item.detail, NSPoint(x: r.minX + 3 * u, y: r.minY + 2.0 * u), size: 0.85 * u,
+            text(item.detail, NSPoint(x: r.minX + 3 * u, y: r.minY + 1.7 * u), size: 0.8 * u,
                  color: NSColor(white: 0.55, alpha: 1))
         }
         text("▲▼ choose   A / Enter / click select   B / Esc back", NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u),

@@ -210,31 +210,40 @@ final class ViewfinderHUD: NSView {
     // MARK: LEDs
 
     /// Seven-segment digits (and the few letters they can make), slanted, red, glowing.
+    ///
+    /// A seven-segment display of `cells` fixed digit places: the text is
+    /// right-aligned into them (a "." lights the decimal point after a digit),
+    /// and every segment that is not lit still shows faintly, as on the real
+    /// part. Returns the display's right edge.
     @discardableResult
-    private func led(_ s: String, at origin: NSPoint, height h: CGFloat) -> CGFloat {
+    private func led(_ s: String, at origin: NSPoint, height h: CGFloat, cells: Int) -> CGFloat {
         let segs: [Character: String] = [
             "0": "abcdef", "1": "bc", "2": "abdeg", "3": "abcdg", "4": "bcfg", "5": "acdfg", "6": "acdefg",
             "7": "abc", "8": "abcdefg", "9": "abcdfg", "-": "g", "F": "aefg", "E": "adefg", "n": "ceg",
             "d": "bcdeg", "P": "abefg", "L": "def", "r": "eg", "o": "cdeg", "b": "cdefg", "S": "acdfg",
             "u": "cde", "H": "bcefg", "A": "abcefg", "t": "defg", "c": "deg",
         ]
-        let w = h * 0.52, t = h * 0.11, slant = h * 0.12
-        var x = origin.x
-        let ctx = NSGraphicsContext.current?.cgContext
+        // Glyphs with their decimal points, right-aligned into the cells.
+        var glyphs: [(ch: Character, dp: Bool)] = []
         for ch in s {
             if ch == "." {
-                let d = NSRect(x: x - w * 0.12, y: origin.y + h - t * 1.1, width: t * 1.1, height: t * 1.1)
-                ledFill(NSBezierPath(ovalIn: d), ctx)
-                x += w * 0.25
-                continue
+                if glyphs.isEmpty { glyphs.append((" ", true)) } else { glyphs[glyphs.count - 1].dp = true }
+            } else {
+                glyphs.append((ch, false))
             }
-            if ch == " " { x += w * 0.7; continue }
-            let on = segs[ch] ?? ""
+        }
+        if glyphs.count > cells { glyphs = Array(glyphs.suffix(cells)) }
+        glyphs = Array(repeating: (" ", false), count: cells - glyphs.count) + glyphs
+        let w = h * 0.52, t = h * 0.11, slant = h * 0.12
+        let ctx = NSGraphicsContext.current?.cgContext
+        let ghost = ledRed.withAlphaComponent(0.07)
+        for (k, g) in glyphs.enumerated() {
+            let x = origin.x + CGFloat(k) * w * 1.45
             // Corners of the digit, slanted to the right going up.
             func pt(_ fx: CGFloat, _ fy: CGFloat) -> NSPoint {
                 NSPoint(x: x + fx * w + (1 - fy) * slant, y: origin.y + fy * h)
             }
-            func seg(_ a: NSPoint, _ b: NSPoint) {
+            func seg(_ a: NSPoint, _ b: NSPoint) -> NSBezierPath {
                 let dx = b.x - a.x, dy = b.y - a.y, len = max(hypot(dx, dy), 1e-3)
                 let nx = -dy / len * t / 2, ny = dx / len * t / 2
                 let ux = dx / len * t * 0.55, uy = dy / len * t * 0.55
@@ -246,23 +255,21 @@ final class ViewfinderHUD: NSView {
                 p.line(to: NSPoint(x: b.x - ux * 1.6 - nx, y: b.y - uy * 1.6 - ny))
                 p.line(to: NSPoint(x: a.x + ux * 1.6 - nx, y: a.y + uy * 1.6 - ny))
                 p.close()
-                ledFill(p, ctx)
+                return p
             }
-            for c in on {
-                switch c {
-                case "a": seg(pt(0, 0), pt(1, 0))
-                case "b": seg(pt(1, 0), pt(1, 0.5))
-                case "c": seg(pt(1, 0.5), pt(1, 1))
-                case "d": seg(pt(0, 1), pt(1, 1))
-                case "e": seg(pt(0, 0.5), pt(0, 1))
-                case "f": seg(pt(0, 0), pt(0, 0.5))
-                case "g": seg(pt(0, 0.5), pt(1, 0.5))
-                default: break
-                }
+            let shapes: [Character: NSBezierPath] = [
+                "a": seg(pt(0, 0), pt(1, 0)), "b": seg(pt(1, 0), pt(1, 0.5)), "c": seg(pt(1, 0.5), pt(1, 1)),
+                "d": seg(pt(0, 1), pt(1, 1)), "e": seg(pt(0, 0.5), pt(0, 1)), "f": seg(pt(0, 0), pt(0, 0.5)),
+                "g": seg(pt(0, 0.5), pt(1, 0.5)),
+            ]
+            let on = segs[g.ch] ?? ""
+            for (name, path) in shapes {
+                if on.contains(name) { ledFill(path, ctx) } else { ghost.setFill(); path.fill() }
             }
-            x += w * 1.45
+            let dot = NSBezierPath(ovalIn: NSRect(x: x + w * 1.08, y: origin.y + h - t * 1.1, width: t * 1.1, height: t * 1.1))
+            if g.dp { ledFill(dot, ctx) } else { ghost.setFill(); dot.fill() }
         }
-        return x
+        return origin.x + CGFloat(cells) * w * 1.45
     }
 
     private func ledFill(_ p: NSBezierPath, _ ctx: CGContext?) {
@@ -276,21 +283,26 @@ final class ViewfinderHUD: NSView {
     private func drawLEDs(_ img: NSRect, u: CGFloat) {
         let h = 2.0 * u
         let y = img.maxY + (bounds.maxY - img.maxY - h) * 0.4
-        // Aperture, speed, distance across the middle; the counter to the right.
-        let ax = led("F" + info.aperture, at: NSPoint(x: img.minX + img.width * 0.16, y: y), height: h)
-        // Whole seconds carry a small "s" (2 s is not 1/2).
+        // Fixed displays, as in the camera: aperture (an F, then three places),
+        // speed (four), distance (four), the frame counter (two).
+        let ax = img.minX + img.width * 0.16
+        led("F", at: NSPoint(x: ax, y: y), height: h, cells: 1)
+        led(info.aperture, at: NSPoint(x: ax + h * 0.52 * 1.45, y: y), height: h, cells: 3)
+        // Whole seconds carry a small "s" (2 s is not 1/2), in its fixed place.
         let seconds = info.shutter.hasSuffix("\"")
-        let sx = led(seconds ? String(info.shutter.dropLast()) : info.shutter,
-                     at: NSPoint(x: max(ax + 3 * u, img.minX + img.width * 0.34), y: y), height: h)
-        if seconds { text("s", at: NSPoint(x: sx + 0.1 * u, y: y + h * 0.1), size: h * 0.75, color: ledRed) }
+        let sEnd = led(seconds ? String(info.shutter.dropLast()) : info.shutter,
+                       at: NSPoint(x: img.minX + img.width * 0.34, y: y), height: h, cells: 4)
+        if seconds { text("s", at: NSPoint(x: sEnd + 0.1 * u, y: y + h * 0.1), size: h * 0.75, color: ledRed, projected: false) }
         let fx = img.minX + img.width * 0.54
         if info.focus == "∞" {
-            text("∞", at: NSPoint(x: fx, y: y - 0.45 * h), size: h * 1.3, color: ledRed)
+            let end = led("", at: NSPoint(x: fx, y: y), height: h, cells: 4)
+            text("∞", at: NSPoint(x: end - h * 1.6, y: y - 0.45 * h), size: h * 1.3, color: ledRed, projected: false)
+            text("m", at: NSPoint(x: end + 0.2 * u, y: y + h * 0.1), size: h * 0.75, color: ledRed, projected: false)
         } else {
-            let end = led(info.focus, at: NSPoint(x: fx, y: y), height: h)
-            text("m", at: NSPoint(x: end + 0.2 * u, y: y + h * 0.1), size: h * 0.75, color: ledRed)
+            let end = led(info.focus.replacingOccurrences(of: " m", with: ""), at: NSPoint(x: fx, y: y), height: h, cells: 4)
+            text("m", at: NSPoint(x: end + 0.2 * u, y: y + h * 0.1), size: h * 0.75, color: ledRed, projected: false)
         }
-        led(info.counter, at: NSPoint(x: img.minX + img.width * 0.80, y: y), height: h)
+        led(info.counter, at: NSPoint(x: img.minX + img.width * 0.80, y: y), height: h, cells: 2)
         // Small red notes under them: modes, messages, the film's speed.
         var notes: [String] = []
         if let m = message, CACurrentMediaTime() < m.until { notes.append(m.text) }
