@@ -2692,19 +2692,35 @@ index c6a86710..1c010f69 100644
      // Capabilities::required_subgroup_size).
      VkPhysicalDeviceSubgroupSizeControlFeaturesEXT fsgc{
 diff --git a/src/backend/vulkan/kernels/ProjectionFwd.cpp b/src/backend/vulkan/kernels/ProjectionFwd.cpp
-index ae0d78b6..e03ed10d 100644
+index ae0d78b6..c2115e98 100644
 --- a/src/backend/vulkan/kernels/ProjectionFwd.cpp
 +++ b/src/backend/vulkan/kernels/ProjectionFwd.cpp
-@@ -9,6 +9,8 @@
+@@ -6,9 +6,24 @@
+ #include <kernels/projection/ProjectionFwd.cuh>
+ 
+ #include "backend/vulkan/kernels/KernelCommon.h"
++#include "backend/api/BackendRuntime.h"
  
  namespace {
  
 +uint64_t g_lens_defocus = 0;   // backend/vulkan/LensDefocus.h
 +
++// Never hand the shader a null lens: it may load p.lens[0] whatever the null
++// test says, which crashes software Vulkan (lavapipe). Zeros read as "no lens".
++uint64_t lens_or_off() {
++    if (g_lens_defocus) return g_lens_defocus;
++    static void* off = nullptr;
++    if (!off) {
++        off = backend::device_malloc_checked(64 * 16, "lens off");
++        backend::memset_sync(off, 0, 64 * 16);
++    }
++    return (uint64_t)off;
++}
++
  // Mirrors ProjectionFwdParams in shaders/projection_fwd.slang.
  struct ProjectionFwdParams {
      uint64_t means, quats, scales, opacities, features_dc, features_sh;
-@@ -23,8 +25,9 @@ struct ProjectionFwdParams {
+@@ -23,8 +38,9 @@ struct ProjectionFwdParams {
      uint32_t wgs_per_row;
      uint32_t num_sh_buffer;
      uint32_t _pad0;
@@ -2715,15 +2731,15 @@ index ae0d78b6..e03ed10d 100644
                "params layout must match the slang struct");
  
  // Mirrors Projection3dgutParams in shaders/projection_fwd.slang.
-@@ -117,6 +120,7 @@ launch_projection_fwd_vk(
+@@ -117,6 +133,7 @@ launch_projection_fwd_vk(
      p.width = image_width;
      p.height = image_height;
      p.wgs_per_row = per_row;
-+    p.lens = g_lens_defocus;
++    p.lens = lens_or_off();
  
      backend::vk::SpecList spec{cd.cam, (uint32_t)sh_degree,
                                 antialiased ? 1u : 0u, spec_bits, 0u, cd.dist};
-@@ -128,6 +132,10 @@ launch_projection_fwd_vk(
+@@ -128,6 +145,10 @@ launch_projection_fwd_vk(
  
  }  // namespace
  
