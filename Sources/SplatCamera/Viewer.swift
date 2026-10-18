@@ -973,14 +973,18 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// This sitting's folder: the day, then the time it began and the scene
     /// ("2026-10-17/09.14 Skate park"). Made when the first frame is saved.
     var sceneName = "scene"
-    private lazy var sessionFolder: URL = {
+    /// This session's day and time (fixed when it starts) ...
+    private lazy var sessionName: (day: String, sitting: String) = {
         let now = Date()
         let day = DateFormatter(), time = DateFormatter()
         day.dateFormat = "yyyy-MM-dd"
         time.dateFormat = "HH.mm"
-        return ContactSheetView.root.appendingPathComponent(day.string(from: now))
-            .appendingPathComponent("\(time.string(from: now)) \(sceneName)")
+        return (day.string(from: now), "\(time.string(from: now)) \(sceneName)")
     }()
+    /// ... under wherever rolls are kept now (it can be changed mid-session).
+    private var sessionFolder: URL {
+        ContactSheetView.root.appendingPathComponent(sessionName.day).appendingPathComponent(sessionName.sitting)
+    }
 
     func rollFolder(_ b: CameraBody) -> URL {
         sessionFolder.appendingPathComponent(String(format: "Roll %02d - %@", b.rollNumber, b.rollName))
