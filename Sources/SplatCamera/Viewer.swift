@@ -690,6 +690,17 @@ final class Viewer: NSObject, MTKViewDelegate {
     private func lightingInput(_ s: GamepadInput.State, dt: Float) {
         let p = s.pressed
         if p.contains(.gels) { openGels(); return }
+        if p.contains(.modifiers) { openModifiers(); return }
+        if p.contains(.patternFocus), !lighting.lights.isEmpty {
+            let k = pov ?? min(lighting.selected, lighting.lights.count - 1)
+            let steps: [Float] = [0, 0.25, 0.5, 1]
+            let now = lighting.lights[k].patternFocus
+            let next = steps.first { $0 > now + 0.01 } ?? steps[0]
+            lighting.lights[k].patternFocus = next
+            let gobo = lighting.lights[k].kit.kind == .ellipsoidal
+            hud?.flash(gobo ? String(format: "GOBO FOCUS: %@", next == 0 ? "SHARP" : next < 0.5 ? "A TOUCH SOFT" : next < 1 ? "SOFT" : "VERY SOFT")
+                            : String(format: "COOKIE: %@", next == 0 ? "CLOSE TO THE LAMP (SOFT)" : next < 1 ? "FURTHER OUT" : "FAR OUT (CRISP)"))
+        }
         var plot = lighting
         let n = plot.lights.count
         if p.contains(.x) && plot.lights.count < RenderLoop.maxLights {
@@ -710,7 +721,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         if p.contains(.b) { pov = nil }
         if p.contains(.y) {
             plot.kitChoice = (plot.kitChoice + 1) % lightKit.count
-            if let i = pov { plot.lights[i].head = plot.kitChoice }
+            if let i = pov {
+                plot.lights[i].head = plot.kitChoice
+                if !plot.lights[i].fits(lightModifiers[plot.lights[i].modifier]) { plot.lights[i].modifier = 0 }
+            }
         }
         if let i = pov, plot.lights.indices.contains(i) {
             if p.contains(.removeLight) {
@@ -1044,12 +1058,20 @@ final class Viewer: NSObject, MTKViewDelegate {
             gelDetail = "colour correction and effect colours for the light (C in lighting)"
         }
         let filterTitle: String = "Lens filter: " + body.filter.name
+        var modTitle = "Light modifiers…", modDetail = "add a light first (lighting mode)"
+        if !lighting.lights.isEmpty {
+            let k = min(lighting.selected, lighting.lights.count - 1)
+            let name: String = lightModifiers[lighting.lights[k].modifier].name
+            modTitle = "Modifier on light \(k + 1): " + name
+            modDetail = "barn doors, flags, cookies; gobos in an ellipsoidal (M in lighting, K focus)"
+        }
         items += [
             .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
                 self?.openLenses() },
             .init(title: filterTitle, detail: "in the camera bag's Filters shelf: ND, colour, star, soft and mist (V)") { [weak self] in
                 self?.openFilters() },
             .init(title: gelTitle, detail: gelDetail) { [weak self] in self?.openGels() },
+            .init(title: modTitle, detail: modDetail) { [weak self] in self?.openModifiers() },
             .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") { [weak self] in
                 self?.openFilm() },
             .init(title: "Set the scale (measure)…",
@@ -1148,6 +1170,35 @@ final class Viewer: NSObject, MTKViewDelegate {
         guard let menu else { return }
         menu.lensShelf = menu.filterShelf
         menu.lensChoice = body.filterIndex
+    }
+
+    /// What goes on or in front of the light being flown (or the one chosen):
+    /// barn doors, flags, cookies; gobos for an ellipsoidal. M in lighting, or the menu.
+    func openModifiers() {
+        guard !lighting.lights.isEmpty else {
+            hud?.flash("ADD A LIGHT FIRST (LIGHTING MODE)")
+            return
+        }
+        if !menuOpen { openMenu() }
+        guard let menu else { return }
+        let k = pov ?? min(lighting.selected, lighting.lights.count - 1)
+        let light = lighting.lights[k]
+        let choices = lightModifiers.indices.filter { light.fits(lightModifiers[$0]) }
+        menu.listTitle = "MODIFIERS · LIGHT \(k + 1)"
+        menu.listAbout = light.kit.kind == .ellipsoidal
+            ? "\(light.kit.name): a metal gobo in the gate (K: focus, sharp to soft)"
+            : "\(light.kit.name): barn doors, flags and cookies (K: how far the cookie stands from the lamp)"
+        menu.listRows = choices.map { (lightModifiers[$0].name, lightModifiers[$0].about) }
+        menu.listMarked = choices.firstIndex(of: light.modifier) ?? 0
+        menu.listChoice = menu.listMarked
+        menu.onChooseList = { [weak self] row in
+            guard let self, self.lighting.lights.indices.contains(k) else { return }
+            let m = choices[row]
+            self.lighting.lights[k].modifier = m
+            self.hud?.flash(m == 0 ? "OPEN BEAM" : lightModifiers[m].name.uppercased())
+            self.closeMenu()
+        }
+        menu.showingList = true
     }
 
     /// The gel book, for the light being flown (or the one chosen): C in lighting, or the menu.
@@ -1442,7 +1493,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                 let mark = k == pov ? "◉" : " "
                 return String(format: "%@ %d %@  beam %.0f°  %@%@", mark, k + 1, l.kit.name, l.beamAngle,
                               l.dimmerStops == 0 ? "full" : String(format: "%+.1f stop", l.dimmerStops),
-                              l.gel == 0 ? "" : "  · " + gels[l.gel].name)
+                              (l.gel == 0 ? "" : "  · " + gels[l.gel].name) + (l.modifier == 0 ? "" : "  · " + lightModifiers[l.modifier].name))
             }
             lines.append(String(format: "House lights: %@ (%.2f%%)   ·   next light: %@", lighting.ambientName,
                                 lighting.ambient * 100, lightKit[lighting.kitChoice].name))

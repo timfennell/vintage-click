@@ -133,7 +133,7 @@ and halation.
 ![Lighting mode](docs/screenshots/lighting.jpg)
 
 Press **L** (or R3) for lighting mode. Add 1970s tungsten heads (Fresnel 650,
-1K and 2K, and a 2K softlight), fly each one from its own point of view to aim
+1K and 2K, a 2K softlight, and an ellipsoidal spot), fly each one from its own point of view to aim
 it, flood or spot it, dim it, and turn the scan's own light down to night.
 Lights relight the scan and cast shadows; their beams come from traced optics
 of real Fresnel lenses, not a formula. In the finder the heads appear as
@@ -141,6 +141,14 @@ projected wireframes. Each light can carry a **gel** (**C**, or the menu): full,
 half and quarter CT blue and CT orange to convert between tungsten and
 daylight, and colours from pale straw and bastard amber to primary red,
 magenta, moss green, peacock and deep night blue, each with its own light loss.
+
+**Modifiers** (**M** in lighting mode, or the menu): barn doors (trimmed, a
+slash, a slit) and flags on stands for the Fresnels and softlight, and
+cookies (leaves, plywood breakup, bare branches) that break the beam into
+dapples, softer the closer they stand to the lamp. The **Ellipsoidal 750**, a
+theatre-style hard-edged zoom spot, takes metal **gobos** in its gate: a
+window, venetian blinds, a church window, bars, a leaf breakup. **K** steps a
+gobo's focus from sharp to soft, or a cookie's distance from the lamp.
 
 ### The light table
 
@@ -201,6 +209,8 @@ scan, and see every control.
 | add a light | X | F |
 | change the head | Y | T |
 | gel on the light | menu | C |
+| modifier: doors, flag, cookie, gobo | menu | M |
+| gobo focus / cookie distance | | K |
 | flood / spot | L2 / R2 | mouse wheel |
 | dimmer (half stops) | d-pad up / down | `-` `=` |
 | remove the light you fly | menu | Backspace |

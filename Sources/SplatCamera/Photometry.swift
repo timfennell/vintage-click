@@ -101,6 +101,12 @@ enum Photometry {
         case .softlight:
             let t = softlight(kit)
             tables = Array(repeating: t, count: steps)
+        case .ellipsoidal:
+            // Zoom from flood (0) to spot (8): a flat, hard-edged field.
+            tables = (0..<steps).map { i in
+                let t = Float(i) / Float(steps - 1)
+                return ellipsoidal(kit, fieldDegrees: kit.floodAngle + (kit.spotAngle - kit.floodAngle) * t)
+            }
         case .fresnel:
             let o = optics(kit)
             // Calibrate to the head's published angles: the stipple on the lens
@@ -231,6 +237,30 @@ enum Photometry {
             }
         }
         return toTable(hist, lumens: kit.lumens)
+    }
+
+    /// An ellipsoidal spot: the lamp's light gathered by the reflector through
+    /// a gate and a lens, so an even field with a sharp edge (a degree or two of
+    /// fall-off) out to the field angle, slightly brighter in the middle.
+    static func ellipsoidal(_ kit: LightHead, fieldDegrees: Float) -> BeamTable {
+        var hist = [SIMD3<Float>](repeating: .zero, count: BeamTable.thetaBins * BeamTable.phiBins)
+        let half = fieldDegrees * .pi / 360, edge: Float = 1.2 * .pi / 180
+        for t in 0..<BeamTable.thetaBins {
+            let th = BeamTable.theta(Float(t))
+            let a = BeamTable.edge(Float(t)), b = BeamTable.edge(Float(t + 1))
+            let ring = 2 * Float.pi * (cos(a) - cos(b)) / Float(BeamTable.phiBins)
+            let inside = 1 - smoothstep(half - edge, half + edge, th)
+            let hot = 1 - 0.15 * (th / max(half, 1e-3)) * (th / max(half, 1e-3))
+            for p in 0..<BeamTable.phiBins {
+                hist[t * BeamTable.phiBins + p] = SIMD3(repeating: max(0, inside * hot) * ring)
+            }
+        }
+        return toTable(hist, lumens: kit.lumens)
+    }
+
+    private static func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
+        let t = max(0, min(1, (x - e0) / (e1 - e0)))
+        return t * t * (3 - 2 * t)
     }
 
     /// Open-fronted box (opening w x h at z = 0, depth d) with a white

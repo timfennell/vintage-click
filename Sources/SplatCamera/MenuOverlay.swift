@@ -291,6 +291,8 @@ final class MenuOverlay: NSView {
             ("add a light (you fly it)", "left (X)", "F"),
             ("change the head", "top (Y)", "T"),
             ("gel on the light", "menu", "C"),
+            ("modifier: doors, flag, cookie, gobo", "menu", "M"),
+            ("gobo focus / cookie distance", "menu", "K"),
             ("flood / spot", "L2 / R2", "mouse wheel"),
             ("dimmer (half stops)", "d-pad ▲ ▼", "-  ="),
             ("remove the light you fly", "via the menu", "Backspace"),

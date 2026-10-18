@@ -53,6 +53,10 @@ let tiltChoice = pair("--tilt"), shiftChoice = pair("--shift")
 // --filter I (index into lensFilters), --gel I (on every light): for tests.
 let filterChoice = option("--filter").flatMap { Int($0) }
 let gelChoice = option("--gel").flatMap { Int($0) }
+// --head I / --modifier I / --pattern-focus F (on every light): for tests.
+let headChoice = option("--head").flatMap { Int($0) }
+let modifierChoice = option("--modifier").flatMap { Int($0) }
+let patternFocusChoice = option("--pattern-focus").flatMap { Float($0) }
 // --turn YAW,PITCH (degrees, right and up): aim the camera for scripted checks.
 let turn = option("--turn").map { $0.split(separator: ",").compactMap { Float($0) } }
 let noShadows = args.contains("--no-shadows")
@@ -224,6 +228,8 @@ func configureSession() {
     }
     if let i = filmChoice { viewer.body.stockIndex = i % filmStocks.count }
     if pinhole { viewer.setBenchLens(false) }
+    // Focus first: the demo lights aim where the camera is focused.
+    if let m = focusChoice { viewer.body.focusM = m }
     if demoLights { viewer.demoLights() }
     if noShadows { viewer.loop.shadowsOn = false }
     // Places are scanned in their own light; objects on the rig are lit from the camera.
@@ -238,6 +244,11 @@ func configureSession() {
     if let i = filterChoice, lensFilters.indices.contains(i) { viewer.body.filterIndex = i }
     if let g = gelChoice, gels.indices.contains(g) {
         for k in viewer.lighting.lights.indices { viewer.lighting.lights[k].gel = g }
+    }
+    for k in viewer.lighting.lights.indices {
+        if let h = headChoice, lightKit.indices.contains(h) { viewer.lighting.lights[k].head = h }
+        if let m = modifierChoice, lightModifiers.indices.contains(m) { viewer.lighting.lights[k].modifier = m }
+        if let f = patternFocusChoice { viewer.lighting.lights[k].patternFocus = f }
     }
     DispatchQueue.main.async {
         if startMenu { viewer.openMenu() }

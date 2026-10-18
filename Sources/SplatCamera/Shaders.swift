@@ -859,7 +859,9 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
                     device const float* sh0 [[buffer(2)]], device float* out_dc [[buffer(3)]],
                     constant float4* G [[buffer(4)]], constant float4* LT [[buffer(5)]],
                     device const float4* BT [[buffer(6)]], device const uchar* VIS [[buffer(7)]],
+                    texture2d_array<float> patterns [[texture(0)]],
                     uint i [[thread_position_in_grid]]) {
+    constexpr sampler pat(filter::linear, mip_filter::linear, address::clamp_to_edge);
     uint N = uint(G[1].y), K = uint(G[1].z), nl = uint(G[1].x);
     if (i >= N) return;
     float3 mean = float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
@@ -874,7 +876,7 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
     if (has_sh && ambient > 0) shine += pow(ambient * tint, 1 / 2.2) * sh_sum(v, sh, K, 0, K);
     const float3 lum = float3(0.2126, 0.7152, 0.0722);
     for (uint l = 0; l < nl; l++) {
-        constant float4* L = LT + 4 * l;
+        constant float4* L = LT + 6 * l;
         float3 d = L[0].xyz - mean;
         float dist_m = max(length(d) * L[3].w, 1e-3);
         float3 ldir = d / max(length(d), 1e-9);
@@ -892,6 +894,21 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         float3 cd = mix(mix(B[t0 * 8 + p0].rgb, B[t0 * 8 + p0 + 1].rgb, fp),
                         mix(B[(t0 + 1) * 8 + p0].rgb, B[(t0 + 1) * 8 + p0 + 1].rgb, fp), ft);
         float3 e3 = cd * L[1].w / (dist_m * dist_m);
+        // Modifiers, in the light's frame: barn doors and flags cut the beam
+        // (L[5]: limits left, right, bottom, top, as tan of the angle off axis,
+        // edges softened by the lamp's size); a gobo or cookie is a mask
+        // (L[4]: layer, the half-field it covers, blur, value beyond it).
+        float2 xy = float2(dot(w, right), dot(w, upl)) / max(ct, 1e-3);
+        float soft = 0.025;
+        float cut = smoothstep(L[5].x - soft, L[5].x + soft, xy.x) * (1 - smoothstep(L[5].y - soft, L[5].y + soft, xy.x))
+                  * smoothstep(L[5].z - soft, L[5].z + soft, xy.y) * (1 - smoothstep(L[5].w - soft, L[5].w + soft, xy.y));
+        e3 *= cut;
+        if (L[4].x >= 0) {
+            float2 uv = 0.5 + 0.5 * float2(xy.x, -xy.y) / L[4].y;
+            float m = patterns.sample(pat, uv, uint(L[4].x), level(L[4].z)).r;
+            float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+            e3 *= mix(L[4].w, m, inside);
+        }
         if (G[2].w > 0.5) e3 *= float(VIS[i * 8 + l]) / 255.0;     // shadowed
         float e = dot(e3, float3(0.2126, 0.7152, 0.0722));
         if (e <= 0) continue;

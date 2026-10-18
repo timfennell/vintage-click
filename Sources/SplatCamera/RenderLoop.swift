@@ -68,6 +68,8 @@ final class RenderLoop {
     private let negativePSO: MTLComputePipelineState
     private let streakPSO: MTLComputePipelineState
     private let lensFxPSO: MTLComputePipelineState
+    /// Gobo and cookie patterns (PatternArt).
+    private var patterns: MTLTexture?
     // The scan's own colours (relighting reads them; Spirula's are overwritten).
     private let means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
     private let colours: (buf: MTLBuffer, off: Int)
@@ -152,6 +154,7 @@ final class RenderLoop {
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
         streakPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "streak")!)
         lensFxPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "lens_fx")!)
+        patterns = PatternArt.make(device: device, queue: queue)
         shadowPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shadow_vis")!)
         count = model.count
         higherCoeffs = (model.shDegree + 1) * (model.shDegree + 1) - 1
@@ -314,7 +317,8 @@ final class RenderLoop {
             guard render(maps[slot].index, view: cam.viewMatrix, fx: fx, cx: Float(res) / 2, cy: Float(res) / 2)
             else { return nil }
             let kit = light.kit
-            let source = (kit.kind == .softlight ? 0.27 : Photometry.optics(kit).lensR) / body.metresPerUnit
+            let lens: Float = kit.kind == .softlight ? 0.27 : kit.kind == .ellipsoidal ? 0.06 : Photometry.optics(kit).lensR
+            let source = lens / body.metresPerUnit
             let V = cam.viewMatrix
             var S: [SIMD4<Float>] = [
                 SIMD4(V[0], V[1], V[2], V[3]), SIMD4(V[4], V[5], V[6], V[7]), SIMD4(V[8], V[9], V[10], V[11]),
@@ -361,7 +365,7 @@ final class RenderLoop {
         key.append(SIMD4<Float>(spots, 0, 0, 0))
         if key == lastRelight { return }
         lastRelight = key
-        if lt.isEmpty { lt = [SIMD4<Float>](repeating: .zero, count: 4) }
+        if lt.isEmpty { lt = [SIMD4<Float>](repeating: .zero, count: 6) }
         let tableBuf = tables.isEmpty
             ? device.makeBuffer(length: 16, options: .storageModeShared)
             : tables.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }
@@ -375,6 +379,7 @@ final class RenderLoop {
         ce.setBytes(&lt, length: lt.count * 16, index: 5)
         ce.setBuffer(tableBuf, offset: 0, index: 6)
         ce.setBuffer(vis ?? tableBuf, offset: 0, index: 7)
+        ce.setTexture(patterns, index: 0)
         ce.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         ce.endEncoding()
