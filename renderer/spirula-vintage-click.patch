@@ -2806,7 +2806,7 @@ index ef7b72da..9f612088 100644
                      (uint32_t)batch, tile_width, tile_height, macro_log2, &p,
                      sizeof(p));
 diff --git a/src/backend/vulkan/shaders/projection_fwd.slang b/src/backend/vulkan/shaders/projection_fwd.slang
-index 9c30e617..1e7fd40e 100644
+index 9c30e617..4c56a5c7 100644
 --- a/src/backend/vulkan/shaders/projection_fwd.slang
 +++ b/src/backend/vulkan/shaders/projection_fwd.slang
 @@ -93,8 +93,113 @@ struct ProjectionFwdParams {
@@ -2923,14 +2923,15 @@ index 9c30e617..1e7fd40e 100644
  void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      ProjectionFwdParams p, uint idx) {
      uint cid = (idx / p.N) % p.C;
-@@ -130,12 +235,20 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -130,12 +235,21 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      float s_depth;
      float3 s_conic;
      float s_opac;
 +    // With a lens, splats just outside the image blur into it: project as if
 +    // the image were bigger by the largest blur, then shift back.
 +    bool lensOn = !is_null(p.lens) && p.lens[0].x > 0.5f;
-+    float m = lensOn ? min(3.0f * p.lens[1].w, 4096.0f) : 0.0f;
++    // (A capped blur can reach ~4.7 sigma_max: 3.33 x sqrt(2) x the cap.)
++    float m = lensOn ? min(5.0f * p.lens[1].w, 16384.0f) : 0.0f;
      projection_3dgs<cam, D, false, false>(
          kAntialiased != 0,
          mean, quat, scale, in_opacity, R, t,
@@ -2946,7 +2947,7 @@ index 9c30e617..1e7fd40e 100644
  
      // SH -> rgb, gated exactly like _Base3DGS::project.
      float3 rgb = float3(0.0f);
-@@ -143,6 +256,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -143,6 +257,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
          rgb = eval_splat_color(mean, R, t, dc, p.features_sh, p.sh_stride,
                                 gid, p.sh_packed, p.sh_bounds,
                                 p.num_sh_buffer, i64mem_get(p.sh_bounds_stride));
