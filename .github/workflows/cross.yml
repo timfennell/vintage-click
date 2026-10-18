@@ -1,0 +1,105 @@
+name: Cross-platform build
+
+# Builds the renderer library (Spirula Studio at renderer/UPSTREAM_BASE.txt plus
+# renderer/spirula-vintage-click.patch) and the cross-platform app (cross/) for
+# Windows and Linux. The Linux job also renders a test photo on Mesa's software
+# Vulkan, so a broken build is caught without a GPU.
+
+on:
+  push:
+    branches: [master]
+    paths: ['cross/**', 'renderer/**', '.github/workflows/cross.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            platform: windows-x64
+            lib: build/spirula_render.dll
+          - os: ubuntu-24.04
+            platform: linux-x64
+            lib: build/libspirula_render.so
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Spirula Studio source, patched
+        shell: bash
+        run: |
+          git clone --quiet https://github.com/harry7557558/spirula-studio spirula
+          cd spirula
+          git checkout --quiet "$(cat ../renderer/UPSTREAM_BASE.txt)"
+          git apply ../renderer/spirula-vintage-click.patch
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Tools
+        shell: bash
+        run: python -m pip install --quiet ninja numpy
+
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers spirv-tools libgl1-mesa-dev xorg-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libasound2-dev libpulse-dev
+
+      - name: Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -sSL -o vulkan_sdk.exe https://sdk.lunarg.com/sdk/download/1.4.357.0/windows/vulkan_sdk.exe
+          $p = Start-Process -FilePath .\vulkan_sdk.exe -NoNewWindow -Wait -PassThru `
+               -ArgumentList '--root','C:\VulkanSDK','--accept-licenses','--default-answer','--confirm-command','install'
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+          "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            spirula/build/slang-*
+            spirula/build/Vulkan-Headers-*
+          key: fetched-${{ matrix.platform }}-${{ hashFiles('renderer/*') }}
+
+      - name: Build the renderer library
+        shell: bash
+        working-directory: spirula
+        env:
+          SS_SKIP_COMMENT_CHECK: '1'
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DSS_BACKEND=vulkan -DSS_ENABLE_PATENTED=ON
+          cmake --build build --target spirula_render
+
+      - name: Load test
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ctypes, os, sys
+          path = os.path.abspath("spirula/${{ matrix.lib }}")
+          if sys.platform == "win32":
+              os.add_dll_directory(os.path.dirname(path))
+          L = ctypes.CDLL(path)
+          for name in ("sr_set_splats", "sr_render", "sr_set_lens", "sr_set_colors", "sr_set_camera_model"):
+              getattr(L, name)
+          print("loaded", path)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renderer-${{ matrix.platform }}
+          path: spirula/${{ matrix.lib }}
+          retention-days: 14
