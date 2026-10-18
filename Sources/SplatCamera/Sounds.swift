@@ -1,23 +1,39 @@
 import AVFoundation
 import Foundation
 
-/// The camera's own sounds, recorded by you: files in the sounds folder named
-/// by what they are, any number of takes each (shutter-1.wav, shutter-2.wav,
-/// advance-1.wav ...). Each event plays a random take (never the same one
-/// twice running), a touch faster or slower and louder or softer, so a burst
-/// of frames never sounds like a loop. With no recordings the camera is silent.
+/// The camera's own sounds: a real Nikon recorded for the game (in the app,
+/// Resources/Sounds), plus any recordings of your own in the sounds folder,
+/// named by what they are, any number of takes each (film-advance-1.wav,
+/// film-advance-2.wav ...). Each event plays a random take (never the same
+/// one twice running), a touch faster or slower and louder or softer, so a
+/// burst of frames never sounds like a loop.
 final class Sounds {
     enum Event: String, CaseIterable {
         case shutter            // the whole shutter, at any speed
         case shutterOpen = "shutter-open"     // first curtain (with shutter-close: slow speeds come apart)
         case shutterClose = "shutter-close"   // second curtain, after the exposure time
+        case shutterDial = "shutter-change"   // a click of the shutter-speed dial
         case mirror             // the mirror slapping up and back
         case advance            // the film advance lever: frame wound on
         case rewind             // rewinding the roll
         case aperture           // a click of the aperture ring
         case focus              // the focus ring (short, plays now and then as it turns)
         case back               // opening / closing the back to load film
+        case filmChange = "film-change"       // the whole of loading a new roll
+        case lensChange = "lens-change"       // a lens off the mount and another on
+
+        /// The names its files may start with.
+        var names: [String] {
+            switch self {
+            case .advance: return ["film-advance", "advance"]
+            case .aperture: return ["iris-click", "iris", "aperture"]
+            default: return [rawValue]
+            }
+        }
     }
+
+    /// The recordings that come with the app.
+    static var bundled: URL? { Bundle.main.resourceURL?.appendingPathComponent("Sounds") }
 
     static let shared = Sounds()
 
@@ -38,11 +54,11 @@ final class Sounds {
     private var shutterAt: [Float: [Data]] = [:]
     private var lastSpeedTake: [Float: Int] = [:]
 
-    /// "1000" -> 1/1000 s, "8" -> 1/8 s, "1s" / "2s" -> whole seconds.
+    /// "1000" -> 1/1000 s, "8" -> 1/8 s; seconds: "1" or "1s", "0.5", "0.125", "2s".
     static func speed(_ token: String) -> Float? {
         if token.hasSuffix("s"), let n = Float(token.dropLast()), n > 0 { return n }
-        if let d = Float(token), d > 0 { return 1 / d }
-        return nil
+        guard let d = Float(token), d > 0 else { return nil }
+        return token.contains(".") || d <= 1 ? d : 1 / d
     }
     private var last: [Event: Int] = [:]
     private var playing: Set<AVAudioPlayer> = []
@@ -58,19 +74,23 @@ final class Sounds {
         writeReadme()
         var found: [Event: [Data]] = [:]
         var atSpeed: [Float: [Data]] = [:]
-        let files = (try? fm.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: nil)) ?? []
-        // Longest names first, so "shutter-open-1" is not taken for "shutter".
-        let events = Event.allCases.sorted { $0.rawValue.count > $1.rawValue.count }
-        for f in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-        where ["wav", "aif", "aiff", "caf", "m4a", "mp3"].contains(f.pathExtension.lowercased()) {
+        // The app's own recordings, then yours (they add to them).
+        var files: [URL] = []
+        for dir in [Self.bundled, Self.folder].compactMap({ $0 }) {
+            files += ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }
+        // Longest names first, so "shutter-change-1" is not taken for "shutter".
+        let names = Event.allCases.flatMap { e in e.names.map { (e, $0) } }.sorted { $0.1.count > $1.1.count }
+        for f in files where ["wav", "aif", "aiff", "caf", "m4a", "mp3"].contains(f.pathExtension.lowercased())
+            && !f.lastPathComponent.hasPrefix("._") {
             let stem = f.deletingPathExtension().lastPathComponent.lowercased()
-            guard let e = events.first(where: { stem == $0.rawValue || stem.hasPrefix($0.rawValue + "-")
-                                                    || stem.hasPrefix($0.rawValue + "_") }),
+            guard let (e, name) = names.first(where: { stem == $0.1 || stem.hasPrefix($0.1 + "-") || stem.hasPrefix($0.1 + "_") }),
                   let data = try? Data(contentsOf: f) else { continue }
-            // "shutter-125-2": take 2 recorded at 1/125. "shutter-2": take 2, speed unknown.
+            // "shutter-125" or "shutter-125-2": recorded at 1/125 ("shutter-0.5": half a second).
             if e == .shutter {
-                let parts = stem.dropFirst("shutter-".count).split(whereSeparator: { $0 == "-" || $0 == "_" })
-                if parts.count >= 2, let sp = Self.speed(String(parts[0])) {
+                let parts = stem.dropFirst(name.count + 1).split(whereSeparator: { $0 == "-" || $0 == "_" })
+                if let first = parts.first, let sp = Self.speed(String(first)) {
                     atSpeed[sp, default: []].append(data)
                     continue
                 }
@@ -173,26 +193,23 @@ final class Sounds {
         let url = Self.folder.appendingPathComponent("README.txt")
         guard !FileManager.default.fileExists(atPath: url.path) else { return }
         let text = """
-        Crank & Click plays your own recordings of a camera. Put them here, one
-        sound per file (WAV or AIFF, 48 kHz is ideal, silence trimmed at the start),
-        named for what they are; record several takes of each for variety:
+        Crank & Click comes with its own camera's sounds (a real Nikon). Recordings
+        you put here are played too, alongside them: one sound per file (WAV or
+        AIFF, 48 kHz is ideal, silence trimmed at the start), named for what it
+        is; several takes of each give variety:
 
-          shutter-1000-1.wav, shutter-1000-2.wav ...   the whole shutter recorded
-          shutter-125-1.wav, shutter-30-1.wav ...      at each speed you set: 1000 is
-          shutter-8-1.wav, shutter-1s-1.wav ...        1/1000, 8 is 1/8, 1s and 2s are
-                                                       seconds. The game plays the
-                                                       recording nearest each exposure.
-          shutter-open-1.wav + shutter-close-1.wav     (optional) the two curtains on
-                                                their own: used, apart by the real
-                                                exposure time, when no recording is
-                                                within a stop of the speed
-          shutter-1.wav ...                     a shutter of no particular speed
-          advance-1.wav ... advance-8.wav       the film advance lever
-          mirror-1.wav                          (optional) mirror slap
-          rewind-1.wav                          (optional) rewinding a roll
-          back-1.wav                            (optional) opening the back to load film
-          aperture-1.wav                        (optional) an aperture ring click
-          focus-1.wav                           (optional) the focus ring
+          shutter-2000.wav ... shutter-15.wav      the whole release recorded at each
+          shutter-1.wav, shutter-0.5.wav ...       speed: 2000 is 1/2000; 1, 0.5, 0.25
+          shutter-125-2.wav (more takes)           are seconds. The game plays the
+                                                   recording nearest each exposure.
+          shutter-open-1.wav + shutter-close-1.wav (optional) the two curtains alone,
+                                                   played apart by the exposure time
+          shutter-change-1.wav                     a click of the shutter-speed dial
+          film-advance-1.wav ...                   the film advance lever
+          iris-click.wav                           a click of the aperture ring
+          lens-change-1.wav ...                    a lens off and another on
+          film-change-1.wav ...                    loading a new roll
+          mirror-1.wav, focus-1.wav                (optional) mirror slap, focus ring
 
         Then choose Reload Sounds in the game menu (or restart).
         """

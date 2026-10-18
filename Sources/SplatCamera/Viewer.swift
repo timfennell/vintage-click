@@ -610,8 +610,10 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.left) { body.changeAperture(-1) }
             if p.contains(.right) { body.changeAperture(1) }
             if body.apertureIndex != stop { Sounds.shared.play(.aperture, volume: 0.6) }
+            let speed = body.shutterIndex
             if p.contains(.up) { body.changeShutter(1) }
             if p.contains(.down) { body.changeShutter(-1) }
+            if body.shutterIndex != speed { Sounds.shared.play(.shutterDial, volume: 0.7) }
             if p.contains(.x) { openLenses() }
             if p.contains(.y) { openFilm() }
             if p.contains(.l3) { changeGait(gait == Self.gaits.count - 1 ? -gait : 1) }
@@ -1097,6 +1099,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private func mount(_ i: Int) {
         guard lensBag.indices.contains(i), i != body.lensIndex else { return }
         body.chooseLens(i)
+        Sounds.shared.play(.lensChange)
         camera.focalMM = body.lens.focalMM
         switch body.lens.movement {
         case .tilt: hud?.flash(body.lens.name.uppercased() + " · TILT: HOLD Y + RIGHT STICK (M + ARROWS)")
@@ -1113,8 +1116,12 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.filmPush = body.push
         menu.onLoadFilm = { [weak self] stock, push in
             guard let self else { return }
-            if self.body.framesShot > 0 { Sounds.shared.play(.rewind) }
-            Sounds.shared.play(.back, after: self.body.framesShot > 0 ? 2.5 : 0)
+            if Sounds.shared.has(.filmChange) {
+                Sounds.shared.play(.filmChange)          // rewind, open the back, load, wind on
+            } else {
+                if self.body.framesShot > 0 { Sounds.shared.play(.rewind) }
+                Sounds.shared.play(.back, after: self.body.framesShot > 0 ? 2.5 : 0)
+            }
             self.body.loadRoll(stock: stock, push: push)
             self.body.meterShutter(sceneLuminance: self.meterLum)
             self.hud?.flash("LOADED \(self.body.rollName.uppercased())")

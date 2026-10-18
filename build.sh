@@ -26,5 +26,8 @@ cp "$SPIRULA_BUILD/libspirula_render.dylib" "$APP/Contents/Frameworks/"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# The camera's own sounds (recorded from a Nikon for the game).
+rm -rf "$APP/Contents/Resources/Sounds"
+cp -R Resources/Sounds "$APP/Contents/Resources/Sounds"
 codesign --force --sign - "$APP/Contents/Frameworks/libspirula_render.dylib" "$APP" >/dev/null 2>&1
 echo "Built $APP"
