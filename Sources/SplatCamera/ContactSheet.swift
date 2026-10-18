@@ -474,7 +474,7 @@ final class ContactSheetView: NSView {
         // The loupe: the table under it, magnified, from the full-size frames.
         let c = loupeCentre ?? CGPoint(x: b.midX, y: b.midY)
         let R = b.height * 0.2
-        loupeShadow(c, R)
+        // No shadow under it: the light comes up through the table.
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)).addClip()
         if let seen = loupeView(L, centre: c, radius: R) {
@@ -558,27 +558,7 @@ final class ContactSheetView: NSView {
         return light
     }
 
-    /// Where shadows fall from the window light: away from it, longer the lower it is.
-    private func shadowOffset(_ light: LoupeArt.Light, height: CGFloat) -> NSSize {
-        let k = height / CGFloat(max(light.window.z, 0.2))
-        // NSShadow offsets are in unflipped space: up is +.
-        return NSSize(width: -CGFloat(light.window.x) * k, height: CGFloat(light.window.y) * k)
-    }
 
-    private func loupeShadow(_ c: CGPoint, _ R: CGFloat) {
-        let band = R * 0.16
-        let sh = NSShadow()
-        sh.shadowColor = NSColor(white: 0, alpha: 0.45)
-        sh.shadowBlurRadius = R * 0.12
-        sh.shadowOffset = shadowOffset(roomLight(c, R), height: R * 0.11)
-        NSGraphicsContext.saveGraphicsState()
-        sh.set()
-        NSColor(white: 0.1, alpha: 1).setFill()
-        ringPath(c, R, R + band).fill()
-        let k = NSPoint(x: c.x + cos(knobAngle) * (R + band + R * 0.06), y: c.y + sin(knobAngle) * (R + band + R * 0.06))
-        NSBezierPath(ovalIn: NSRect(x: k.x - R * 0.09, y: k.y - R * 0.09, width: R * 0.18, height: R * 0.18)).fill()
-        NSGraphicsContext.restoreGraphicsState()
-    }
 
     private var tableCache: (size: NSSize, image: CGImage)?
     /// The table's brightness (green), for the loupe to reflect what is beside it.
@@ -744,12 +724,7 @@ final class ContactSheetView: NSView {
         blade.line(to: NSPoint(x: c.x + d.x * tip, y: c.y + d.y * tip))
         blade.line(to: NSPoint(x: c.x + d.x * base - n.x * R * 0.016, y: c.y + d.y * base - n.y * R * 0.016))
         blade.close()
-        let drop = NSShadow()
-        drop.shadowColor = NSColor(white: 0, alpha: 0.5)
-        drop.shadowBlurRadius = 3
-        drop.shadowOffset = shadowOffset(light, height: R * 0.012)
         NSGraphicsContext.saveGraphicsState()
-        drop.set()
         NSGraphicsContext.saveGraphicsState()
         blade.addClip()
         NSGradient(colors: [NSColor(white: 0.25, alpha: 1), NSColor(white: 0.02, alpha: 1)])?
@@ -773,12 +748,7 @@ final class ContactSheetView: NSView {
             .draw(in: neck.bounds, angle: atan2(n.y, n.x) * 180 / .pi)
         NSGraphicsContext.restoreGraphicsState()
         let kr = R * 0.085
-        let knobShadow = NSShadow()
-        knobShadow.shadowColor = NSColor(white: 0, alpha: 0.5)
-        knobShadow.shadowBlurRadius = kr * 0.4
-        knobShadow.shadowOffset = shadowOffset(light, height: kr * 0.3)
         NSGraphicsContext.saveGraphicsState()
-        knobShadow.set()
         put(LoupeArt.knob(radius: Float(kr * scale), turn: Float(log(loupePower) * 3), light: light),
             NSRect(x: kc.x - kr - 2 / scale, y: kc.y - kr - 2 / scale, width: 2 * kr + 4 / scale, height: 2 * kr + 4 / scale))
         NSGraphicsContext.restoreGraphicsState()
