@@ -761,12 +761,20 @@ vertex LineOut wire_vertex(uint vid [[vertex_id]], device const float4* v [[buff
 
 fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[buffer(0)]],
                               constant float4* O [[buffer(1)]], constant float4& colour [[buffer(2)]]) {
-    float zs = frame_z(f, clamp_px(int2((in.pos.xy - O[7].xy) / O[7].z), O), O);
+    // Where the eye sees this, in image pixels: the lines live on the screen,
+    // so they stop at the window's rounded edge as the eyepiece shows it.
+    float2 halfSize = O[0].xy * 0.5;
+    float2 pe = (eyepiece(in.pos.xy, O, EYEPIECE_K) - O[7].xy) / O[7].z;
+    float2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
+    float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;   // < 0 inside
+    float inside = 1 - smoothstep(-2.0, 0.0, edge);
+    if (inside <= 0) discard_fragment();
+    float zs = frame_z(f, clamp_px(int2(pe), O), O);
     float behind = in.z > zs * 1.01 ? 0.3 : 1.0;
     // Soft across the band, brightest along its middle.
     float x = abs(in.across);
     float profile = exp(-x * x * 3.2) * (1 - smoothstep(0.85, 1.0, x));
-    float a = in.a * behind * profile * colour.a;
+    float a = in.a * behind * profile * colour.a * inside;
     return float4(colour.rgb * a, a);
 }
 

@@ -549,9 +549,6 @@ final class Viewer: NSObject, MTKViewDelegate {
             else { continue }
             // Warm cream light, as framelines are; the light being placed a little brighter, warmer.
             let colour: SIMD4<Float> = chosen ? [1.0, 0.80, 0.55, 0.75] : [1.0, 0.92, 0.80, 0.42]
-            let f = Self.finderImage
-            enc.setScissorRect(MTLScissorRect(x: Int(f.x * CGFloat(width)), y: Int(f.y * CGFloat(height)),
-                                              width: Int(f.scale * CGFloat(width)), height: Int(f.scale * CGFloat(height))))
             enc.setRenderPipelineState(wirePSO)
             enc.setVertexBuffer(vb, offset: 0, index: 0)
             enc.setVertexBytes(&o, length: o.count * 16, index: 1)
