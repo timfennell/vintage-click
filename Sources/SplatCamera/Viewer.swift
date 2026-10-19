@@ -45,6 +45,10 @@ final class Viewer: NSObject, MTKViewDelegate {
     private let radius: Float
     private lazy var input = GamepadInput()   // made on the main thread, at the first frame
     private var meterLum: Float = 0.18
+    /// How bright (in the finder's light) a point must be for an effect filter
+    /// to throw spikes or a halo: well above the scene's average. Photos use the
+    /// same, so what stars in the finder stars on film.
+    private var filterThreshold: Float { min(0.95, max(0.35, meterLum * 5)) }
     /// The eye's adaptation to a dark finder: gain that eases toward the
     /// metered level over a second or two (film sees the true exposure).
     private var finderGain: Float = 1
@@ -404,7 +408,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(height) / 2 : 0, l.obstruction),
             Self.finderInset(width: width, height: height),
             SIMD4(l.squeeze, 0, 0, 0),
-        ] + b.filter.optics(threshold: min(0.95, max(0.35, meterLum * 5)))
+        ] + b.filter.optics(threshold: filterThreshold)
         if job.fromLight != nil {
             o.replaceSubrange(9...11, with: lensFilters[0].optics(threshold: 1))     // no filter on a light's view
             o[5].x = 0          // no focusing aids
@@ -1405,6 +1409,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                               cells: body.lens.isFisheye ? [.zero] : body.cellCentres(cellsPerExposure), accum: accum, size: size,
                               wantsNegative: keepNegative)
         job.outputPath = scriptedPath
+        job.filterThreshold = filterThreshold
         loop.expose(job)
         Sounds.shared.fire(shutterSeconds: body.shutter.seconds)
         body.framesShot += 1

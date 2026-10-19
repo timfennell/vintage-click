@@ -38,6 +38,8 @@ final class ExposureJob {
     var negative: Data?
     let started = CACurrentMediaTime()
     var outputPath: URL?
+    /// The effect filter's threshold in the finder's (unexposed) light.
+    var filterThreshold: Float = 1
 
     init(camera: FlyCamera, body: CameraBody, lighting: LightingPlot, frameNumber: Int,
          cells: [SIMD2<Float>], accum: MTLBuffer, size: (w: Int, h: Int), wantsNegative: Bool) {
@@ -425,7 +427,7 @@ final class RenderLoop {
             SIMD4(l.lateralCA, l.axialCA, l.projection == .circularFisheye ? Float(h) / 2 : 0, l.obstruction),
             SIMD4(0, 0, 0, 0),
             SIMD4(l.squeeze, 0, 0, 0),
-        ] + b.filter.optics(threshold: 1.0)        // highlights: past ~2.5 stops over mid grey
+        ] + b.filter.optics(threshold: e.filterThreshold * exp2(b.filmStops))   // the finder's, in exposed light
     }
 
     /// One sub-pupil of the exposure: render the view sheared to that lens
