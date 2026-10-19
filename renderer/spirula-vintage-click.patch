@@ -3045,10 +3045,10 @@ index 16a25dd5..40378811 100644
              float2 delta = float2(f.xy.x - px, f.xy.y - py);
 diff --git a/src/blender/SplatRenderC.cpp b/src/blender/SplatRenderC.cpp
 new file mode 100644
-index 00000000..969b4a82
+index 00000000..d7ab272a
 --- /dev/null
 +++ b/src/blender/SplatRenderC.cpp
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,307 @@
 +// A C interface to Spirula's 3DGS renderer, for loading into another process
 +// (the Blender render engine add-on calls it through ctypes).
 +//
@@ -3155,7 +3155,9 @@ index 00000000..969b4a82
 +        set_data_3dgs(num, ttv(means, {num, 3}), ttv(quats, {num, 4}),
 +                      ttv(scales, {num, 3}), ttv(opacities, {num, 1}),
 +                      ttv(features_dc, {num, 3}),
-+                      K > 0 ? ttv(features_sh, {num, K, 3}) : ttv_null());
++                      // No higher bands (a DC-only scan): an empty table, but one
++                      // that still says how many splats there are.
++                      ttv(K > 0 ? features_sh : nullptr, {num, K, 3}));
 +        g_num = num;
 +        g_degree = sh_degree;
 +        // Fixed small bins: the automatic choice starts at 64 px and only refines
