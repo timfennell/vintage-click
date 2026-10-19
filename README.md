@@ -1,6 +1,6 @@
 # Vintage Click
 
-A photography game for the Mac: a manual-focus 35 mm SLR from the 1970s, and
+A photography game for the Mac (and, in preview, Windows): a manual-focus 35 mm SLR from the 1970s, and
 any 3D Gaussian splat scan to walk around in. Focus on a split-prism screen,
 read a needle meter, choose a lens from a camera bag and a film stock, light
 the scene with tungsten Fresnels, and shoot a roll you only get to see on a
@@ -39,6 +39,28 @@ Free and open source (GPL-3.0).
 4. Open it and choose a `.ply` scan. It asks whether the scan is an object
    (made on a turntable or rig) or a place to stand in, and how bright its light
    was; both are remembered per scan and can be changed from the menu.
+
+### Windows (preview)
+
+A Windows version is on its way. The preview has the camera, the viewfinder
+and meter, the lens bag, film and the light table; lighting, filters,
+tilt/shift and DNG are Mac-only for now.
+
+1. Download `VintageClick-windows-x64.zip` from the
+   [latest release](https://github.com/timfennell/vintage-click/releases/latest)
+   (or the newest successful
+   [Cross-platform build](https://github.com/timfennell/vintage-click/actions/workflows/cross.yml))
+   and unzip the whole folder.
+2. Double-click **VintageClick.exe**. The program is not signed, so Windows
+   SmartScreen says "Windows protected your PC": click **More info**, then
+   **Run anyway** (only the first time).
+3. Choose a `.ply` scan, or drag one onto the window.
+
+Needs Windows 10 or 11 (64-bit) and a graphics card with a **Vulkan 1.3
+driver** (NVIDIA GTX 900 series or newer, AMD RX 400 or newer, Intel Iris Xe or
+Arc); if it cannot start the renderer, update the graphics driver. Rolls go to
+`Pictures\Vintage Click`. The controls are as below, with Esc for the menu;
+`READ ME.txt` in the zip lists them.
 
 Developed rolls are kept in `~/Pictures/Vintage Click` (menu > Where rolls are
 kept to change it), filed by day, session and roll.

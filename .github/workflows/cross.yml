@@ -98,6 +98,51 @@ jobs:
           print("loaded", path)
           PY
 
+      - name: Build the app
+        shell: bash
+        run: |
+          cmake -S cross -B cross/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build cross/build
+          cp spirula/${{ matrix.lib }} cross/build/
+
+      - name: Test photo on software Vulkan (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python cross/tools/make_test_ply.py test.ply
+          ./cross/build/VintageClick test.ply --inside --shoot test.png --cells 8 --res 540x360
+          python - <<'PY'
+          import struct, zlib
+          data = open("test.png", "rb").read()
+          assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+          w, h = struct.unpack(">II", data[16:24])
+          print("test photo", w, "x", h, len(data), "bytes")
+          assert (w, h) == (1080, 720) and len(data) > 20000, "the photo is blank or the wrong size"
+          PY
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dumpbin /dependents cross\build\spirula_render.dll | Select-String "\.dll"
+          dumpbin /dependents cross\build\VintageClick.exe | Select-String "\.dll"
+          $out = "VintageClick-windows-x64"
+          New-Item -ItemType Directory $out | Out-Null
+          Copy-Item cross\build\VintageClick.exe, cross\build\spirula_render.dll $out
+          Copy-Item -Recurse cross\build\assets $out
+          # The Visual C++ runtime, app-local, so nothing else needs installing.
+          $crt = Get-ChildItem -Recurse "$env:VCToolsRedistDir\x64" -Filter "*.CRT" | Select-Object -First 1
+          Copy-Item "$($crt.FullName)\msvcp140*.dll", "$($crt.FullName)\vcruntime140*.dll", "$($crt.FullName)\concrt140.dll" $out
+          Copy-Item cross\README-Windows.txt "$out\READ ME.txt"
+          Copy-Item LICENSE "$out\LICENSE.txt"
+          Get-ChildItem $out
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: VintageClick-windows-x64
+          path: VintageClick-windows-x64
+          retention-days: 30
+
       - uses: actions/upload-artifact@v4
         with:
           name: renderer-${{ matrix.platform }}
