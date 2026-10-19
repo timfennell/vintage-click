@@ -7,8 +7,9 @@ import Foundation
 enum DNG {
     /// `pixels`: width x height x 3 half floats (little-endian), linear light.
     static func write(_ pixels: Data, width: Int, height: Int, to url: URL,
-                      description: String, lens: String, iso: Float, shutterSeconds: Float, fNumber: Float,
-                      focalMM: Float) throws {
+                      description: String, body b: CameraBody, shotAt: Date) throws {
+        let lens = b.lens, fNumber = b.takingAperture, shutterSeconds = b.shutter.seconds
+        let iso = b.ratedEI, focalMM = lens.focalMM, when = PhotoMetadata.exifDate(shotAt)
         var ifd: [(tag: UInt16, type: UInt16, count: UInt32, value: [UInt8])] = []
         func le16(_ v: UInt16) -> [UInt8] { withUnsafeBytes(of: v.littleEndian, Array.init) }
         func le32(_ v: UInt32) -> [UInt8] { withUnsafeBytes(of: v.littleEndian, Array.init) }
@@ -41,28 +42,45 @@ enum DNG {
         short(259, [1])                                  // Compression: none
         short(262, [34892])                              // PhotometricInterpretation: LinearRaw
         ascii(270, description)                          // ImageDescription
-        ascii(271, "Vintage Click")                       // Make
-        ascii(272, lens)                                 // Model
+        ascii(271, b.model.make)                         // Make
+        ascii(272, b.model.model)                        // Model
         long(273, [dataOffset])                          // StripOffsets
         short(274, [1])                                  // Orientation
         short(277, [3])                                  // SamplesPerPixel
         long(278, [UInt32(height)])                      // RowsPerStrip
         long(279, [UInt32(imageBytes)])                  // StripByteCounts
         short(284, [1])                                  // PlanarConfiguration: chunky
-        ascii(305, "Vintage Click")                       // Software
+        ascii(305, PhotoMetadata.appVersion)             // Software
+        ascii(306, when)                                 // DateTime
         short(339, [3, 3, 3])                            // SampleFormat: IEEE float
         rational(33434, [Double(shutterSeconds)], signed: false)   // ExposureTime
         rational(33437, [Double(fNumber)], signed: false)          // FNumber
+        short(34850, [1])                                          // ExposureProgram: manual
         short(34855, [UInt16(min(65535, max(1, iso)))])            // ISOSpeedRatings
+        ascii(36867, when)                                         // DateTimeOriginal
+        rational(37378, [Double(2 * log2(fNumber))], signed: false)            // ApertureValue
+        rational(37377, [Double(-log2(shutterSeconds))], signed: true)         // ShutterSpeedValue
+        rational(37381, [Double(2 * log2(lens.maxAperture))], signed: false)   // MaxApertureValue
+        rational(37382, [Double(b.focusM)], signed: false)                     // SubjectDistance
+        short(37383, [2])                                          // MeteringMode: centre-weighted
         rational(37386, [Double(focalMM)], signed: false)          // FocalLength
+        short(41989, [UInt16(focalMM.rounded())])                  // FocalLengthIn35mmFilm
+        ascii(42033, b.model.serial)                               // BodySerialNumber
+        rational(42034, [Double(focalMM), Double(focalMM), Double(lens.maxAperture), Double(lens.maxAperture)],
+                 signed: false)                                    // LensSpecification
+        ascii(42035, PhotoMetadata.lensMake(lens))                 // LensMake
+        ascii(42036, lens.name)                                    // LensModel
         byte(50706, [1, 4, 0, 0])                        // DNGVersion 1.4
         byte(50707, [1, 4, 0, 0])                        // DNGBackwardVersion 1.4
-        ascii(50708, "Vintage Click")                     // UniqueCameraModel
+        ascii(50708, b.model.fullName)                   // UniqueCameraModel
         // ColorMatrix1: XYZ (D65) to the camera's RGB, which is linear sRGB.
         long(50717, [1, 1, 1])                           // WhiteLevel: 1.0 is white for float data (brighter is kept)
         rational(50721, [3.2406, -1.5372, -0.4986, -0.9689, 1.8758, 0.0415, 0.0557, -0.2040, 1.0570], signed: true)
         rational(50728, [1, 1, 1], signed: false)        // AsShotNeutral: already balanced
         rational(50730, [0], signed: true)               // BaselineExposure
+        ascii(50735, b.model.serial)                     // CameraSerialNumber
+        rational(50736, [Double(focalMM), Double(focalMM), Double(lens.maxAperture), Double(lens.maxAperture)],
+                 signed: false)                                    // LensInfo
         short(50778, [21])                               // CalibrationIlluminant1: D65
         ifd.sort { $0.tag < $1.tag }
 

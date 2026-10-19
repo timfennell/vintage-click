@@ -1427,7 +1427,10 @@ final class Viewer: NSObject, MTKViewDelegate {
             url = dir.appendingPathComponent(String(format: "frame-%02d.png", job.frameNumber))
         }
         print(String(format: "Developed frame %d in %.1f s", job.frameNumber, seconds))
+        let shotAt = Date().addingTimeInterval(-seconds)
         let meta: [String: Any] = [
+            "camera": b.model.fullName, "camera_serial": b.model.serial, "camera_year": b.model.year,
+            "shot_at": PhotoMetadata.exifDate(shotAt),
             "lens": b.lens.name, "lens_inspired_by": b.lens.inspiredBy, "filter": b.filter.name,
             "filter_stops": b.filter.stops,
             "aperture": b.takingAperture, "shutter": "1/\(b.shutter.label)",
@@ -1442,13 +1445,13 @@ final class Viewer: NSObject, MTKViewDelegate {
         let (nw, nh) = job.size
         // Writing a big PNG takes a moment: off the main thread.
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let rep = NSBitmapImageRep(cgImage: image)
-            try? rep.representation(using: .png, properties: [:])?.write(to: url)
+            let description = "\(b.rollName), frame \(job.frameNumber)"
+            _ = PhotoMetadata.writePNG(image, to: url,
+                                       properties: PhotoMetadata.properties(b, shotAt: shotAt, description: description))
             if let negative {
                 try? DNG.write(negative, width: nw, height: nh, to: url.deletingPathExtension().appendingPathExtension("dng"),
                                description: "\(b.rollName), frame \(job.frameNumber): linear light before the film",
-                               lens: b.lens.name, iso: b.ratedEI, shutterSeconds: b.shutter.seconds,
-                               fNumber: b.takingAperture, focalMM: b.lens.focalMM)
+                               body: b, shotAt: shotAt)
             }
             if let json = try? JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]) {
                 try? json.write(to: url.deletingPathExtension().appendingPathExtension("json"))
