@@ -330,7 +330,8 @@ struct Renderer {
                     out[i] = uint8_t(col.x * 255 + 0.5f); out[i + 1] = uint8_t(col.y * 255 + 0.5f); out[i + 2] = uint8_t(col.z * 255 + 0.5f);
                 }
         });
-        fs::create_directories(e.out.parent_path());
+        std::error_code ec;
+        if (e.out.has_parent_path()) fs::create_directories(e.out.parent_path(), ec);
         stbi_write_png(e.out.u8string().c_str(), W, H, 3, out.data(), W * 3);
         std::ofstream j(fs::path(e.out).replace_extension(".json"));
         j << "{\n  \"lens\": \"" << L.name << "\",\n  \"film\": \"" << b.stock().name << "\",\n  \"aperture\": " << n

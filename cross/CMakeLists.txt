@@ -10,6 +10,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# One C runtime for SDL and the game: the static one, so the .exe needs no
+# Visual C++ redistributable of its own.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
 include(FetchContent)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -27,7 +31,6 @@ target_link_libraries(VintageClick PRIVATE SDL3::SDL3-static Threads::Threads)
 if(MSVC)
   target_compile_options(VintageClick PRIVATE /O2 /utf-8 /fp:fast /EHsc)
   target_compile_definitions(VintageClick PRIVATE _USE_MATH_DEFINES NOMINMAX _CRT_SECURE_NO_WARNINGS)
-  set_property(TARGET VintageClick PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 else()
   target_compile_options(VintageClick PRIVATE -O2 -ffast-math)
 endif()
