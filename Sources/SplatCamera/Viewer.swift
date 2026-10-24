@@ -356,6 +356,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         // outside this key did): a still camera leaves the GPU to the darkroom.
         let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)"
         if key != lastFinderKey || now - lastFinderAsk > 1 {
+            job.refresh = key == lastFinderKey
             loop.requestFinder(job)
             lastFinderKey = key
             lastFinderAsk = now

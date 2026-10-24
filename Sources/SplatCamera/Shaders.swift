@@ -578,16 +578,18 @@ kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buff
 //   K[2..4] = view rows (right, down, forward)  K[5] = (world up, sky yaw)
 //   K[6] = (sky scale, place, has sky, has shells)  K[7] = (background rgb, face fx / size)
 //   K[8] = (camera - bake centre, shell radius)  K[9] = (aperture diameter m, focus m, metres per unit, pupil samples)
-//   K[10..15] face forwards, K[16..21] rights, K[22..27] downs; K[28..] pupil samples (x, y, weight, -)
-float shell_face(float3 u, constant float4* K, thread float2& uv) {
-    int best = 0; float bd = -2;
-    for (int k = 0; k < 6; k++) { float dd = dot(u, K[10 + k].xyz); if (dd > bd) { bd = dd; best = k; } }
-    uv = float2(dot(u, K[16 + best].xyz), dot(u, K[22 + best].xyz)) / bd * K[7].w + 0.5;
-    return float(best);
+//   K[10..13] the shells' window (shell_uv); K[28] blur cap etc.; K[29..60] Gaussian samples; K[61..] the lens
+// The shells' window: where direction u lands in it (false: behind it).
+//   K[10] = (right, fx / W)  K[11] = (down, fx / H)  K[12] = (forward, -)  K[13] = (cx / W, cy / H, -, -)
+bool shell_uv(float3 u, constant float4* K, thread float2& uv) {
+    float z = dot(u, K[12].xyz);
+    uv = float2(dot(u, K[10].xyz) / max(z, 1e-4) * K[10].w + K[13].x,
+                dot(u, K[11].xyz) / max(z, 1e-4) * K[11].w + K[13].y);
+    return z > 1e-4;
 }
 // The shell along the ray o + t d (o from the bake centre): where it meets the
 // baked surface, found from the stored distance (two refinements).
-float4 shell_at(texture2d_array<float> col, texture2d_array<float> dep, float3 o, float3 d,
+float4 shell_at(texture2d<float> col, texture2d<float> dep, float3 o, float3 d,
                 constant float4* K, thread float& dist) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float rho = K[8].w * 2;
@@ -597,12 +599,30 @@ float4 shell_at(texture2d_array<float> col, texture2d_array<float> dep, float3 o
         float t = -b + sqrt(max(b * b - c, 0.0));
         u = normalize(o + t * d);
         if (it == 2) break;
-        float2 uv; float f = shell_face(u, K, uv);
-        rho = max(dep.sample(s, uv, uint(f)).r, K[8].w);
+        float2 uv; shell_uv(u, K, uv);
+        rho = max(dep.sample(s, uv).r, K[8].w);
     }
     dist = rho;
-    float2 uv; float f = shell_face(u, K, uv);
-    return col.sample(s, uv, uint(f));
+    float2 uv;
+    return shell_uv(u, K, uv) ? col.sample(s, uv) : float4(0);
+}
+float4 shell_at_level(texture2d<float> col, texture2d<float> dep, float3 o, float3 d,
+                      constant float4* K, thread float& dist, float lvl) {
+    constexpr sampler s(filter::linear, mip_filter::linear, address::clamp_to_edge);
+    constexpr sampler s0(filter::linear, address::clamp_to_edge);
+    float rho = K[8].w * 2;
+    float3 u = d;
+    for (int it = 0; it < 3; it++) {
+        float b = dot(o, d), c = dot(o, o) - rho * rho;
+        float t = -b + sqrt(max(b * b - c, 0.0));
+        u = normalize(o + t * d);
+        if (it == 2) break;
+        float2 uv; shell_uv(u, K, uv);
+        rho = max(dep.sample(s0, uv).r, K[8].w);
+    }
+    dist = rho;
+    float2 uv;
+    return shell_uv(u, K, uv) ? col.sample(s, uv, level(lvl)) : float4(0);
 }
 float3 sky_at(texture2d<float> sky, float3 d, float mip, constant float4* K) {
     float3 up = K[5].xyz;
@@ -615,8 +635,8 @@ float3 sky_at(texture2d<float> sky, float3 d, float mip, constant float4* K) {
     return float3(lin_to_srgb(lin.x), lin_to_srgb(lin.y), lin_to_srgb(lin.z));
 }
 kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
-                            texture2d<float> sky [[texture(0)]], texture2d_array<float> shellCol [[texture(1)]],
-                            texture2d_array<float> shellDep [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
+                            texture2d<float> sky [[texture(0)]], texture2d<float> shellCol [[texture(1)]],
+                            texture2d<float> shellDep [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
     uint W = uint(K[0].x), H = uint(K[0].y);
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
@@ -633,26 +653,52 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     float3 d = normalize(K[2].xyz * dc.x + K[3].xyz * dc.y + K[4].xyz * dc.z);
     float3 back = K[6].z > 0.5 ? sky_at(sky, d, K[1].w, K) : K[7].rgb;
     if (K[6].w > 0.5) {
-        // The shells, blurred by the lens: the pupil's shape gathered over the
-        // blur circle at the shell's distance (one depth, so one convolution).
+        // The shells, blurred as the live render blurs a splat at that depth:
+        // a Gaussian with the pupil's spread (its table at this place in the
+        // field: shift, radial and tangential variance, light), capped alike.
         float3 o = K[8].xyz;
         float dist;
         float4 c0 = shell_at(shellCol, shellDep, o, d, K, dist);
-        float zm = max(dist * K[9].z, 0.01);
-        float th = 0.5 * K[9].x * abs(1 / zm - 1 / max(K[9].y, 0.01));
-        int np = int(K[9].w);
-        float4 acc = 0; float wsum = 0;
-        if (np > 0 && th * K[0].z > 1.0) {
-            for (int j = 0; j < np; j++) {
-                float4 ps = K[28 + j];
-                float3 dj = normalize(d + th * (ps.x * K[2].xyz + ps.y * K[3].xyz));
-                float dj_dist;
-                acc += shell_at(shellCol, shellDep, o, dj, K, dj_dist) * ps.z;
-                wsum += ps.z;
+        float4 acc = c0;
+        int nL = int(K[28].y);
+        if (nL > 0 && K[1].z < 0.5) {
+            constant float4* L = K + 61;
+            int nT = int(K[28].z);
+            float zc = max(dist * dc.z, 1e-4);           // depth along the axis
+            float k = L[0].y - 1 / zc;                   // defocus, per scene unit
+            float a = L[0].z, a2 = a * a;
+            float2 centre = L[nT + 4].xy;
+            float2 qv = (float2(p) + 0.5 - centre) / L[nT + 4].z;
+            float ql = length(qv);
+            float2 qd = ql > 1e-4 ? qv / ql : float2(1, 0), qp = float2(-qd.y, qd.x);
+            float tt = clamp(ql / 1.25, 0.0, 1.0) * float(nT - 1);
+            int i0 = min(int(tt), nT - 2);
+            float4 m = mix(L[2 + i0], L[3 + i0], tt - float(i0));
+            float2 mu = qd * (m.x * a);
+            float sr = sqrt(max(m.y, 0.0)) * a, st = sqrt(max(m.z, 0.0)) * a;
+            // Cap as the renderer does: the blur's trace at most 2 sigma_max^2.
+            float fxk = K[0].z * abs(k);
+            float tr = fxk * fxk * (sr * sr + st * st), cap = 2 * K[28].x * K[28].x;
+            float g = tr > cap ? sqrt(cap / tr) : 1.0;
+            float sigPx = fxk * g * max(sr, st);
+            if (sigPx > 0.6) {
+                // 32 Gaussian-weighted samples over +-2.5 sigma, read from a
+                // smaller copy of the shells so their spacing never shows.
+                float spacing = sigPx * 0.78;
+                float lvl = log2(max(1.0, spacing * K[10].w * float(shellCol.get_width()) / K[0].z));
+                acc = 0; float wsum = 0;
+                for (int j = 0; j < 32; j++) {
+                    float4 gs = K[29 + j];
+                    float2 off = k * g * (mu + qd * (gs.x * sr) + qp * (gs.y * st));
+                    float2 qj = q + off;
+                    float3 dj = normalize(K[2].xyz * qj.x + K[3].xyz * qj.y + K[4].xyz);
+                    float dd;
+                    acc += shell_at_level(shellCol, shellDep, o, dj, K, dd, lvl) * gs.z;
+                    wsum += gs.z;
+                }
+                acc /= max(wsum, 1e-6);
             }
-            acc /= max(wsum, 1e-6);
-        } else {
-            acc = c0;
+            acc.rgb *= m.w;
         }
         back = acc.rgb + (1 - acc.a) * back;
         // The focusing aids read depth: where the live render found little,
@@ -671,29 +717,29 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     f[3 * n + i] = 0;
 }
 
-// One cube face of the distant shells, from a far-only render seen from the
-// bake centre: colour (made opaque where a place leaks, as frame_rgb does) and
-// distance from the centre (huge where nothing is).
-//   B = (face size, face fx, place, -)
-kernel void shell_store(device const float* f [[buffer(0)]], constant float4& B [[buffer(1)]],
-                        texture2d_array<float, access::write> col [[texture(0)]],
-                        texture2d_array<float, access::write> dep [[texture(1)]],
-                        constant uint& face [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
-    uint S = uint(B.x);
-    if (p.x >= S || p.y >= S) return;
-    uint n = S * S, i = p.y * S + p.x;
+// The distant shells, from a far-only render of the camera's view widened by
+// a margin: colour (made opaque where a place leaks, as frame_rgb does) and
+// distance from the camera (huge where nothing is).
+//   B[0] = (W, H, fx, place)  B[1] = (cx, cy, -, -)
+kernel void shell_store(device const float* f [[buffer(0)]], constant float4* B [[buffer(1)]],
+                        texture2d<float, access::write> col [[texture(0)]],
+                        texture2d<float, access::write> dep [[texture(1)]],
+                        uint2 p [[thread_position_in_grid]]) {
+    uint W = uint(B[0].x), H = uint(B[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
     float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
     float t = f[3 * n + i], med = f[4 * n + i];
     float a = 1 - t;
-    if (B.z > 0.5) {
+    if (B[0].w > 0.5) {
         float keep = smoothstep(0.85, 0.97, t);
         c = mix(c / max(1 - t, 0.03), c, keep);
         a = mix(1.0, 1 - t, keep);
     }
-    float2 q = (float2(p) + 0.5 - float(S) * 0.5) / B.y;
+    float2 q = (float2(p) + 0.5 - B[1].xy) / B[0].z;
     float dist = (a < 0.03 || !(med > 0) || med > 1e8) ? 1e6 : med * sqrt(1 + dot(q, q));
-    col.write(float4(c, a), p, face);
-    dep.write(float4(dist), p, face);
+    col.write(float4(c, a), p);
+    dep.write(float4(dist), p);
 }
 
 
