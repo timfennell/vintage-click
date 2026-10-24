@@ -66,9 +66,15 @@ struct FlyCamera: Codable {
         let flat = simd_normalize(f - simd_dot(f, up) * up)
         let want = (flat * input.move.y + r * input.move.x + up * input.rise) * moveSpeed
         velocity += (want - velocity) * ease
+        // Settle fully once the sticks are let go: the easing alone would keep
+        // nudging the view for a second, and a still view is when the shells
+        // are baked and photos developed.
+        if want == .zero && simd_length(velocity) < 0.01 * moveSpeed { velocity = .zero }
+        if wantLook == .zero && simd_length(lookRate) < 0.005 { lookRate = .zero }
         position += velocity * dt
 
         zoomRate += (input.zoom - zoomRate) * ease
+        if input.zoom == 0 && abs(zoomRate) < 0.005 { zoomRate = 0 }
         focalMM = max(18, min(300, focalMM * exp(zoomRate * dt * 0.8)))
     }
 

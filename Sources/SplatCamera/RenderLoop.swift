@@ -137,6 +137,10 @@ final class RenderLoop {
     private var shellCol: MTLTexture?, shellDep: MTLTexture?
     private var bakeSlot: (buf: MTLBuffer, off: Int, index: Int32)?
     private var shellCentre: SIMD3<Float>?
+    /// A bake under way: where from, and the next face (baked one per pass, between finder frames).
+    private var bakeAt: SIMD3<Float>?
+    private var bakeFace = 0
+    private var bakeStarted = 0.0
     private var shellLightKey: [SIMD4<Float>] = []
     private var lastFinderJob: FinderJob?
     private var bakeWanted = false
@@ -155,17 +159,21 @@ final class RenderLoop {
         if !k.isEmpty { k[0] = SIMD4(0, 0, 0, k[0].w) }
         return k
     }
-    private var rebakeDistance: Float { min(0.5 / metresPerUnit, shellRadius * 0.15) }
+    /// How far the camera may stand from the bake point with the shells still
+    /// exact to ~1.5 pixels: a step of d moves something at the near radius R
+    /// by fx d / R pixels, and what it uncovers was never baked. In practice:
+    /// the shells serve turning, focusing and zooming where you stand; any step
+    /// renders everything, and the shells are baked again once you stop.
+    private func shellTolerance(_ job: FinderJob) -> Float { 1.5 * shellRadius / max(job.fx, 1) }
 
     /// Whether this view can use the shells as baked.
     private func shellsUsable(_ job: FinderJob) -> Bool {
         guard job.shells, shellRadius > 0, let c = shellCentre, shellLightKey == lightKey else { return false }
-        return simd_distance(job.position, c) < shellRadius * 0.5
+        return simd_distance(job.position, c) <= shellTolerance(job)
     }
     private func needsBake(_ job: FinderJob) -> Bool {
         guard job.shells, shellRadius > 0, job.fromLight == nil else { return false }
-        guard let c = shellCentre else { return true }
-        return simd_distance(job.position, c) > rebakeDistance || shellLightKey != lightKey
+        return !shellsUsable(job)
     }
 
     /// The finder's lens as the shells' blur needs it: the viewing aperture's
@@ -203,36 +211,46 @@ final class RenderLoop {
             bakeSlot = (Unmanaged<MTLBuffer>.fromOpaque(b!).takeUnretainedValue(), o, first)
         }
         guard let slot = bakeSlot, let col = shellCol, let dep = shellDep else { return }
-        let t0 = CACurrentMediaTime()
-        let c = job.position
+        // A new place to bake from: start again (the old shells are no longer used).
+        if bakeAt.map({ simd_distance($0, job.position) > shellTolerance(job) }) ?? true {
+            bakeAt = job.position
+            bakeFace = 0
+            bakeStarted = CACurrentMediaTime()
+            shellCentre = nil
+        }
+        guard let c = bakeAt else { return }
         relight(job.lighting, eye: c, body: job.body, quality: .finder)
+        let key = lightKey
         setLens(nil)
         setCameraModel(false)
         sr_set_region(c.x, c.y, c.z, -shellRadius)
         defer { sr_set_region(0, 0, 0, 0) }
-        for (i, face) in Self.faces.enumerated() {
-            let view: [Float] = [face.r.x, face.r.y, face.r.z, -simd_dot(face.r, c),
-                                 face.d.x, face.d.y, face.d.z, -simd_dot(face.d, c),
-                                 face.f.x, face.f.y, face.f.z, -simd_dot(face.f, c), 0, 0, 0, 1]
-            guard render(slot.index, view: view, fx: Self.faceFx, cx: Float(S) / 2, cy: Float(S) / 2),
-                  let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
-            var b = SIMD4<Float>(Float(S), Self.faceFx, background.w > 1.5 ? 1 : 0, 0)
-            var f = UInt32(i)
-            enc.setComputePipelineState(storePSO)
-            enc.setBuffer(slot.buf, offset: slot.off, index: 0)
-            enc.setBytes(&b, length: 16, index: 1)
-            enc.setBytes(&f, length: 4, index: 2)
-            enc.setTexture(col, index: 0)
-            enc.setTexture(dep, index: 1)
-            enc.dispatchThreads(MTLSize(width: S, height: S, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
-            enc.endEncoding()
-            cb.commit()
-            cb.waitUntilCompleted()
+        let i = bakeFace, face = Self.faces[i]
+        let view: [Float] = [face.r.x, face.r.y, face.r.z, -simd_dot(face.r, c),
+                             face.d.x, face.d.y, face.d.z, -simd_dot(face.d, c),
+                             face.f.x, face.f.y, face.f.z, -simd_dot(face.f, c), 0, 0, 0, 1]
+        guard render(slot.index, view: view, fx: Self.faceFx, cx: Float(S) / 2, cy: Float(S) / 2),
+              let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+        var b = SIMD4<Float>(Float(S), Self.faceFx, background.w > 1.5 ? 1 : 0, 0)
+        var f = UInt32(i)
+        enc.setComputePipelineState(storePSO)
+        enc.setBuffer(slot.buf, offset: slot.off, index: 0)
+        enc.setBytes(&b, length: 16, index: 1)
+        enc.setBytes(&f, length: 4, index: 2)
+        enc.setTexture(col, index: 0)
+        enc.setTexture(dep, index: 1)
+        enc.dispatchThreads(MTLSize(width: S, height: S, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        bakeFace += 1
+        if bakeFace == Self.faces.count {
+            shellCentre = c
+            shellLightKey = key
+            bakeAt = nil
+            print(String(format: "Distant shells baked in %.0f ms (near radius %.1f m)", (CACurrentMediaTime() - bakeStarted) * 1000,
+                         shellRadius * metresPerUnit))
         }
-        shellCentre = c
-        shellLightKey = lightKey
-        print(String(format: "Distant shells baked in %.0f ms (near radius %.1f m)", (CACurrentMediaTime() - t0) * 1000,
-                     shellRadius * metresPerUnit))
     }
 
     private let queue: MTLCommandQueue
@@ -451,7 +469,11 @@ final class RenderLoop {
             }
             cond.unlock()
             if let finder { renderFinder(finder); lastFinderAt = CACurrentMediaTime() }
-            if let bakeFor { bake(bakeFor) }
+            if let bakeFor {
+                bake(bakeFor)
+                // The rest of the faces follow, still between finder frames.
+                if bakeAt != nil { cond.lock(); bakeWanted = true; cond.unlock() }
+            }
             if let exposure { step(exposure) }
         }
     }
