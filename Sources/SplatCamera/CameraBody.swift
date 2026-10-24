@@ -31,6 +31,10 @@ func vogel(_ k: Int, _ n: Int) -> SIMD2<Float> {
 
 /// What the photographer has set, and the optics that follow from it.
 struct CameraBody: Codable {
+    /// Focus LOD for the finder: blurred splats are thinned to this opacity
+    /// (0: off). Prints never thin. VC_THIN overrides it, for comparisons.
+    static let finderThinning: Float = ProcessInfo.processInfo.environment["VC_THIN"].flatMap(Float.init) ?? 0.04
+
     /// The camera itself (its make, model and serial go on every frame).
     var model = CameraModel.ohiKorS2
     var lensIndex = lensBag.firstIndex { $0.name == "Ohi Kor 50mm f/1.4" } ?? 0
@@ -264,7 +268,7 @@ struct CameraBody: Codable {
             SIMD4(1, invFocus, radiusUnits, cells == 1 && table != nil ? 1 : 0),
             // Each sub-pupil blurs by its share of the aperture, a little more
             // than a disc's own spread (r^2 / 4) so neighbours close the gaps.
-            SIMD4(1 / (2 * Float(cells)), 1, 0, maxSigma),
+            SIMD4(1 / (2 * Float(cells)), 1, cells == 1 && table != nil ? Self.finderThinning : 0, maxSigma),
         ]
         p += table ?? []
         p += [SIMD4<Float>](repeating: .zero, count: Self.tableSize - (table?.count ?? 0))
