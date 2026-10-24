@@ -3,7 +3,7 @@ import ImageIO
 import UniformTypeIdentifiers
 
 /// The camera the photographer carries. Ohi Kor S2 for now; more may come.
-struct CameraModel {
+struct CameraModel: Codable {
     let make: String
     let model: String
     let serial: String

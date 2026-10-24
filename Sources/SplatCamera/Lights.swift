@@ -91,7 +91,7 @@ let lightModifiers: [LightModifier] = [
 ]
 
 /// A light standing in the scene.
-struct PlacedLight {
+struct PlacedLight: Codable {
     var head: Int                   // index into lightKit
     var position: SIMD3<Float>      // scene units
     var aim: SIMD3<Float>           // unit, where the lens points
@@ -233,7 +233,7 @@ struct PlacedLight {
 }
 
 /// What the gaffer has set: the lights, the house lights, and which is in hand.
-struct LightingPlot {
+struct LightingPlot: Codable {
     var lights: [PlacedLight] = []
     var ambient: Float = 1          // the house lights: share of the scan as captured
     var ambientTint = SIMD3<Float>(1, 1, 1)

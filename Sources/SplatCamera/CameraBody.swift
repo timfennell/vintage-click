@@ -30,7 +30,7 @@ func vogel(_ k: Int, _ n: Int) -> SIMD2<Float> {
 }
 
 /// What the photographer has set, and the optics that follow from it.
-struct CameraBody {
+struct CameraBody: Codable {
     /// The camera itself (its make, model and serial go on every frame).
     var model = CameraModel.ohiKorS2
     var lensIndex = lensBag.firstIndex { $0.name == "Ohi Kor 50mm f/1.4" } ?? 0

@@ -297,6 +297,7 @@ func configureSession() {
     // The session is named for the scan: its folder when the file has a generic name.
     let scanPath = (currentScene?.path ?? cliPath ?? "scene") as NSString
     let stem = (scanPath.lastPathComponent as NSString).deletingPathExtension
+    viewer.scenePath = (currentScene?.path ?? cliPath).map { URL(fileURLWithPath: $0).standardizedFileURL.path }
     viewer.sceneName = ["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
         ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem
     viewer.onScaleSet = { scale in
@@ -341,6 +342,16 @@ func configureSession() {
         }
     }
 
+    // --proof: a scripted shot makes a proof; --enlarge frame.png: print one.
+    if args.contains("--proof") { viewer.proofOverride = true }
+    if let i = args.firstIndex(of: "--enlarge"), i + 1 < args.count {
+        let u = URL(fileURLWithPath: args[i + 1])
+        viewer.onSaved = { path in print("Saved \(path)"); quit() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            viewer.enlarge([u])
+            viewer.feedEnlarger()
+        }
+    }
     if let p = shootPath {
         viewer.scripted = true
         viewer.loop.developOnlyWhenStill = false

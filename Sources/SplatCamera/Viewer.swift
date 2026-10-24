@@ -109,6 +109,16 @@ final class Viewer: NSObject, MTKViewDelegate {
     var filmFPS: Double = 24
     /// Scripted runs: where the next developed frame goes, and who to tell.
     var scriptedPath: URL?
+    /// The scan on the stage, for the enlarger's records.
+    var scenePath: String?
+    /// Proofs at the shutter, prints from the enlarger (else full prints at once).
+    var proofsAtShutter: Bool {
+        get { proofOverride ?? (!scripted && (UserDefaults.standard.object(forKey: "proofsAtShutter") as? Bool ?? true)) }
+        set { UserDefaults.standard.set(newValue, forKey: "proofsAtShutter") }
+    }
+    var proofOverride: Bool?
+    /// Frames waiting for the enlarger (fed to the darkroom one at a time).
+    private var enlargeQueue: [URL] = []
     /// Scripted runs ignore the controls (a pad left on the desk must not move the camera).
     var scripted = false
     var onSaved: ((String) -> Void)?
@@ -1089,6 +1099,11 @@ final class Viewer: NSObject, MTKViewDelegate {
             .init(title: "Set the scale (measure)…",
                   detail: String(format: "now %.3g m per unit: aim at two points, say how far apart they are", body.metresPerUnit)) {
                 [weak self] in self?.startMeasure() },
+            .init(title: "Shutter makes: \(proofsAtShutter ? "proofs (enlarge at the light table)" : "full prints")",
+                  detail: "proofs keep the finder fast; at the light table Y / R sends the marked frames (or all) to the enlarger") { [weak self] in
+                guard let self else { return }
+                self.proofsAtShutter.toggle()
+                self.reopenMenu() },
             .init(title: "Photo size: \(width * photoScale) × \(height * photoScale)",
                   detail: "\(photoScale)× the finder · bigger takes longer to develop (select to change)") { [weak self] in
                 guard let self else { return }
@@ -1392,10 +1407,49 @@ final class Viewer: NSObject, MTKViewDelegate {
         if p.contains(.l1) { sheet.changeRoll(-1) }
         if p.contains(.r1) { sheet.changeRoll(1) }
         if p.contains(.a) { sheet.toggleMark() }
+        if p.contains(.y) { enlarge(sheet.enlargeCandidates()) }
+        feedEnlarger()
         if p.contains(.b) || p.contains(.view) { closeSheet() }
         if loop.pendingFrames(roll: body.rollNumber) != sheet.pending.frames { sheet.reload(showRoll: nil) }
     }
 
+
+    // MARK: the enlarger
+
+    /// Queues proofs for full prints, from their records (only this scan's:
+    /// the stage holds one scan at a time).
+    func enlarge(_ frames: [URL]) {
+        var queued = 0, elsewhere = 0
+        for u in frames where !enlargeQueue.contains(u) {
+            guard let r = ShotRecord.load(for: u), isProof(u) else { continue }
+            if r.scene != scenePath { elsewhere += 1; continue }
+            enlargeQueue.append(u)
+            queued += 1
+        }
+        var msg = queued == 0 ? "NOTHING TO ENLARGE" : "ENLARGING \(queued) FRAME\(queued == 1 ? "" : "S")"
+        if elsewhere > 0 { msg += " · \(elsewhere) from another scan: open it to enlarge them" }
+        hud?.flash(msg)
+    }
+
+    private func isProof(_ u: URL) -> Bool {
+        guard let d = try? Data(contentsOf: u.deletingPathExtension().appendingPathExtension("json")),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return false }
+        return o["proof"] as? Bool ?? false
+    }
+
+    /// One print at a time: each needs a big accumulator.
+    func feedEnlarger() {
+        guard !enlargeQueue.isEmpty, loop.pendingExposures == 0 else { return }
+        let u = enlargeQueue.removeFirst()
+        guard let r = ShotRecord.load(for: u), let accum = loop.makeAccumulator(r.width, r.height) else { return }
+        let job = ExposureJob(camera: r.camera, body: r.body, lighting: r.lighting, frameNumber: r.frameNumber,
+                              cells: r.body.lens.isFisheye ? [.zero] : r.body.cellCentres(r.cells),
+                              accum: accum, size: (r.width, r.height), wantsNegative: r.negative)
+        job.outputPath = u
+        job.filterThreshold = r.filterThreshold
+        job.record = r
+        loop.expose(job)
+    }
 
     // MARK: shutter
 
@@ -1407,17 +1461,25 @@ final class Viewer: NSObject, MTKViewDelegate {
             return
         }
         // Big photos take a lot of memory while they develop: fewer at once.
-        let size = (w: width * photoScale, h: height * photoScale)
-        let room = photoScale >= 3 ? 2 : Self.maxPending
+        let proof = proofsAtShutter
+        let size = proof ? (w: width, h: height) : (w: width * photoScale, h: height * photoScale)
+        let room = !proof && photoScale >= 3 ? 2 : Self.maxPending
         guard loop.pendingExposures < room, let accum = loop.makeAccumulator(size.w, size.h) else {
             hud?.flash("BUFFER FULL")
             return
         }
         let job = ExposureJob(camera: carriedCamera, body: body, lighting: lighting, frameNumber: body.framesShot + 1,
-                              cells: body.lens.isFisheye ? [.zero] : body.cellCentres(cellsPerExposure), accum: accum, size: size,
-                              wantsNegative: keepNegative)
+                              cells: body.lens.isFisheye ? [.zero] : body.cellCentres(proof ? min(8, cellsPerExposure) : cellsPerExposure),
+                              accum: accum, size: size, wantsNegative: keepNegative && !proof)
         job.outputPath = scriptedPath
         job.filterThreshold = filterThreshold
+        if proof, let scene = scenePath {
+            job.isProof = true
+            job.record = ShotRecord(scene: scene, camera: carriedCamera, body: body, lighting: lighting,
+                                    frameNumber: body.framesShot + 1, cells: cellsPerExposure,
+                                    width: width * photoScale, height: height * photoScale,
+                                    negative: keepNegative, filterThreshold: filterThreshold)
+        }
         loop.expose(job)
         Sounds.shared.fire(shutterSeconds: body.shutter.seconds)
         body.framesShot += 1
@@ -1450,10 +1512,12 @@ final class Viewer: NSObject, MTKViewDelegate {
             "magnification": b.magnification, "close_focus_loss_stops": b.closeFocusLoss,
             "scene_ev": b.sceneEV, "mid_grey_calibration_stops": b.calibration, "sub_pupils": job.cells.count,
             "metres_per_unit": b.metresPerUnit, "width": image.width, "height": image.height,
+            "proof": job.isProof,
             "negative": job.negative == nil ? "" : url.deletingPathExtension().appendingPathExtension("dng").lastPathComponent,
         ]
         let negative = job.negative
         let (nw, nh) = job.size
+        job.record?.save(for: url)
         // Writing a big PNG takes a moment: off the main thread.
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let description = "\(b.rollName), frame \(job.frameNumber)"

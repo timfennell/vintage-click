@@ -11,7 +11,7 @@ struct FlyInput {
 
 /// A hand-held camera: yaw/pitch about a world up axis, eased velocities so
 /// stick movements read as a person walking and panning, not as teleporting.
-struct FlyCamera {
+struct FlyCamera: Codable {
     var position = SIMD3<Float>(0, 0, 0)
     var yaw: Float = 0
     var pitch: Float = 0

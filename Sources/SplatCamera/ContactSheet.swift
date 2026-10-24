@@ -182,6 +182,13 @@ final class ContactSheetView: NSView {
         needsDisplay = true
     }
 
+    /// For the enlarger: this session's marked frames, or all of them if none is marked.
+    func enlargeCandidates() -> [URL] {
+        let marked = sessionRolls.flatMap { i in (marks[rolls[i].dir] ?? []).sorted().compactMap {
+            rolls[i].frames.indices.contains($0) ? rolls[i].frames[$0] : nil } }
+        return marked.isEmpty ? sessionRolls.flatMap { rolls[$0].frames } : marked
+    }
+
     /// Red grease pencil round the chosen frame: a keeper (or not any more).
     func toggleMark() {
         let cells = tableLayout().cells

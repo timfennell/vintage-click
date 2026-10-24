@@ -38,6 +38,9 @@ final class ExposureJob {
     var negative: Data?
     let started = CACurrentMediaTime()
     var outputPath: URL?
+    /// A proof (small, few lens samples): `record` is how to enlarge it.
+    var isProof = false
+    var record: ShotRecord?
     /// The effect filter's threshold in the finder's (unexposed) light.
     var filterThreshold: Float = 1
 
