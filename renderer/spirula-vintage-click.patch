@@ -2590,10 +2590,10 @@ index 00000000..0a255e36
 +}  // namespace backend
 diff --git a/src/backend/vulkan/LensDefocus.h b/src/backend/vulkan/LensDefocus.h
 new file mode 100644
-index 00000000..db5034ae
+index 00000000..b33975bd
 --- /dev/null
 +++ b/src/backend/vulkan/LensDefocus.h
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,15 @@
 +#pragma once
 +// Thin-lens depth of field inside the 3DGS projection (projection_fwd.slang,
 +// apply_lens): a device buffer of float4 lens parameters, or null for a pinhole.
@@ -2603,6 +2603,9 @@ index 00000000..db5034ae
 +namespace vk {
 +
 +void set_lens_defocus(const void* device_params);
++// Splats drawn by later projections: r > 0 only those within r of (x, y, z),
++// r < 0 only those beyond -r, 0 all.
++void set_render_region(float x, float y, float z, float r);
 +
 +}  // namespace vk
 +}  // namespace backend
@@ -2692,10 +2695,10 @@ index c6a86710..1c010f69 100644
      // Capabilities::required_subgroup_size).
      VkPhysicalDeviceSubgroupSizeControlFeaturesEXT fsgc{
 diff --git a/src/backend/vulkan/kernels/ProjectionFwd.cpp b/src/backend/vulkan/kernels/ProjectionFwd.cpp
-index ae0d78b6..c2115e98 100644
+index ae0d78b6..6150fa64 100644
 --- a/src/backend/vulkan/kernels/ProjectionFwd.cpp
 +++ b/src/backend/vulkan/kernels/ProjectionFwd.cpp
-@@ -6,9 +6,24 @@
+@@ -6,9 +6,25 @@
  #include <kernels/projection/ProjectionFwd.cuh>
  
  #include "backend/vulkan/kernels/KernelCommon.h"
@@ -2704,6 +2707,7 @@ index ae0d78b6..c2115e98 100644
  namespace {
  
 +uint64_t g_lens_defocus = 0;   // backend/vulkan/LensDefocus.h
++float g_region[4] = {0, 0, 0, 0};   // set_render_region
 +
 +// Never hand the shader a null lens: it may load p.lens[0] whatever the null
 +// test says, which crashes software Vulkan (lavapipe). Zeros read as "no lens".
@@ -2720,31 +2724,36 @@ index ae0d78b6..c2115e98 100644
  // Mirrors ProjectionFwdParams in shaders/projection_fwd.slang.
  struct ProjectionFwdParams {
      uint64_t means, quats, scales, opacities, features_dc, features_sh;
-@@ -23,8 +38,9 @@ struct ProjectionFwdParams {
+@@ -23,8 +39,10 @@ struct ProjectionFwdParams {
      uint32_t wgs_per_row;
      uint32_t num_sh_buffer;
      uint32_t _pad0;
 +    uint64_t lens;
++    float region[4];
  };
 -static_assert(sizeof(ProjectionFwdParams) == 16 * 8 + 8 * 4,
-+static_assert(sizeof(ProjectionFwdParams) == 17 * 8 + 8 * 4,
++static_assert(sizeof(ProjectionFwdParams) == 17 * 8 + 8 * 4 + 16,
                "params layout must match the slang struct");
  
  // Mirrors Projection3dgutParams in shaders/projection_fwd.slang.
-@@ -117,6 +133,7 @@ launch_projection_fwd_vk(
+@@ -117,6 +135,8 @@ launch_projection_fwd_vk(
      p.width = image_width;
      p.height = image_height;
      p.wgs_per_row = per_row;
 +    p.lens = lens_or_off();
++    for (int k = 0; k < 4; k++) p.region[k] = g_region[k];
  
      backend::vk::SpecList spec{cd.cam, (uint32_t)sh_degree,
                                 antialiased ? 1u : 0u, spec_bits, 0u, cd.dist};
-@@ -128,6 +145,10 @@ launch_projection_fwd_vk(
+@@ -128,6 +148,13 @@ launch_projection_fwd_vk(
  
  }  // namespace
  
 +namespace backend::vk {
 +void set_lens_defocus(const void* device_params) { g_lens_defocus = (uint64_t)device_params; }
++void set_render_region(float x, float y, float z, float r) {
++    g_region[0] = x; g_region[1] = y; g_region[2] = z; g_region[3] = r;
++}
 +}  // namespace backend::vk
 +
  /* API definitions matching kernels/projection/ProjectionFwd.cuh */
@@ -2822,14 +2831,15 @@ index ef7b72da..9f612088 100644
                      (uint32_t)batch, tile_width, tile_height, macro_log2, &p,
                      sizeof(p));
 diff --git a/src/backend/vulkan/shaders/projection_fwd.slang b/src/backend/vulkan/shaders/projection_fwd.slang
-index 9c30e617..924e7e6c 100644
+index 9c30e617..14c79a9a 100644
 --- a/src/backend/vulkan/shaders/projection_fwd.slang
 +++ b/src/backend/vulkan/shaders/projection_fwd.slang
-@@ -93,8 +93,126 @@ struct ProjectionFwdParams {
+@@ -93,8 +93,127 @@ struct ProjectionFwdParams {
      uint32_t wgs_per_row; // grid fold (flat id = wg.y * wgs_per_row*128 + x)
      uint32_t num_sh_buffer;
      uint32_t _pad0;
 +    float4* lens;         // thin-lens defocus (apply_lens); null = pinhole
++    float4 region;        // (centre, r): r > 0 only splats within r, r < 0 only beyond -r, 0 all
  };
  
 +// Thin-lens depth of field inside the render; layout of L in
@@ -2952,7 +2962,24 @@ index 9c30e617..924e7e6c 100644
  void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      ProjectionFwdParams p, uint idx) {
      uint cid = (idx / p.N) % p.C;
-@@ -130,12 +248,21 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -120,6 +239,16 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+                          p.quats[4 * gid + 2], p.quats[4 * gid + 3]);
+     float3 scale = float3(p.scales[3 * gid], p.scales[3 * gid + 1],
+                           p.scales[3 * gid + 2]);
++    // A region (viewer renders split near from far): skip the other side first.
++    if (p.region.w != 0.0f) {
++        float3 dc0 = mean - p.region.xyz;
++        bool inside = dot(dc0, dc0) <= p.region.w * p.region.w;
++        if (inside != (p.region.w > 0.0f)) {
++            p.out_aabb[idx] = uint2(0u, 0u);
++            p.out_depths[idx] = 0.0f;
++            return;
++        }
++    }
+     float in_opacity = p.opacities[gid];
+     float3 dc = float3(p.features_dc[3 * gid], p.features_dc[3 * gid + 1],
+                        p.features_dc[3 * gid + 2]);
+@@ -130,12 +259,21 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      float s_depth;
      float3 s_conic;
      float s_opac;
@@ -2976,7 +3003,7 @@ index 9c30e617..924e7e6c 100644
  
      // SH -> rgb, gated exactly like _Base3DGS::project.
      float3 rgb = float3(0.0f);
-@@ -143,6 +270,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -143,6 +281,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
          rgb = eval_splat_color(mean, R, t, dc, p.features_sh, p.sh_stride,
                                 gid, p.sh_packed, p.sh_bounds,
                                 p.num_sh_buffer, i64mem_get(p.sh_bounds_stride));
@@ -3050,10 +3077,10 @@ index 16a25dd5..40378811 100644
              float2 delta = float2(f.xy.x - px, f.xy.y - py);
 diff --git a/src/blender/SplatRenderC.cpp b/src/blender/SplatRenderC.cpp
 new file mode 100644
-index 00000000..d7ab272a
+index 00000000..7e4f40be
 --- /dev/null
 +++ b/src/blender/SplatRenderC.cpp
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,313 @@
 +// A C interface to Spirula's 3DGS renderer, for loading into another process
 +// (the Blender render engine add-on calls it through ctypes).
 +//
@@ -3341,6 +3368,12 @@ index 00000000..d7ab272a
 +    });
 +}
 +
++// Draw only the splats within r of (x, y, z) (r > 0), only those beyond -r
++// (r < 0), or all (r = 0), in the renders that follow.
++SR_API void sr_set_region(float x, float y, float z, float r) {
++    backend::vk::set_render_region(x, y, z, r);
++}
++
 +// "PINHOLE" (rectilinear, the default) or "FISHEYE" (equidistant: image
 +// radius = f * angle off axis) for the renders that follow.
 +SR_API int sr_set_camera_model(const char* name) {
@@ -3373,10 +3406,10 @@ index 00000000..c26317d3
 +};
 diff --git a/src/blender/exports.txt b/src/blender/exports.txt
 new file mode 100644
-index 00000000..76322aa2
+index 00000000..61fd60af
 --- /dev/null
 +++ b/src/blender/exports.txt
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,14 @@
 +_sr_last_error
 +_sr_set_splats
 +_sr_render
@@ -3390,6 +3423,7 @@ index 00000000..76322aa2
 +_sr_add_shared_frames
 +_sr_color_buffer
 +_sr_set_camera_model
++_sr_set_region
 diff --git a/src/config/TrainConfig.h b/src/config/TrainConfig.h
 index 04df5cd5..70178fb3 100644
 --- a/src/config/TrainConfig.h

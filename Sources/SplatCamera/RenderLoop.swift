@@ -19,6 +19,7 @@ struct FinderJob {
     var lighting: LightingPlot
     var fromLight: Int? = nil       // seen from this light's head, not the camera
     var fisheye = false             // through a fisheye: Spirula's equidistant camera
+    var shells = false              // distant splats may come from the baked shells
 }
 
 /// One exposure on its way through the camera: the scene as it was when the
@@ -77,20 +78,161 @@ final class RenderLoop {
         if s?.path != sky?.path { skyTex = s.flatMap { SkyTexture.load($0.path, device: device, queue: queue) } }
         sky = skyTex == nil ? nil : s
     }
-    /// Fills the empty part of a rendered frame with the sky, in `enc`.
-    private func encodeSky(_ enc: MTLComputeCommandEncoder, frame: MTLBuffer, offset: Int, w: Int, h: Int,
-                           view V: [Float], fx: Float, cx: Float, cy: Float, fisheye: Bool, up: SIMD3<Float>, level mip: Float) {
-        guard let t = skyTex, let s = sky else { return }
+    /// What the background pass needs to show the distant shells.
+    struct ShellView {
+        var camera: SIMD3<Float>            // from the bake centre
+        var aperture: Float                 // diameter, metres
+        var focusM: Float
+        var pupil: [SIMD4<Float>]           // (x, y, weight, -) over the unit pupil
+    }
+    /// Fills the empty part of a rendered frame with the shells, the sky or
+    /// the background, in `enc`.
+    private func encodeBackground(_ enc: MTLComputeCommandEncoder, frame: MTLBuffer, offset: Int, w: Int, h: Int,
+                                  view V: [Float], fx: Float, cx: Float, cy: Float, fisheye: Bool, up: SIMD3<Float>,
+                                  level mip: Float, shells: ShellView? = nil) {
+        guard skyTex != nil || shells != nil else { return }
+        let s = sky
         var k: [SIMD4<Float>] = [
             SIMD4(Float(w), Float(h), fx, fx), SIMD4(cx, cy, fisheye ? 1 : 0, mip),
             SIMD4(V[0], V[1], V[2], 0), SIMD4(V[4], V[5], V[6], 0), SIMD4(V[8], V[9], V[10], 0),
-            SIMD4(up, s.yawDegrees * .pi / 180), SIMD4(t.level * exp2(s.stops), background.w > 1.5 ? 1 : 0, 0, 0),
+            SIMD4(up, (s?.yawDegrees ?? 0) * .pi / 180),
+            SIMD4((skyTex?.level ?? 1) * exp2(s?.stops ?? 0), background.w > 1.5 ? 1 : 0, skyTex != nil ? 1 : 0, shells != nil ? 1 : 0),
+            SIMD4(background.x, background.y, background.z, Self.faceFx / Float(Self.faceSize)),
+            SIMD4(shells?.camera ?? .zero, shellRadius),
+            SIMD4(shells?.aperture ?? 0, shells?.focusM ?? 1, metresPerUnit, Float(shells?.pupil.count ?? 0)),
         ]
+        k += Self.faces.map { SIMD4($0.f, 0) } + Self.faces.map { SIMD4($0.r, 0) } + Self.faces.map { SIMD4($0.d, 0) }
+        k += shells?.pupil ?? []
         enc.setComputePipelineState(skyPSO)
         enc.setBuffer(frame, offset: offset, index: 0)
         enc.setBytes(&k, length: k.count * 16, index: 1)
-        enc.setTexture(t.texture, index: 0)
+        enc.setTexture(skyTex?.texture ?? dummy2D, index: 0)
+        enc.setTexture(shells != nil ? shellCol : dummyArray, index: 1)
+        enc.setTexture(shells != nil ? shellDep : dummyArray, index: 2)
         enc.dispatchThreads(MTLSize(width: w, height: h, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+    }
+
+    // MARK: distant shells
+    //
+    // In a place, the splats beyond `shellRadius` of where the camera stood are
+    // baked into six cube faces (colour and distance) and the finder renders
+    // only the near ones live, filling the rest from the shells. Re-baked once
+    // the camera has moved on or the lights have changed, while the view is
+    // still. Prints always render everything.
+
+    static let timing = ProcessInfo.processInfo.environment["VC_TIMING"] != nil
+    static let faceSize = 2048
+    static let faceFx = Float(faceSize) / 2 / (1 + 6 / Float(faceSize))     // a few texels past 90°, for seams
+    static let faces: [(f: SIMD3<Float>, r: SIMD3<Float>, d: SIMD3<Float>)] = {
+        let fs: [SIMD3<Float>] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+        return fs.map { f in
+            let a: SIMD3<Float> = abs(f.y) < 0.9 ? [0, 1, 0] : [0, 0, 1]
+            let r = simd_normalize(simd_cross(a, f))
+            return (f, r, simd_cross(f, r))
+        }
+    }()
+    /// The near region's radius (scene units; 0: no shells) and scene scale, set by the viewer.
+    var shellRadius: Float = 0
+    var metresPerUnit: Float = 1
+    private var shellCol: MTLTexture?, shellDep: MTLTexture?
+    private var bakeSlot: (buf: MTLBuffer, off: Int, index: Int32)?
+    private var shellCentre: SIMD3<Float>?
+    private var shellLightKey: [SIMD4<Float>] = []
+    private var lastFinderJob: FinderJob?
+    private var bakeWanted = false
+    private var storePSO: MTLComputePipelineState!
+    private lazy var dummy2D: MTLTexture? = device.makeTexture(descriptor: {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
+        return d }())
+    private lazy var dummyArray: MTLTexture? = device.makeTexture(descriptor: {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
+        d.textureType = .type2DArray
+        return d }())
+
+    /// The relight's key without the eye: the lights themselves.
+    private var lightKey: [SIMD4<Float>] {
+        var k = lastRelight
+        if !k.isEmpty { k[0] = SIMD4(0, 0, 0, k[0].w) }
+        return k
+    }
+    private var rebakeDistance: Float { min(0.5 / metresPerUnit, shellRadius * 0.15) }
+
+    /// Whether this view can use the shells as baked.
+    private func shellsUsable(_ job: FinderJob) -> Bool {
+        guard job.shells, shellRadius > 0, let c = shellCentre, shellLightKey == lightKey else { return false }
+        return simd_distance(job.position, c) < shellRadius * 0.5
+    }
+    private func needsBake(_ job: FinderJob) -> Bool {
+        guard job.shells, shellRadius > 0, job.fromLight == nil else { return false }
+        guard let c = shellCentre else { return true }
+        return simd_distance(job.position, c) > rebakeDistance || shellLightKey != lightKey
+    }
+
+    /// The finder's lens as the shells' blur needs it: the viewing aperture's
+    /// size and its shape (the pupil samples the prints use, with their weights).
+    private func shellView(_ job: FinderJob) -> ShellView {
+        let b = job.body, n = b.viewingAperture
+        let pupil = b.lens.isFisheye ? [] : b.cellCentres(24).map { v -> SIMD4<Float> in
+            SIMD4(v.x * b.lens.squeeze, v.y, pupilWeight(v, q: .zero, lens: b.lens, fNumber: n), 0)
+        }.filter { $0.z > 0 }
+        return ShellView(camera: job.position - (shellCentre ?? .zero), aperture: b.lens.focalMM / 1000 / n,
+                         focusM: b.focusM, pupil: pupil)
+    }
+
+    private func bake(_ job: FinderJob) {
+        let S = Self.faceSize
+        if shellCol == nil {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: S, height: S, mipmapped: false)
+            d.textureType = .type2DArray
+            d.arrayLength = 6
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = .private
+            shellCol = device.makeTexture(descriptor: d)
+            d.pixelFormat = .r32Float
+            shellDep = device.makeTexture(descriptor: d)
+        }
+        if bakeSlot == nil {
+            var b: UnsafeMutableRawPointer?
+            var o = 0
+            var first: Int32 = 0
+            guard sr_add_shared_frames(Int32(S), Int32(S), 1, &b, &o, &first) == 0 else {
+                print(SpirulaError("shell frame"))
+                shellRadius = 0
+                return
+            }
+            bakeSlot = (Unmanaged<MTLBuffer>.fromOpaque(b!).takeUnretainedValue(), o, first)
+        }
+        guard let slot = bakeSlot, let col = shellCol, let dep = shellDep else { return }
+        let t0 = CACurrentMediaTime()
+        let c = job.position
+        relight(job.lighting, eye: c, body: job.body, quality: .finder)
+        setLens(nil)
+        setCameraModel(false)
+        sr_set_region(c.x, c.y, c.z, -shellRadius)
+        defer { sr_set_region(0, 0, 0, 0) }
+        for (i, face) in Self.faces.enumerated() {
+            let view: [Float] = [face.r.x, face.r.y, face.r.z, -simd_dot(face.r, c),
+                                 face.d.x, face.d.y, face.d.z, -simd_dot(face.d, c),
+                                 face.f.x, face.f.y, face.f.z, -simd_dot(face.f, c), 0, 0, 0, 1]
+            guard render(slot.index, view: view, fx: Self.faceFx, cx: Float(S) / 2, cy: Float(S) / 2),
+                  let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+            var b = SIMD4<Float>(Float(S), Self.faceFx, background.w > 1.5 ? 1 : 0, 0)
+            var f = UInt32(i)
+            enc.setComputePipelineState(storePSO)
+            enc.setBuffer(slot.buf, offset: slot.off, index: 0)
+            enc.setBytes(&b, length: 16, index: 1)
+            enc.setBytes(&f, length: 4, index: 2)
+            enc.setTexture(col, index: 0)
+            enc.setTexture(dep, index: 1)
+            enc.dispatchThreads(MTLSize(width: S, height: S, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            enc.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+        shellCentre = c
+        shellLightKey = lightKey
+        print(String(format: "Distant shells baked in %.0f ms (near radius %.1f m)", (CACurrentMediaTime() - t0) * 1000,
+                     shellRadius * metresPerUnit))
     }
 
     private let queue: MTLCommandQueue
@@ -181,7 +323,8 @@ final class RenderLoop {
         queue = device.makeCommandQueue()!
         let lib = try device.makeLibrary(source: shaderSource, options: nil)
         accumulatePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "accumulate")!)
-        skyPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "sky_fill")!)
+        skyPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "background_fill")!)
+        storePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shell_store")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
@@ -283,7 +426,7 @@ final class RenderLoop {
     private func run() {
         while true {
             cond.lock()
-            while finderRequest == nil && exposures.isEmpty && !stopping { cond.wait() }
+            while finderRequest == nil && exposures.isEmpty && !bakeWanted && !stopping { cond.wait() }
             if stopping {
                 cond.unlock()
                 stopped.signal()
@@ -293,14 +436,22 @@ final class RenderLoop {
             finderRequest = nil
             // Photos develop while the view holds still: a moving finder has the
             // GPU to itself, and the next step waits until it settles.
+            // The distant shells are baked the same way, before any photo.
             var exposure: ExposureJob?
-            if finder == nil, let e = exposures.first {
+            var bakeFor: FinderJob?
+            if finder == nil, bakeWanted || !exposures.isEmpty {
                 let still = CACurrentMediaTime() - lastFinderAt
-                if still >= Self.settle || !developOnlyWhenStill { exposure = e }
-                else { _ = cond.wait(until: Date().addingTimeInterval(Self.settle - still)) }
+                if still >= Self.settle {
+                    if bakeWanted { bakeFor = lastFinderJob; bakeWanted = false } else { exposure = exposures.first }
+                } else if !bakeWanted && !developOnlyWhenStill {
+                    exposure = exposures.first
+                } else {
+                    _ = cond.wait(until: Date().addingTimeInterval(Self.settle - still))
+                }
             }
             cond.unlock()
             if let finder { renderFinder(finder); lastFinderAt = CACurrentMediaTime() }
+            if let bakeFor { bake(bakeFor) }
             if let exposure { step(exposure) }
         }
     }
@@ -445,22 +596,33 @@ final class RenderLoop {
         let t0 = CACurrentMediaTime()
         // A shifted lens moves the optical axis (never when seeing from a light).
         let axis = job.fromLight == nil ? job.body.axisOffset(width: finderSize.w) : .zero
+        // Near splats only, when the distant ones are in the shells.
+        let shells = shellsUsable(job) ? shellView(job) : nil
+        if shells != nil, let c = shellCentre { sr_set_region(c.x, c.y, c.z, shellRadius) }
         let ok = render(finderSlots[slot].index, view: job.view, fx: job.fx,
                         cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y)
+        let tRender = CACurrentMediaTime()
+        sr_set_region(0, 0, 0, 0)
         setCameraModel(false)
-        if ok, job.fromLight == nil, skyTex != nil, let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
+        lastFinderJob = job
+        let wantBake = needsBake(job)
+        cond.lock(); bakeWanted = wantBake; cond.unlock()
+        if ok, job.fromLight == nil, skyTex != nil || shells != nil,
+           let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:
             // a smaller copy, by the blur circle's size in the sky's texels.
             let l = job.body.lens, f = l.focalMM / 1000, s = max(job.body.focusM, f * 1.01)
-            let texels = f * Float(skyTex!.texture.width) / (2 * .pi * job.body.viewingAperture * (s - f))
-            encodeSky(enc, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, w: finderSize.w, h: finderSize.h,
+            let texels = f * Float(skyTex?.texture.width ?? 1) / (2 * .pi * job.body.viewingAperture * (s - f))
+            encodeBackground(enc, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, w: finderSize.w, h: finderSize.h,
                       view: job.view, fx: job.fx, cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
-                      fisheye: job.fisheye, up: job.lighting.up, level: log2(max(1, texels)))
+                      fisheye: job.fisheye, up: job.lighting.up, level: log2(max(1, texels)), shells: shells)
             enc.endEncoding()
             cb.commit()
             cb.waitUntilCompleted()
         }
         let ms = (CACurrentMediaTime() - t0) * 1000
+        if Self.timing { print(String(format: "  render %.1f ms, background %.1f ms%@", (tRender - t0) * 1000,
+                                      (CACurrentMediaTime() - tRender) * 1000, shells != nil ? " (shells)" : "")) }
         guard ok else { return }
         cond.lock()
         latest = (slot, job)
@@ -544,7 +706,7 @@ final class RenderLoop {
                     finish(e)
                     return
                 }
-                encodeSky(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
+                encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
                           cx: axis.x + fx * d.x * invFocus - Float(x0), cy: axis.y + fx * d.y * invFocus - Float(y0),
                           fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0)
                 let first = e.next == 0 ? Float(1) : 0

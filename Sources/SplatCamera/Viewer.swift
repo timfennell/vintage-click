@@ -117,6 +117,14 @@ final class Viewer: NSObject, MTKViewDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "proofsAtShutter") }
     }
     var proofOverride: Bool?
+    /// VC_SHELL_M: the near region's radius in metres, for tests.
+    static let shellMetres = ProcessInfo.processInfo.environment["VC_SHELL_M"].flatMap(Float.init)
+    /// The finder draws far splats from baked shells (places only).
+    var distantShells: Bool {
+        get { ProcessInfo.processInfo.environment["VC_SHELLS"] != "0"
+              && (UserDefaults.standard.object(forKey: "distantShells") as? Bool ?? true) }
+        set { UserDefaults.standard.set(newValue, forKey: "distantShells") }
+    }
     /// Frames waiting for the enlarger (fed to the darkroom one at a time).
     private var enlargeQueue: [URL] = []
     /// Scripted runs ignore the controls (a pad left on the desk must not move the camera).
@@ -338,7 +346,12 @@ final class Viewer: NSObject, MTKViewDelegate {
                     axis: SIMD2(Float(width), Float(height)) / 2 + body.axisOffset(width: width),
                     fieldRadius: simd_length(SIMD2(Float(width), Float(height))) / 2) : nil,
                 body: body, lighting: lighting, fisheye: fisheye)
+            // Distant splats from baked shells: in a place, up to a short tele
+            // (longer lenses magnify the shells' parallax and texels).
+            job.shells = distantShells && sceneIsPlace && body.lens.focalMM <= 85
         }
+        loop.metresPerUnit = body.metresPerUnit
+        loop.shellRadius = Self.shellMetres.map { $0 / body.metresPerUnit } ?? 4 / body.metresPerUnit
         // Render only a view that changed (or once a second, in case something
         // outside this key did): a still camera leaves the GPU to the darkroom.
         let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)"
@@ -1117,6 +1130,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         ]
         items += skyItems
         items += [
+            .init(title: "Distant shells: \(distantShells ? "on" : "off")",
+                  detail: "in a place, far splats drawn from a baked panorama: a faster finder (prints always draw everything)") { [weak self] in
+                guard let self else { return }
+                self.distantShells.toggle()
+                self.reopenMenu() },
             .init(title: "Shutter makes: \(proofsAtShutter ? "proofs (enlarge at the light table)" : "full prints")",
                   detail: "proofs keep the finder fast; at the light table Y / R sends the marked frames (or all) to the enlarger") { [weak self] in
                 guard let self else { return }

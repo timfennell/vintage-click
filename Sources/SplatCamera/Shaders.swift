@@ -569,13 +569,54 @@ kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buff
 // finder). L[0] = (lens point, weight, reset), L[1] = (colour mask: which of
 // r g b this sub-pupil carries, 1: the render has cut it by the barrel),
 // L[2] = (tile origin, tile size) in the photo.
-// The sky behind a scan whose own was cut away: where the render is empty
-// (as frame_rgb judges it), the .hdr in that pixel's direction. Writes the
-// result into the frame and leaves it opaque, so everything after is unchanged.
-//   K[0] = (W, H, fx, fy)  K[1] = (cx, cy, fisheye, mip level)  K[2..4] = view
-//   rows (right, down, forward)  K[5] = (world up, yaw radians)  K[6] = (scale, place, -, -)
-kernel void sky_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
-                     texture2d<float> sky [[texture(0)]], uint2 p [[thread_position_in_grid]]) {
+// What lies behind the live render: distant shells (the far splats, baked
+// into six cube faces of colour and distance from where the camera stood),
+// then the sky (.hdr), then the plain background. Fills where the render is
+// empty (as frame_rgb judges it) and leaves the frame opaque, so everything
+// after is unchanged.
+//   K[0] = (W, H, fx, fy)  K[1] = (cx, cy, fisheye, sky mip)
+//   K[2..4] = view rows (right, down, forward)  K[5] = (world up, sky yaw)
+//   K[6] = (sky scale, place, has sky, has shells)  K[7] = (background rgb, face fx / size)
+//   K[8] = (camera - bake centre, shell radius)  K[9] = (aperture diameter m, focus m, metres per unit, pupil samples)
+//   K[10..15] face forwards, K[16..21] rights, K[22..27] downs; K[28..] pupil samples (x, y, weight, -)
+float shell_face(float3 u, constant float4* K, thread float2& uv) {
+    int best = 0; float bd = -2;
+    for (int k = 0; k < 6; k++) { float dd = dot(u, K[10 + k].xyz); if (dd > bd) { bd = dd; best = k; } }
+    uv = float2(dot(u, K[16 + best].xyz), dot(u, K[22 + best].xyz)) / bd * K[7].w + 0.5;
+    return float(best);
+}
+// The shell along the ray o + t d (o from the bake centre): where it meets the
+// baked surface, found from the stored distance (two refinements).
+float4 shell_at(texture2d_array<float> col, texture2d_array<float> dep, float3 o, float3 d,
+                constant float4* K, thread float& dist) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float rho = K[8].w * 2;
+    float3 u = d;
+    for (int it = 0; it < 3; it++) {
+        float b = dot(o, d), c = dot(o, o) - rho * rho;
+        float t = -b + sqrt(max(b * b - c, 0.0));
+        u = normalize(o + t * d);
+        if (it == 2) break;
+        float2 uv; float f = shell_face(u, K, uv);
+        rho = max(dep.sample(s, uv, uint(f)).r, K[8].w);
+    }
+    dist = rho;
+    float2 uv; float f = shell_face(u, K, uv);
+    return col.sample(s, uv, uint(f));
+}
+float3 sky_at(texture2d<float> sky, float3 d, float mip, constant float4* K) {
+    float3 up = K[5].xyz;
+    float3 seed = abs(up.x) < 0.9 ? float3(1, 0, 0) : float3(0, 0, 1);
+    float3 a = normalize(seed - dot(seed, up) * up), b = cross(up, a);
+    float el = asin(clamp(dot(d, up), -1.0, 1.0));
+    float az = atan2(dot(d, b), dot(d, a)) + K[5].w;
+    constexpr sampler s(filter::linear, mip_filter::linear, s_address::repeat, t_address::clamp_to_edge);
+    float3 lin = sky.sample(s, float2(fract(0.5 + az / (2 * M_PI_F)), 0.5 - el / M_PI_F), level(mip)).rgb * K[6].x;
+    return float3(lin_to_srgb(lin.x), lin_to_srgb(lin.y), lin_to_srgb(lin.z));
+}
+kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
+                            texture2d<float> sky [[texture(0)]], texture2d_array<float> shellCol [[texture(1)]],
+                            texture2d_array<float> shellDep [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
     uint W = uint(K[0].x), H = uint(K[0].y);
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
@@ -590,26 +631,71 @@ kernel void sky_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(
         dc = normalize(float3(q, 1));
     }
     float3 d = normalize(K[2].xyz * dc.x + K[3].xyz * dc.y + K[4].xyz * dc.z);
-    float3 up = K[5].xyz;
-    float3 seed = abs(up.x) < 0.9 ? float3(1, 0, 0) : float3(0, 0, 1);
-    float3 a = normalize(seed - dot(seed, up) * up), b = cross(up, a);
-    float el = asin(clamp(dot(d, up), -1.0, 1.0));
-    float az = atan2(dot(d, b), dot(d, a)) + K[5].w;
-    constexpr sampler s(filter::linear, mip_filter::linear, s_address::repeat, t_address::clamp_to_edge);
-    float2 uv = float2(fract(0.5 + az / (2 * M_PI_F)), 0.5 - el / M_PI_F);
-    float3 lin = sky.sample(s, uv, level(K[1].w)).rgb * K[6].x;
-    float3 skyc = float3(lin_to_srgb(lin.x), lin_to_srgb(lin.y), lin_to_srgb(lin.z));   // the frame holds display (sRGB) values
-    float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
-    float3 o;
-    if (K[6].y > 0.5) {                    // a place: renormalise the leak, the sky where empty
-        float keep = smoothstep(0.85, 0.97, t);
-        o = mix(c / max(1 - t, 0.03), c + t * skyc, keep);
-    } else {
-        o = c + t * skyc;
+    float3 back = K[6].z > 0.5 ? sky_at(sky, d, K[1].w, K) : K[7].rgb;
+    if (K[6].w > 0.5) {
+        // The shells, blurred by the lens: the pupil's shape gathered over the
+        // blur circle at the shell's distance (one depth, so one convolution).
+        float3 o = K[8].xyz;
+        float dist;
+        float4 c0 = shell_at(shellCol, shellDep, o, d, K, dist);
+        float zm = max(dist * K[9].z, 0.01);
+        float th = 0.5 * K[9].x * abs(1 / zm - 1 / max(K[9].y, 0.01));
+        int np = int(K[9].w);
+        float4 acc = 0; float wsum = 0;
+        if (np > 0 && th * K[0].z > 1.0) {
+            for (int j = 0; j < np; j++) {
+                float4 ps = K[28 + j];
+                float3 dj = normalize(d + th * (ps.x * K[2].xyz + ps.y * K[3].xyz));
+                float dj_dist;
+                acc += shell_at(shellCol, shellDep, o, dj, K, dj_dist) * ps.z;
+                wsum += ps.z;
+            }
+            acc /= max(wsum, 1e-6);
+        } else {
+            acc = c0;
+        }
+        back = acc.rgb + (1 - acc.a) * back;
+        // The focusing aids read depth: where the live render found little,
+        // the shell's distance along the view axis.
+        if (t > 0.5 && c0.a > 0.5) f[4 * n + i] = dist * dc.z;
     }
-    f[3 * i] = o.x; f[3 * i + 1] = o.y; f[3 * i + 2] = o.z;
+    float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+    float3 o3;
+    if (K[6].y > 0.5) {                    // a place: renormalise the leak, the background where empty
+        float keep = smoothstep(0.85, 0.97, t);
+        o3 = mix(c / max(1 - t, 0.03), c + t * back, keep);
+    } else {
+        o3 = c + t * back;
+    }
+    f[3 * i] = o3.x; f[3 * i + 1] = o3.y; f[3 * i + 2] = o3.z;
     f[3 * n + i] = 0;
 }
+
+// One cube face of the distant shells, from a far-only render seen from the
+// bake centre: colour (made opaque where a place leaks, as frame_rgb does) and
+// distance from the centre (huge where nothing is).
+//   B = (face size, face fx, place, -)
+kernel void shell_store(device const float* f [[buffer(0)]], constant float4& B [[buffer(1)]],
+                        texture2d_array<float, access::write> col [[texture(0)]],
+                        texture2d_array<float, access::write> dep [[texture(1)]],
+                        constant uint& face [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
+    uint S = uint(B.x);
+    if (p.x >= S || p.y >= S) return;
+    uint n = S * S, i = p.y * S + p.x;
+    float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+    float t = f[3 * n + i], med = f[4 * n + i];
+    float a = 1 - t;
+    if (B.z > 0.5) {
+        float keep = smoothstep(0.85, 0.97, t);
+        c = mix(c / max(1 - t, 0.03), c, keep);
+        a = mix(1.0, 1 - t, keep);
+    }
+    float2 q = (float2(p) + 0.5 - float(S) * 0.5) / B.y;
+    float dist = (a < 0.03 || !(med > 0) || med > 1e8) ? 1e6 : med * sqrt(1 + dot(q, q));
+    col.write(float4(c, a), p, face);
+    dep.write(float4(dist), p, face);
+}
+
 
 kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
                        device float4* acc [[buffer(2)]], constant float4* L [[buffer(3)]],

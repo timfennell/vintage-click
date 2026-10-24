@@ -38,3 +38,5 @@ int sr_add_shared_frames(int width, int height, int count, void** out_buffers,
 int sr_color_buffer(void** out_buffer, size_t* out_offset);
 // "PINHOLE" (default) or "FISHEYE" (equidistant: radius = f * angle) for later renders.
 int sr_set_camera_model(const char* name);
+// Draw only the splats within r of (x, y, z) (r > 0), only those beyond -r (r < 0), or all (r = 0).
+void sr_set_region(float x, float y, float z, float r);
