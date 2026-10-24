@@ -2831,10 +2831,10 @@ index ef7b72da..9f612088 100644
                      (uint32_t)batch, tile_width, tile_height, macro_log2, &p,
                      sizeof(p));
 diff --git a/src/backend/vulkan/shaders/projection_fwd.slang b/src/backend/vulkan/shaders/projection_fwd.slang
-index 9c30e617..14c79a9a 100644
+index 9c30e617..c209f34b 100644
 --- a/src/backend/vulkan/shaders/projection_fwd.slang
 +++ b/src/backend/vulkan/shaders/projection_fwd.slang
-@@ -93,8 +93,127 @@ struct ProjectionFwdParams {
+@@ -93,8 +93,132 @@ struct ProjectionFwdParams {
      uint32_t wgs_per_row; // grid fold (flat id = wg.y * wgs_per_row*128 + x)
      uint32_t num_sh_buffer;
      uint32_t _pad0;
@@ -2937,11 +2937,16 @@ index 9c30e617..14c79a9a 100644
 +    opac *= sqrt(max(det0, 0.0f) / det1);   // same energy, spread wider
 +    // Too faint to draw: keep it at the threshold with probability opac/thr
 +    // (dropping them all lost the light of whole blurred fields of tiny splats).
-+    // Focus LOD (L[1].z > 0, a viewfinder): a splat the blur has spread over
-+    // 4x its own area is thinned the same way down to that opacity, so a soft
-+    // field is drawn from fewer, stronger splats; sharp splats are untouched.
++    // Viewfinder (L[1].z > 0): blurred splats are also kept by chance up to
++    // that opacity, ramping in as the blur spreads them (no threshold to pop).
++    // Besides drawing fewer splats, a faint spread splat loses its tails to
++    // the alpha cut-off (it is drawn only where it is above it), which darkens
++    // a blurred field; kept stronger, its whole spread is drawn.
 +    float keepAt = ALPHA_THRESHOLD;
-+    if (L[1].z > 0 && det1 > 16 * det0) keepAt = max(keepAt, L[1].z);
++    if (L[1].z > 0) {
++        float spread = sqrt(max(det1, 0.0f) / max(det0, 1e-20f));
++        keepAt = max(keepAt, ALPHA_THRESHOLD + (L[1].z - ALPHA_THRESHOLD) * smoothstep(1.5f, 6.0f, spread));
++    }
 +    if (opac < keepAt) {
 +        uint h = gid * 2654435761u;
 +        h = (h ^ (h >> 15)) * 2246822519u;
@@ -2962,7 +2967,7 @@ index 9c30e617..14c79a9a 100644
  void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      ProjectionFwdParams p, uint idx) {
      uint cid = (idx / p.N) % p.C;
-@@ -120,6 +239,16 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -120,6 +244,16 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
                           p.quats[4 * gid + 2], p.quats[4 * gid + 3]);
      float3 scale = float3(p.scales[3 * gid], p.scales[3 * gid + 1],
                            p.scales[3 * gid + 2]);
@@ -2979,7 +2984,7 @@ index 9c30e617..14c79a9a 100644
      float in_opacity = p.opacities[gid];
      float3 dc = float3(p.features_dc[3 * gid], p.features_dc[3 * gid + 1],
                         p.features_dc[3 * gid + 2]);
-@@ -130,12 +259,21 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -130,12 +264,21 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      float s_depth;
      float3 s_conic;
      float s_opac;
@@ -3003,7 +3008,7 @@ index 9c30e617..14c79a9a 100644
  
      // SH -> rgb, gated exactly like _Base3DGS::project.
      float3 rgb = float3(0.0f);
-@@ -143,6 +281,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -143,6 +286,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
          rgb = eval_splat_color(mean, R, t, dc, p.features_sh, p.sh_stride,
                                 gid, p.sh_packed, p.sh_bounds,
                                 p.num_sh_buffer, i64mem_get(p.sh_bounds_stride));

@@ -523,8 +523,11 @@ float3 meter_light(float3 outc, float2 pos, device const float* f, constant floa
 
 fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(0)]],
                            constant float4* O [[buffer(1)]], constant float4* F [[buffer(2)]],
-                           constant float4* M [[buffer(3)]], texture2d<float> plate [[texture(0)]]) {
+                           constant float4* M [[buffer(3)]], texture2d<float> plate [[texture(0)]],
+                           device const float* fprev [[buffer(4)]], constant float& fade [[buffer(5)]]) {
     float3 outc = finder_base(in.pos.xy, f, O);
+    // A refined frame eases in over the one it replaces (the same view).
+    if (fade > 0) outc = mix(outc, finder_base(in.pos.xy, fprev, O), fade);
     if (M[2].x > 0) {
         // The meter through the eyepiece: each colour from its own place.
         float3 r = meter_light(outc, eyepiece(in.pos.xy, O, EYEPIECE_K + EYEPIECE_CA), f, O, M, plate);

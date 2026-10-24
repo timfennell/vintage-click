@@ -21,6 +21,7 @@ struct FinderJob {
     var fisheye = false             // through a fisheye: Spirula's equidistant camera
     var shells = false              // distant splats may come from the baked shells
     var refresh = false             // the same view again (a periodic refresh): always in full
+    var refined = false             // set on the full frame that replaces a shells frame
 }
 
 /// One exposure on its way through the camera: the scene as it was when the
@@ -132,6 +133,8 @@ final class RenderLoop {
     // renders everything until the view is still again. Prints never use it.
 
     static let timing = ProcessInfo.processInfo.environment["VC_TIMING"] != nil
+    /// VC_NOREFINE: keep the shells' frame on show (for comparing it with the full one).
+    static let noRefine = ProcessInfo.processInfo.environment["VC_NOREFINE"] != nil
     /// 32 equal-area points over +-2.5 sigma, weighted by a unit Gaussian.
     static let gaussSamples: [SIMD4<Float>] = (0..<32).map { j in
         let v = vogel(j, 32) * 2.5
@@ -414,6 +417,13 @@ final class RenderLoop {
         return (s.buf, s.off, l.slot, l.job)
     }
 
+    /// Keeps a frame's slot from being rendered into (pair with `release`).
+    func hold(slot: Int) {
+        cond.lock()
+        displaying[slot] += 1
+        cond.unlock()
+    }
+
     func release(slot: Int) {
         cond.lock()
         displaying[slot] -= 1
@@ -483,10 +493,10 @@ final class RenderLoop {
             }
             cond.unlock()
             if let finder {
-                renderFinder(finder, full: finder.refresh)
+                renderFinder(finder, full: finder.refresh && !Self.noRefine)
                 if !finder.refresh { lastFinderAt = CACurrentMediaTime() }
             }
-            if let refineFor { renderFinder(refineFor, full: true) }
+            if let refineFor { var j = refineFor; j.refined = true; renderFinder(j, full: true) }
             if let bakeFor { bake(bakeFor) }
             if let exposure { step(exposure) }
         }
@@ -642,7 +652,7 @@ final class RenderLoop {
         setCameraModel(false)
         lastFinderJob = job
         let wantBake = needsBake(job)
-        cond.lock(); bakeWanted = wantBake; refineWanted = shells != nil; cond.unlock()
+        cond.lock(); bakeWanted = wantBake; refineWanted = shells != nil && !Self.noRefine; cond.unlock()
         if ok, job.fromLight == nil, skyTex != nil || shells != nil,
            let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:

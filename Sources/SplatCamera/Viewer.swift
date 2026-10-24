@@ -46,6 +46,11 @@ final class Viewer: NSObject, MTKViewDelegate {
     private lazy var input = GamepadInput()   // made on the main thread, at the first frame
     private var meterLum: Float = 0.18
     private var lastFinderKey = ""
+    /// A refined frame eases in over the shells frame it replaces: that frame, held, and when the fade began.
+    private var fadeFrom: (buf: MTLBuffer, off: Int, slot: Int)?
+    private var fadeStart = 0.0
+    private var shownSlot: (buf: MTLBuffer, off: Int, slot: Int)?
+    static let fadeTime = 0.25
     private var lastFinderAsk = 0.0
     /// How bright (in the finder's light) a point must be for an effect filter
     /// to throw spikes or a halo: well above the scene's average. Photos use the
@@ -405,6 +410,29 @@ final class Viewer: NSObject, MTKViewDelegate {
         var m = meterUniforms()
         enc.setFragmentBytes(&m, length: m.count * 16, index: 3)
         enc.setFragmentTexture(meterTexture ?? blankTexture, index: 0)
+        // A new frame: if it refines the one on show, hold that one and fade from it.
+        if shownSlot?.slot != frame.slot {
+            if frame.job.refined, let s = shownSlot {
+                if let old = fadeFrom { loop.release(slot: old.slot) }
+                loop.hold(slot: s.slot)
+                fadeFrom = s
+                fadeStart = now
+            }
+            shownSlot = (frame.buf, frame.off, frame.slot)
+        }
+        var fade: Float = 0
+        if let from = fadeFrom {
+            let t = (now - fadeStart) / Self.fadeTime
+            if t >= 1 || from.slot == frame.slot {
+                loop.release(slot: from.slot)
+                fadeFrom = nil
+            } else {
+                fade = Float(1 - t)
+                enc.setFragmentBuffer(from.buf, offset: from.off, index: 4)
+            }
+        }
+        if fadeFrom == nil { enc.setFragmentBuffer(frame.buf, offset: frame.off, index: 4) }
+        enc.setFragmentBytes(&fade, length: 4, index: 5)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         if !mirrorUp { drawWireframes(enc, frame: frame, optics: &o) }
         enc.endEncoding()
