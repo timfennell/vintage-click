@@ -298,6 +298,12 @@ func configureSession() {
     let scanPath = (currentScene?.path ?? cliPath ?? "scene") as NSString
     let stem = (scanPath.lastPathComponent as NSString).deletingPathExtension
     viewer.scenePath = (currentScene?.path ?? cliPath).map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+    if let i = args.firstIndex(of: "--sky"), i + 1 < args.count {
+        viewer.loop.setSky(SkySetting(path: args[i + 1],
+                                      yawDegrees: Float(option("--sky-turn") ?? "0") ?? 0, stops: Float(option("--sky-stops") ?? "0") ?? 0))
+    } else if let scene = viewer.scenePath {
+        viewer.loop.setSky(SkySetting.remembered(scene: scene))
+    }
     viewer.sceneName = ["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
         ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem
     viewer.onScaleSet = { scale in

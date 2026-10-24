@@ -67,6 +67,31 @@ final class RenderLoop {
     /// Display rgb behind the scan; w = 2 for a place, where nothing should
     /// show through (see frame_rgb in Shaders.swift).
     var background: SIMD4<Float>
+    /// The sky behind the scan (nil: none), and which file it is.
+    private var skyPSO: MTLComputePipelineState!
+    private var skyTex: SkyTexture?
+    private(set) var sky: SkySetting?
+    /// Loads (or clears) the sky; a no-op when it is already this one.
+    func setSky(_ s: SkySetting?) {
+        cond.lock(); defer { cond.unlock() }
+        if s?.path != sky?.path { skyTex = s.flatMap { SkyTexture.load($0.path, device: device, queue: queue) } }
+        sky = skyTex == nil ? nil : s
+    }
+    /// Fills the empty part of a rendered frame with the sky, in `enc`.
+    private func encodeSky(_ enc: MTLComputeCommandEncoder, frame: MTLBuffer, offset: Int, w: Int, h: Int,
+                           view V: [Float], fx: Float, cx: Float, cy: Float, fisheye: Bool, up: SIMD3<Float>, level mip: Float) {
+        guard let t = skyTex, let s = sky else { return }
+        var k: [SIMD4<Float>] = [
+            SIMD4(Float(w), Float(h), fx, fx), SIMD4(cx, cy, fisheye ? 1 : 0, mip),
+            SIMD4(V[0], V[1], V[2], 0), SIMD4(V[4], V[5], V[6], 0), SIMD4(V[8], V[9], V[10], 0),
+            SIMD4(up, s.yawDegrees * .pi / 180), SIMD4(t.level * exp2(s.stops), background.w > 1.5 ? 1 : 0, 0, 0),
+        ]
+        enc.setComputePipelineState(skyPSO)
+        enc.setBuffer(frame, offset: offset, index: 0)
+        enc.setBytes(&k, length: k.count * 16, index: 1)
+        enc.setTexture(t.texture, index: 0)
+        enc.dispatchThreads(MTLSize(width: w, height: h, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+    }
 
     private let queue: MTLCommandQueue
     private let accumulatePSO: MTLComputePipelineState
@@ -156,6 +181,7 @@ final class RenderLoop {
         queue = device.makeCommandQueue()!
         let lib = try device.makeLibrary(source: shaderSource, options: nil)
         accumulatePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "accumulate")!)
+        skyPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "sky_fill")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
@@ -422,6 +448,18 @@ final class RenderLoop {
         let ok = render(finderSlots[slot].index, view: job.view, fx: job.fx,
                         cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y)
         setCameraModel(false)
+        if ok, job.fromLight == nil, skyTex != nil, let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
+            // The finder shows the sky at infinity as blurred as the lens would:
+            // a smaller copy, by the blur circle's size in the sky's texels.
+            let l = job.body.lens, f = l.focalMM / 1000, s = max(job.body.focusM, f * 1.01)
+            let texels = f * Float(skyTex!.texture.width) / (2 * .pi * job.body.viewingAperture * (s - f))
+            encodeSky(enc, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, w: finderSize.w, h: finderSize.h,
+                      view: job.view, fx: job.fx, cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
+                      fisheye: job.fisheye, up: job.lighting.up, level: log2(max(1, texels)))
+            enc.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
         let ms = (CACurrentMediaTime() - t0) * 1000
         guard ok else { return }
         cond.lock()
@@ -506,6 +544,9 @@ final class RenderLoop {
                     finish(e)
                     return
                 }
+                encodeSky(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
+                          cx: axis.x + fx * d.x * invFocus - Float(x0), cy: axis.y + fx * d.y * invFocus - Float(y0),
+                          fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0)
                 let first = e.next == 0 ? Float(1) : 0
                 var l = [SIMD4<Float>(c.x, c.y, 1, first), mask,
                          SIMD4<Float>(Float(x0), Float(y0), Float(tw), Float(th))]

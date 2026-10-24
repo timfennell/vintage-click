@@ -569,6 +569,48 @@ kernel void meter(device const float* f [[buffer(0)]], constant float4* O [[buff
 // finder). L[0] = (lens point, weight, reset), L[1] = (colour mask: which of
 // r g b this sub-pupil carries, 1: the render has cut it by the barrel),
 // L[2] = (tile origin, tile size) in the photo.
+// The sky behind a scan whose own was cut away: where the render is empty
+// (as frame_rgb judges it), the .hdr in that pixel's direction. Writes the
+// result into the frame and leaves it opaque, so everything after is unchanged.
+//   K[0] = (W, H, fx, fy)  K[1] = (cx, cy, fisheye, mip level)  K[2..4] = view
+//   rows (right, down, forward)  K[5] = (world up, yaw radians)  K[6] = (scale, place, -, -)
+kernel void sky_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
+                     texture2d<float> sky [[texture(0)]], uint2 p [[thread_position_in_grid]]) {
+    uint W = uint(K[0].x), H = uint(K[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
+    float t = f[3 * n + i];
+    if (t < 1e-3) return;
+    float2 q = (float2(p) + 0.5 - K[1].xy) / K[0].zw;
+    float3 dc;
+    if (K[1].z > 0.5) {                    // equidistant fisheye: radius = angle
+        float th = length(q);
+        dc = float3(th > 1e-6 ? q / th * sin(th) : q, cos(th));
+    } else {
+        dc = normalize(float3(q, 1));
+    }
+    float3 d = normalize(K[2].xyz * dc.x + K[3].xyz * dc.y + K[4].xyz * dc.z);
+    float3 up = K[5].xyz;
+    float3 seed = abs(up.x) < 0.9 ? float3(1, 0, 0) : float3(0, 0, 1);
+    float3 a = normalize(seed - dot(seed, up) * up), b = cross(up, a);
+    float el = asin(clamp(dot(d, up), -1.0, 1.0));
+    float az = atan2(dot(d, b), dot(d, a)) + K[5].w;
+    constexpr sampler s(filter::linear, mip_filter::linear, s_address::repeat, t_address::clamp_to_edge);
+    float2 uv = float2(fract(0.5 + az / (2 * M_PI_F)), 0.5 - el / M_PI_F);
+    float3 lin = sky.sample(s, uv, level(K[1].w)).rgb * K[6].x;
+    float3 skyc = float3(lin_to_srgb(lin.x), lin_to_srgb(lin.y), lin_to_srgb(lin.z));   // the frame holds display (sRGB) values
+    float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+    float3 o;
+    if (K[6].y > 0.5) {                    // a place: renormalise the leak, the sky where empty
+        float keep = smoothstep(0.85, 0.97, t);
+        o = mix(c / max(1 - t, 0.03), c + t * skyc, keep);
+    } else {
+        o = c + t * skyc;
+    }
+    f[3 * i] = o.x; f[3 * i + 1] = o.y; f[3 * i + 2] = o.z;
+    f[3 * n + i] = 0;
+}
+
 kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
                        device float4* acc [[buffer(2)]], constant float4* L [[buffer(3)]],
                        uint2 g [[thread_position_in_grid]]) {

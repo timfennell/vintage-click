@@ -1087,6 +1087,21 @@ final class Viewer: NSObject, MTKViewDelegate {
             modTitle = "Modifier on light \(k + 1): " + name
             modDetail = "barn doors, flags, cookies; gobos in an ellipsoidal (M in lighting, K focus)"
         }
+        let skyItems: [MenuOverlay.Item] = [
+            .init(title: loop.sky.map { "Sky: \($0.name)" } ?? "Sky: the scan's own",
+                  detail: loop.sky == nil ? "choose an equirectangular .hdr to fill where the scan is empty"
+                                          : "select to remove it") { [weak self] in
+                guard let self else { return }
+                self.setSky(self.loop.sky == nil ? SkySetting.choose().map { SkySetting(path: $0) } : nil)
+                self.reopenMenu() },
+            .init(title: String(format: "Sky turn: %.0f°  ·  brightness %+.0f stops", loop.sky?.yawDegrees ?? 0, loop.sky?.stops ?? 0),
+                  detail: "select to turn the sky 30° (the brightness: Shift-select, or in steps with the sky turn at 0°)") { [weak self] in
+                guard let self, var s = self.loop.sky else { return }
+                if NSEvent.modifierFlags.contains(.shift) { s.stops = s.stops >= 2 ? -2 : s.stops + 1 }
+                else { s.yawDegrees = (s.yawDegrees + 30).truncatingRemainder(dividingBy: 360) }
+                self.setSky(s)
+                self.reopenMenu() },
+        ]
         items += [
             .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
                 self?.openLenses() },
@@ -1099,6 +1114,9 @@ final class Viewer: NSObject, MTKViewDelegate {
             .init(title: "Set the scale (measure)…",
                   detail: String(format: "now %.3g m per unit: aim at two points, say how far apart they are", body.metresPerUnit)) {
                 [weak self] in self?.startMeasure() },
+        ]
+        items += skyItems
+        items += [
             .init(title: "Shutter makes: \(proofsAtShutter ? "proofs (enlarge at the light table)" : "full prints")",
                   detail: "proofs keep the finder fast; at the light table Y / R sends the marked frames (or all) to the enlarger") { [weak self] in
                 guard let self else { return }
@@ -1414,6 +1432,14 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
 
 
+    // MARK: the sky
+
+    func setSky(_ s: SkySetting?) {
+        loop.setSky(s)
+        if let scene = scenePath { SkySetting.remember(loop.sky, scene: scene) }
+        if s != nil && loop.sky == nil { hud?.flash("COULD NOT READ THAT SKY") }
+    }
+
     // MARK: the enlarger
 
     /// Queues proofs for full prints, from their records (only this scan's:
@@ -1447,6 +1473,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                               accum: accum, size: (r.width, r.height), wantsNegative: r.negative)
         job.outputPath = u
         job.filterThreshold = r.filterThreshold
+        if r.sky != loop.sky { loop.setSky(r.sky) }
         job.record = r
         loop.expose(job)
     }
@@ -1478,7 +1505,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             job.record = ShotRecord(scene: scene, camera: carriedCamera, body: body, lighting: lighting,
                                     frameNumber: body.framesShot + 1, cells: cellsPerExposure,
                                     width: width * photoScale, height: height * photoScale,
-                                    negative: keepNegative, filterThreshold: filterThreshold)
+                                    negative: keepNegative, filterThreshold: filterThreshold, sky: loop.sky)
         }
         loop.expose(job)
         Sounds.shared.fire(shutterSeconds: body.shutter.seconds)
