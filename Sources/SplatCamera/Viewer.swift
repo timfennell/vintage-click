@@ -132,6 +132,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
     /// Frames waiting for the enlarger (fed to the darkroom one at a time).
     private var enlargeQueue: [URL] = []
+    private var enlargeTotal = 0, enlargeDone = 0
     /// Scripted runs ignore the controls (a pad left on the desk must not move the camera).
     var scripted = false
     var onSaved: ((String) -> Void)?
@@ -1474,6 +1475,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         if p.contains(.a) { sheet.toggleMark() }
         if p.contains(.y) { enlarge(sheet.enlargeCandidates()) }
         feedEnlarger()
+        let printing = enlargeQueue.count + loop.pendingExposures
+        if printing == 0 { enlargeTotal = 0; enlargeDone = 0 }
+        sheet.enlargerStatus = enlargeTotal == 0 ? "" : "ENLARGING \(enlargeDone) of \(enlargeTotal)"
         if p.contains(.b) || p.contains(.view) { closeSheet() }
         if loop.pendingFrames(roll: body.rollNumber) != sheet.pending.frames { sheet.reload(showRoll: nil) }
     }
@@ -1498,6 +1502,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             if r.scene != scenePath { elsewhere += 1; continue }
             enlargeQueue.append(u)
             queued += 1
+            enlargeTotal += 1
         }
         var msg = queued == 0 ? "NOTHING TO ENLARGE" : "ENLARGING \(queued) FRAME\(queued == 1 ? "" : "S")"
         if elsewhere > 0 { msg += " · \(elsewhere) from another scan: open it to enlarge them" }
@@ -1514,6 +1519,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     func feedEnlarger() {
         guard !enlargeQueue.isEmpty, loop.pendingExposures == 0 else { return }
         let u = enlargeQueue.removeFirst()
+        enlargeDone += 1
         guard let r = ShotRecord.load(for: u), let accum = loop.makeAccumulator(r.width, r.height) else { return }
         let job = ExposureJob(camera: r.camera, body: r.body, lighting: r.lighting, frameNumber: r.frameNumber,
                               cells: r.body.lens.isFisheye ? [.zero] : r.body.cellCentres(r.cells),
