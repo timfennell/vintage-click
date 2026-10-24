@@ -343,6 +343,7 @@ func configureSession() {
 
     if let p = shootPath {
         viewer.scripted = true
+        viewer.loop.developOnlyWhenStill = false
         var saved = 0
         viewer.onSaved = { path in
             print("Saved \(path)")

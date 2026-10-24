@@ -45,6 +45,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     private let radius: Float
     private lazy var input = GamepadInput()   // made on the main thread, at the first frame
     private var meterLum: Float = 0.18
+    private var lastFinderKey = ""
+    private var lastFinderAsk = 0.0
     /// How bright (in the finder's light) a point must be for an effect filter
     /// to throw spikes or a halo: well above the scene's average. Photos use the
     /// same, so what stars in the finder stars on film.
@@ -310,21 +312,30 @@ final class Viewer: NSObject, MTKViewDelegate {
         // Ask for the next finder frame: from the camera, or from the light being flown
         // (a plain wide view down its beam: no lens to speak of, no focusing screen).
         let n = body.viewingAperture
+        var job: FinderJob
         if pov != nil {
-            loop.requestFinder(FinderJob(
+            job = (FinderJob(
                 view: lightCam.viewMatrix, position: lightCam.position, fx: lightCam.focalPixels(width: width),
                 lens: nil, body: body, lighting: lighting, fromLight: pov))
         } else {
             let fx = body.focalPixels(width: width, height: height)
             let carried = carriedCamera
             let fisheye = body.lens.isFisheye
-            loop.requestFinder(FinderJob(
+            job = FinderJob(
                 view: carried.viewMatrix, position: carried.position, fx: fx,
                 lens: lensOn && !fisheye ? body.lensParams(
                     fNumber: n, focalPx: fx, cells: 1, table: table(body, n),
                     axis: SIMD2(Float(width), Float(height)) / 2 + body.axisOffset(width: width),
                     fieldRadius: simd_length(SIMD2(Float(width), Float(height))) / 2) : nil,
-                body: body, lighting: lighting, fisheye: fisheye))
+                body: body, lighting: lighting, fisheye: fisheye)
+        }
+        // Render only a view that changed (or once a second, in case something
+        // outside this key did): a still camera leaves the GPU to the darkroom.
+        let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)"
+        if key != lastFinderKey || now - lastFinderAsk > 1 {
+            loop.requestFinder(job)
+            lastFinderKey = key
+            lastFinderAsk = now
         }
 
         guard let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,

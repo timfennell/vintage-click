@@ -244,6 +244,13 @@ final class RenderLoop {
 
     // MARK: render thread
 
+    /// When the finder last rendered a new view; photos wait until it has
+    /// been still this long.
+    private var lastFinderAt = 0.0
+    static let settle = 0.35
+    /// Off for scripted shots, which never move.
+    var developOnlyWhenStill = true
+
     private func run() {
         while true {
             cond.lock()
@@ -255,9 +262,16 @@ final class RenderLoop {
             }
             let finder = finderRequest
             finderRequest = nil
-            let exposure = exposures.first
+            // Photos develop while the view holds still: a moving finder has the
+            // GPU to itself, and the next step waits until it settles.
+            var exposure: ExposureJob?
+            if finder == nil, let e = exposures.first {
+                let still = CACurrentMediaTime() - lastFinderAt
+                if still >= Self.settle || !developOnlyWhenStill { exposure = e }
+                else { _ = cond.wait(until: Date().addingTimeInterval(Self.settle - still)) }
+            }
             cond.unlock()
-            if let finder { renderFinder(finder) }
+            if let finder { renderFinder(finder); lastFinderAt = CACurrentMediaTime() }
             if let exposure { step(exposure) }
         }
     }
