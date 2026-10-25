@@ -380,6 +380,149 @@ float3 surround(float2 pos, float2 pe, float edge, device const float* f, consta
     return to_srgb(lin + near * halo * O[5].y);
 }
 
+// ---- lens flare -------------------------------------------------------------
+//
+// From each light that shines into the lens (Flare.swift): ghosts (the
+// aperture's shape, reflected between elements, strung along the line from
+// the light through the optical axis; round wide open, the blades' polygon
+// stopped down; tinted by the coating), veiling glare (a broad haze), the
+// starburst of diffraction at the blades, and a faint ring. In frame light,
+// before exposure; `uv` 0...1 over the frame, `size` its pixels.
+//   F[0] = (lights, blades, blade rotation, openness)  F[1] = (single-coated, seed, obstruction, squeeze)
+//   F[2] = (axis uv, dispersion, field softness)  F[3] = the filter: (glass on the lens, star points, star strength, spectral)
+//   then per light (uv, face radius / diagonal, visible), (rgb, -)
+float flare_hash(float s, float k) { return fract(sin(s * 12.9898 + k * 78.233) * 43758.5453); }
+// Inside the aperture's shape (radius 1): 1 inside, soft edge; blades, or round.
+float aperture_mask(float2 d, constant float4* F, float soft) {
+    float r = length(d);
+    int nb = int(F[0].y);
+    float open = F[0].w;
+    float edge = 1;
+    if (nb >= 3 && open < 0.98) {
+        float seg = 2 * M_PI_F / float(nb);
+        float th = atan2(d.y, d.x) - F[0].z;
+        float a = fmod(fmod(th, seg) + seg, seg) - seg / 2;
+        // Wide open the blades are drawn back (round); stopped down, a polygon.
+        float poly = r * cos(a) / cos(M_PI_F / float(nb));
+        edge = mix(poly, r, smoothstep(0.75, 0.98, open));
+    } else {
+        edge = r;
+    }
+    float m = 1 - smoothstep(1 - soft, 1 + soft, edge);
+    if (F[1].z > 0) m *= smoothstep(F[1].z - soft, F[1].z + soft, r);      // a mirror lens: a ring
+    return m;
+}
+float3 lens_flare(float2 uv, float2 size, constant float4* F) {
+    int nl = int(F[0].x);
+    if (nl <= 0) return 0;
+    float diag = length(size);
+    float npx = size.x * size.y;
+    bool single = F[1].x > 0.5;
+    float seed = F[1].y;
+    float2 axis = F[2].xy * size;
+    float2 p = uv * size;
+    float3 add = 0;
+    for (int li = 0; li < nl; li++) {
+        float4 a = F[4 + 2 * li], b = F[5 + 2 * li];
+        float vis = a.w;
+        if (vis <= 0.001) continue;
+        float3 I = b.rgb * vis;                      // the frame's brightness were all its light spread evenly
+        float2 s = a.xy * size;
+        float2 v = s - axis;
+        // Veiling glare: a broad haze, strongest near the light.
+        float rg = diag * 0.35;
+        float dg = length(p - s);
+        float glare = (single ? 0.006 : 0.0025) / (1 + (dg / rg) * (dg / rg));
+        add += I * glare * npx / (M_PI_F * rg * rg * 3.0);
+        // Ghosts along the line through the axis, each the aperture's shape.
+        int ng = single ? 7 : 6;
+        for (int k = 0; k < ng; k++) {
+            float t = mix(-1.6, 1.5, flare_hash(seed, float(k)));
+            float rad = diag * mix(0.015, 0.11, flare_hash(seed, float(k) + 20.0)) * mix(0.55, 1.0, F[0].w);
+            // Two reflections each: ~1e-4 of the light uncoated, ~1e-5 multi-coated.
+            float g = (single ? 2e-4 : 2e-5) * mix(0.4, 1.6, flare_hash(seed, float(k) + 40.0));
+            float hue = flare_hash(seed, float(k) + 60.0);
+            float3 tint = single ? mix(float3(1.0, 0.55, 0.2), float3(0.3, 0.9, 0.5), hue)
+                                 : mix(float3(0.45, 0.85, 0.55), float3(0.85, 0.45, 0.9), hue);
+            tint = mix(tint, float3(1), 0.25);
+            float2 cg = axis + v * t;
+            // Away from the axis the glass's field curvature and aberrations
+            // spread a ghost: its edge softens with its distance out.
+            float field = length(cg - axis) / diag;
+            // Each ghost has its own best focus: as the ring turns, some sharpen,
+            // others spread (the light's blur, scaled per ghost, over its size).
+            float focusGhost = b.w * diag / rad * mix(0.15, 1.2, flare_hash(seed, float(k) + 90.0));
+            float soft = 0.05 + 0.08 * flare_hash(seed, float(k) + 80.0) + F[2].w * field + focusGhost;
+            // Dispersion: each colour bends its own amount, so each colour's ghost
+            // sits and spreads a little differently (spectral fringes at the edges).
+            float3 m3;
+            for (int ch = 0; ch < 3; ch++) {
+                float sc = 1 + F[2].z * float(ch - 1) * (single ? 2.0 : 1.0) * (1 + 2 * abs(t));
+                float2 d = (p - (axis + v * t * sc)) / (rad * sc);
+                d.x /= max(F[1].w, 0.5);             // an anamorphic squeeze stretches them
+                m3[ch] = aperture_mask(d, F, soft);
+            }
+            if (max(m3.r, max(m3.g, m3.b)) <= 0) continue;
+            float rim = 0.8 + 0.4 * smoothstep(0.6, 1.0, length((p - cg) / rad));
+            add += I * tint * m3 * (g * rim * npx / (M_PI_F * rad * rad));
+        }
+        // A faint ring round the light (a reflection off the film and back).
+        float rr = diag * 0.18, w = diag * 0.012;
+        float3 ring;
+        for (int ch = 0; ch < 3; ch++) {
+            float rc = rr * (1 + F[2].z * 3 * float(ch - 1));
+            ring[ch] = exp(-0.5 * pow((dg - rc) / (w * (1 + F[2].w * 4)), 2.0));
+        }
+        add += I * ring * ((single ? 1e-4 : 2e-5) * npx / (2 * M_PI_F * rr * w * 2.5));
+        // A filter on the lens: its flat glass and the front element reflect the
+        // light back, a small sharp ghost mirrored through the axis.
+        if (F[3].x > 0.5) {
+            float2 cm = 2 * axis - s;
+            float rm = max(a.z * diag * 1.3, 2.5);
+            float dm = length(p - cm);
+            float mg = exp(-0.5 * (dm / rm) * (dm / rm));
+            add += I * (8e-4 * mg * npx / (2 * M_PI_F * rm * rm));
+        }
+        // A cross screen or diffraction grating: the filter's own spikes.
+        int sp = int(F[3].y);
+        if (sp > 0 && dg > 0.5) {
+            int lines = max(1, sp / 2);
+            float L = diag * (F[3].w > 0.5 ? 0.22 : 0.16);
+            float3 star = 0;
+            for (int j = 0; j < lines; j++) {
+                float ang = 0.35 + float(j) * M_PI_F / float(lines);
+                float2 dir = float2(cos(ang), sin(ang));
+                float along = abs(dot(p - s, dir)), across = abs(dot(p - s, float2(-dir.y, dir.x)));
+                float spk = exp(-0.5 * (across / 1.4) * (across / 1.4)) * exp(-3.2 * along / L);
+                float3 c = 1;
+                if (F[3].w > 0.5) c = mix(float3(1), spectrum(fract(along / L * 3.2 + 0.15)), smoothstep(0.02, 0.10, along / L));
+                star += c * spk;
+            }
+            add += I * star * (F[3].z * 0.01 * npx / (float(lines) * L * 2 * 1.4 * 2.5));
+        }
+        // Starburst: diffraction at the corners of the iris. Wide open the blades
+        // are drawn back to a circle (no corners, no spikes); stopped down they
+        // form a polygon whose corners throw spikes, longer the smaller the
+        // opening. Only a light in focus is sharp enough to show them.
+        int nb = int(F[0].y);
+        float corners = 1 - smoothstep(0.75, 0.98, F[0].w);
+        float sharp = exp(-b.w * diag / 3.0);
+        if (nb >= 3 && dg > 0.5 && corners * sharp > 0.001) {
+            int rays = (nb % 2 == 0) ? nb : 2 * nb;
+            float th = atan2(p.y - s.y, p.x - s.x) - F[0].z;
+            float seg = 2 * M_PI_F / float(rays);
+            float off = fmod(fmod(th, seg) + seg, seg) - seg / 2;
+            // Thin, and fading as one over the distance squared, as diffraction does.
+            float wpx = 1.1 + 0.5 * exp(-dg / 40.0);
+            float spike = exp(-0.5 * pow(off * dg / wpx, 2.0));
+            float len = diag * min(0.3, 0.025 / max(F[0].w, 0.05));
+            float fade = pow(len / (len + dg), 2.0) * exp(-dg / (len * 3.0));
+            add += I * (6e-5 * corners * sharp * spike * fade * npx / (float(rays) * len * 2.0 * wpx * 2.5 + 1.0));
+        }
+    }
+    return add;
+}
+
 // The finder: the screen's image, a rounded-corner window in a black surround (sRGB).
 float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     float2 p = (pos - O[7].xy) / O[7].z;
@@ -524,10 +667,24 @@ float3 meter_light(float3 outc, float2 pos, device const float* f, constant floa
 fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(0)]],
                            constant float4* O [[buffer(1)]], constant float4* F [[buffer(2)]],
                            constant float4* M [[buffer(3)]], texture2d<float> plate [[texture(0)]],
-                           device const float* fprev [[buffer(4)]], constant float& fade [[buffer(5)]]) {
+                           device const float* fprev [[buffer(4)]], constant float& fade [[buffer(5)]],
+                           constant float4* FL [[buffer(6)]]) {
     float3 outc = finder_base(in.pos.xy, f, O);
     // A refined frame eases in over the one it replaces (the same view).
     if (fade > 0) outc = mix(outc, finder_base(in.pos.xy, fprev, O), fade);
+    // Lens flare, on the screen's image (not its surround), at the finder's brightness.
+    if (FL[0].x > 0) {
+        float2 pe = (eyepiece(in.pos.xy, O, EYEPIECE_K) - O[7].xy) / O[7].z;
+        float2 halfSize = O[0].xy * 0.5;
+        float2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
+        float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;
+        float inside = 1 - smoothstep(-1.0, 1.0, edge);
+        if (inside > 0) {
+            float3 fl = lens_flare(pe / O[0].xy, O[0].xy, FL) * O[5].y * O[9].rgb * inside;
+            outc = float3(lin_to_srgb(srgb_to_lin(outc.r) + fl.r), lin_to_srgb(srgb_to_lin(outc.g) + fl.g),
+                          lin_to_srgb(srgb_to_lin(outc.b) + fl.b));
+        }
+    }
     if (M[2].x > 0) {
         // The meter through the eyepiece: each colour from its own place.
         float3 r = meter_light(outc, eyepiece(in.pos.xy, O, EYEPIECE_K + EYEPIECE_CA), f, O, M, plate);
@@ -841,7 +998,8 @@ float3 fisheye_rim(float3 lin, device const float4* acc, float2 pc, float2 c, fl
 kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
                     constant float4* F [[buffer(2)]], constant float4& D [[buffer(3)]],
                     device uchar4* out [[buffer(4)]], device const float4* streaks [[buffer(5)]],
-                    device const float4* fx [[buffer(6)]], uint2 p [[thread_position_in_grid]]) {
+                    device const float4* fx [[buffer(6)]], constant float4* FL [[buffer(7)]],
+                    uint2 p [[thread_position_in_grid]]) {
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
@@ -858,6 +1016,8 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
     lin *= D.rgb * expo * vig * O[9].rgb;                 // O[9]: the filter's colour
     if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;    // D.w: the lens streaks
     if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) lin = max(lin + fx[idx(p, O)].rgb * vig, 0.0);
+    // Lens flare from the lights shining into the lens, through the filter.
+    lin += lens_flare((float2(p) + 0.5) / float2(W, H), float2(W, H), FL) * expo * O[9].rgb;
     // Halation: light past the film base bouncing back, around bright highlights.
     float3 halo = 0;
     if (F[6].x > 0) {
@@ -881,7 +1041,7 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
 kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
                      constant float4& D [[buffer(3)]], device half* out [[buffer(4)]],
                      device const float4* streaks [[buffer(5)]], device const float4* fx [[buffer(6)]],
-                     uint2 p [[thread_position_in_grid]]) {
+                     constant float4* FL [[buffer(7)]], uint2 p [[thread_position_in_grid]]) {
     uint W = uint(O[0].x), H = uint(O[0].y);
     if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
@@ -896,6 +1056,8 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
     lin = max(lin * D.rgb * expo * vig * O[9].rgb, 0.0);
     if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;
     if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) lin = max(lin + fx[idx(p, O)].rgb * vig, 0.0);
+    // Lens flare from the lights shining into the lens, through the filter.
+    lin += lens_flare((float2(p) + 0.5) / float2(W, H), float2(W, H), FL) * expo * O[9].rgb;
     if (O[6].z > 0) lin = fisheye_rim(lin, acc, pc, c, D.rgb * expo, O);
     uint i = idx(p, O) * 3;
     out[i] = half(min(lin.r, 60000.0)); out[i + 1] = half(min(lin.g, 60000.0)); out[i + 2] = half(min(lin.b, 60000.0));
@@ -1076,6 +1238,28 @@ kernel void dof_blur(device float* f [[buffer(0)]], constant float4* D [[buffer(
     acc /= wsum;
     f[3 * i] = acc.r; f[3 * i + 1] = acc.g; f[3 * i + 2] = acc.b;
     f[3 * n + i] = 1 - acc.a;
+}
+
+// How much of each flaring light the camera can see: samples over its face,
+// visible where nothing in the frame is nearer than the light.
+//   P[i] = (pixel, distance along the ray, face radius px)
+kernel void flare_probe(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
+                        constant float4* P [[buffer(2)]], device float* out [[buffer(3)]],
+                        constant uint& count [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+    if (i >= count) return;
+    float4 q = P[i];
+    uint W = uint(O[0].x), H = uint(O[0].y), n = W * H;
+    float seen = 0, total = 0;
+    for (uint k = 0; k < 16; k++) {
+        float r = sqrt((float(k) + 0.5) / 16) * q.w, a = float(k) * 2.39996323;
+        float2 pp = q.xy + r * float2(cos(a), sin(a));
+        total += 1;
+        if (pp.x < 0 || pp.y < 0 || pp.x >= float(W) || pp.y >= float(H)) { seen += 1; continue; }
+        uint j = uint(pp.y) * W + uint(pp.x);
+        float t = f[3 * n + j], z = f[4 * n + j];
+        if (t > 0.6 || !(z > 0) || z > q.z * 0.97) seen += 1;
+    }
+    out[i] = seen / total;
 }
 
 // Relighting (gs_render's model, made for scans lit from the camera): each

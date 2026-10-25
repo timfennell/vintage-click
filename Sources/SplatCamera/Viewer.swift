@@ -19,6 +19,10 @@ final class Viewer: NSObject, MTKViewDelegate {
     private let queue: MTLCommandQueue
     private let finderPSO: MTLRenderPipelineState
     private let meterPSO: MTLComputePipelineState
+    private let flarePSO: MTLComputePipelineState
+    private let flareVisBuf: MTLBuffer
+    /// How much of each flaring light the camera saw in the last frame (eased).
+    private var flareVis: [Float] = []
     private let wirePSO: MTLRenderPipelineState
     private let meterBuf: MTLBuffer
     private let probePSO: MTLComputePipelineState
@@ -196,6 +200,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         meterPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "meter")!)
         probePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "probe")!)
         probeBuf = device.makeBuffer(length: 16, options: .storageModeShared)!
+        flarePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "flare_probe")!)
+        flareVisBuf = device.makeBuffer(length: 4 * Flare.maxLights, options: .storageModeShared)!
         super.init()
 
         body.metresPerUnit = metresPerUnit
@@ -405,7 +411,29 @@ final class Viewer: NSObject, MTKViewDelegate {
         ce.setComputePipelineState(probePSO)
         ce.setBuffer(probeBuf, offset: 0, index: 2)
         ce.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        // Lens flare: which lights shine into the lens, and how much of each the camera sees.
+        let fj = frame.job
+        let size = SIMD2(Float(width), Float(height))
+        let fAxis: SIMD2<Float> = size / 2 + fj.body.axisOffset(width: width)
+        let sources: [Flare.Source] = fj.fromLight == nil
+            ? Flare.sources(plot: fj.lighting, view: fj.view, position: fj.position, fx: fj.fx, axis: fAxis,
+                            width: width, height: height, fisheye: fj.fisheye, body: fj.body,
+                            fNumber: fj.body.viewingAperture) : []
+        if !sources.isEmpty {
+            var probes = Flare.probes(sources, diag: simd_length(SIMD2(Float(width), Float(height))))
+            var count = UInt32(probes.count)
+            ce.setComputePipelineState(flarePSO)
+            ce.setBytes(&probes, length: probes.count * 16, index: 2)
+            ce.setBuffer(flareVisBuf, offset: 0, index: 3)
+            ce.setBytes(&count, length: 4, index: 4)
+            ce.dispatchThreads(MTLSize(width: probes.count, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: probes.count, height: 1, depth: 1))
+        }
         ce.endEncoding()
+        if flareVis.count != sources.count { flareVis = [Float](repeating: 1, count: sources.count) }
+        let seenNow: [Float] = mirrorUp ? [Float](repeating: 0, count: sources.count) : flareVis
+        var flareRows = Flare.uniforms(sources, visibility: seenNow, lens: fj.body.lens, fNumber: fj.body.viewingAperture,
+                                       filter: fj.body.filter,
+                                       axisUV: fAxis / size, aspect: size.x / size.y)
 
         let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(finderPSO)
@@ -438,6 +466,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         }
         if fadeFrom == nil { enc.setFragmentBuffer(frame.buf, offset: frame.off, index: 4) }
         enc.setFragmentBytes(&fade, length: 4, index: 5)
+        enc.setFragmentBytes(&flareRows, length: flareRows.count * 16, index: 6)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         if !mirrorUp { drawWireframes(enc, frame: frame, optics: &o) }
         enc.endEncoding()
@@ -447,8 +476,15 @@ final class Viewer: NSObject, MTKViewDelegate {
         let V = frame.job.view
         let eye = frame.job.position, axis = SIMD3<Float>(V[8], V[9], V[10])
         let fromCamera = frame.job.fromLight == nil
+        let flareCount = sources.count, visBuf = flareVisBuf
         cb.addCompletedHandler { [weak self] _ in
             loop.release(slot: slot)
+            let v = visBuf.contents().bindMemory(to: Float.self, capacity: Flare.maxLights)
+            let seen = (0..<flareCount).map { v[$0] }
+            DispatchQueue.main.async {
+                guard let self, self.flareVis.count == seen.count else { return }
+                for k in seen.indices { self.flareVis[k] += (seen[k] - self.flareVis[k]) * 0.5 }
+            }
             let lum = Self.centreWeighted(meter)
             let p = probe.contents().bindMemory(to: Float.self, capacity: 2)
             let hit: SIMD3<Float>? = p[0] > 0 && fromCamera ? eye + axis * p[0] : nil
@@ -760,6 +796,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         let p = s.pressed
         if p.contains(.gels) { openGels(); return }
         if p.contains(.modifiers) { openModifiers(); return }
+        if p.contains(.flare), !lighting.lights.isEmpty {
+            let k = pov ?? min(lighting.selected, lighting.lights.count - 1)
+            lighting.lights[k].flare = !lighting.lights[k].flareOn
+            hud?.flash("LENS FLARE FROM LIGHT \(k + 1): \(lighting.lights[k].flareOn ? "ON" : "OFF")")
+        }
         if p.contains(.patternFocus), !lighting.lights.isEmpty {
             let k = pov ?? min(lighting.selected, lighting.lights.count - 1)
             let steps: [Float] = [0, 0.25, 0.5, 1]
@@ -832,6 +873,17 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// A classic setup for scripted runs: a hard Fresnel key high at 45 degrees,
     /// a broad softlight fill from the other side, house lights down.
     func startLighting() { mode = .lighting }
+
+    /// A Fresnel ahead and a little to the side, aimed back at the lens (flare tests).
+    func flareTestLight() {
+        let m = 1 / body.metresPerUnit
+        let pos = camera.position + camera.forward * (7 * m) + camera.right * (1.2 * m) - camera.down * (0.4 * m)
+        // Aimed a little past the lens (VC_FLARE_AIM degrees; 0 straight in).
+        let off = (Float(ProcessInfo.processInfo.environment["VC_FLARE_AIM"] ?? "0") ?? 0) * .pi / 180
+        let at = simd_normalize(camera.position - pos)
+        let aim = simd_normalize(at * cos(off) + camera.right * sin(off))
+        lighting.lights.append(PlacedLight(head: 2, position: pos, aim: aim))
+    }
 
     func demoLights() {
         var subject = camera.position + camera.forward * (body.focusM / body.metresPerUnit)
@@ -1158,6 +1210,15 @@ final class Viewer: NSObject, MTKViewDelegate {
             modTitle = "Modifier on light \(k + 1): " + name
             modDetail = "barn doors, flags, cookies; gobos in an ellipsoidal (M in lighting, K focus)"
         }
+        var flareItems: [MenuOverlay.Item] = []
+        if !lighting.lights.isEmpty {
+            let k = min(lighting.selected, lighting.lights.count - 1)
+            flareItems.append(.init(title: "Lens flare from light \(k + 1): \(lighting.lights[k].flareOn ? "on" : "off")",
+                                    detail: "ghosts, glare and a starburst when it shines into the lens (P in lighting)") { [weak self] in
+                guard let self else { return }
+                self.lighting.lights[k].flare = !self.lighting.lights[k].flareOn
+                self.reopenMenu() })
+        }
         let skyItems: [MenuOverlay.Item] = [
             .init(title: loop.sky.map { "Sky: \($0.name)" } ?? "Sky: the scan's own",
                   detail: loop.sky == nil ? "choose an equirectangular .hdr to fill where the scan is empty"
@@ -1186,6 +1247,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                   detail: String(format: "now %.3g m per unit: aim at two points, say how far apart they are", body.metresPerUnit)) {
                 [weak self] in self?.startMeasure() },
         ]
+        items += flareItems
         items += skyItems
         items += [
             .init(title: "Viewfinder graphics…", detail: "how the finder draws: focus rendering, distant shells") { [weak self] in
@@ -1519,6 +1581,21 @@ final class Viewer: NSObject, MTKViewDelegate {
         if s != nil && loop.sky == nil { hud?.flash("COULD NOT READ THAT SKY") }
     }
 
+    // MARK: lens flare
+
+    /// The flare as the photo takes it: the lights as the finder last saw
+    /// them (how much of each was visible), through the taking aperture.
+    private func photoFlare(body b: CameraBody, camera c: FlyCamera) -> [SIMD4<Float>] {
+        let fx = b.focalPixels(width: width, height: height)
+        let axis = SIMD2(Float(width), Float(height)) / 2 + b.axisOffset(width: width)
+        let s = Flare.sources(plot: lighting, view: c.viewMatrix, position: c.position, fx: fx, axis: axis,
+                              width: width, height: height, fisheye: b.lens.isFisheye, body: b, fNumber: b.takingAperture)
+        guard !s.isEmpty else { return [] }
+        return Flare.uniforms(s, visibility: flareVis.count == s.count ? flareVis : [Float](repeating: 1, count: s.count),
+                              lens: b.lens, fNumber: b.takingAperture, filter: b.filter,
+                              axisUV: axis / SIMD2(Float(width), Float(height)), aspect: Float(width) / Float(height))
+    }
+
     // MARK: the enlarger
 
     /// Queues proofs for full prints, from their records (only this scan's:
@@ -1554,6 +1631,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                               accum: accum, size: (r.width, r.height), wantsNegative: r.negative)
         job.outputPath = u
         job.filterThreshold = r.filterThreshold
+        job.flare = r.flare ?? []
         if r.sky != loop.sky { loop.setSky(r.sky) }
         job.record = r
         loop.expose(job)
@@ -1581,12 +1659,14 @@ final class Viewer: NSObject, MTKViewDelegate {
                               accum: accum, size: size, wantsNegative: keepNegative && !proof)
         job.outputPath = scriptedPath
         job.filterThreshold = filterThreshold
+        job.flare = photoFlare(body: body, camera: carriedCamera)
         if proof, let scene = scenePath {
             job.isProof = true
             job.record = ShotRecord(scene: scene, camera: carriedCamera, body: body, lighting: lighting,
                                     frameNumber: body.framesShot + 1, cells: cellsPerExposure,
                                     width: width * photoScale, height: height * photoScale,
-                                    negative: keepNegative, filterThreshold: filterThreshold, sky: loop.sky)
+                                    negative: keepNegative, filterThreshold: filterThreshold, sky: loop.sky,
+                                    flare: job.flare)
         }
         loop.expose(job)
         Sounds.shared.fire(shutterSeconds: body.shutter.seconds)

@@ -42,6 +42,8 @@ final class ExposureJob {
     var negative: Data?
     let started = CACurrentMediaTime()
     var outputPath: URL?
+    /// Lens flare rows (Flare.uniforms), taken at the shutter.
+    var flare: [SIMD4<Float>] = []
     /// A proof (small, few lens samples): `record` is how to enlarge it.
     var isProof = false
     var record: ShotRecord?
@@ -886,6 +888,8 @@ final class RenderLoop {
             ce.setBuffer(out, offset: 0, index: 4)
             ce.setBuffer(streaks, offset: 0, index: 5)
             ce.setBuffer(fxBuf, offset: 0, index: 6)
+            var fl = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
+            ce.setBytes(&fl, length: fl.count * 16, index: 7)
             ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             if e.wantsNegative, let neg = device.makeBuffer(length: w * h * 6, options: .storageModeShared) {
                 negBuf = neg
@@ -896,6 +900,8 @@ final class RenderLoop {
                 ce.setBuffer(neg, offset: 0, index: 4)
                 ce.setBuffer(streaks, offset: 0, index: 5)
                 ce.setBuffer(fxBuf, offset: 0, index: 6)
+                var fl = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
+                ce.setBytes(&fl, length: fl.count * 16, index: 7)
                 ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             }
         }

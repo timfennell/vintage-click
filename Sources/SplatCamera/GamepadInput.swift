@@ -44,7 +44,7 @@ final class GamepadInput {
     /// The view the mouse is taken by (mouse look) and reported over.
     weak var view: NSView?
     enum Button: Hashable {
-        case a, b, x, y, left, right, up, down, l1, r1, menu, view, l3, r3, cycleUp, removeLight, slower, faster
+        case a, b, x, y, left, right, up, down, l1, r1, menu, view, l3, r3, cycleUp, removeLight, slower, faster, flare
         case filters, gels, modifiers, patternFocus
     }
 
@@ -219,7 +219,7 @@ final class GamepadInput {
             case .camera:
                 keys += [(.keyR, .y), (.keyB, .x), (.keyV, .filters), (.escape, .menu), (.comma, .slower), (.period, .faster)]
             case .lighting:
-                keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .removeLight), (.keyG, .l3), (.keyC, .gels), (.keyM, .modifiers), (.keyK, .patternFocus), (.escape, .menu),
+                keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .removeLight), (.keyG, .l3), (.keyC, .gels), (.keyM, .modifiers), (.keyK, .patternFocus), (.keyP, .flare), (.escape, .menu),
                          (.comma, .slower), (.period, .faster)]
             case .sheet:
                 keys += [(.leftArrow, .left), (.rightArrow, .right), (.upArrow, .up), (.downArrow, .down),

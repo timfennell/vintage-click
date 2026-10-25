@@ -231,6 +231,11 @@ func configureSession() {
     // Focus first: the demo lights aim where the camera is focused.
     if let m = focusChoice { viewer.body.focusM = m }
     if demoLights { viewer.demoLights() }
+    // Tests: --flare-light puts a light ahead aimed at the lens; --flare turns flare on for all.
+    if args.contains("--flare-light") { viewer.flareTestLight() }
+    if args.contains("--flare") || args.contains("--flare-light") {
+        for i in viewer.lighting.lights.indices { viewer.lighting.lights[i].flare = true }
+    }
     if noShadows { viewer.loop.shadowsOn = false }
     // Places are scanned in their own light; objects on the rig are lit from the camera.
     viewer.loop.daylightScan = inside || args.contains("--daylight-scan")

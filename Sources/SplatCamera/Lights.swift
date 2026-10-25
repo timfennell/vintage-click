@@ -101,6 +101,9 @@ struct PlacedLight: Codable {
     var modifier = 0                // index into lightModifiers (0: nothing)
     /// A gobo's focus (0 sharp ... 1 soft), or how far a cookie stands from the head (0 near: soft ... 1 far: crisper).
     var patternFocus: Float = 0.25
+    /// Lens flare from this light (ghosts, glare, starburst) when it shines into the lens.
+    var flare: Bool? = nil
+    var flareOn: Bool { flare ?? false }
 
     var kit: LightHead { lightKit[head] }
     func fits(_ m: LightModifier) -> Bool { m.fits(kit) }

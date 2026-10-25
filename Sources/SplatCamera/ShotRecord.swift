@@ -17,6 +17,7 @@ struct ShotRecord: Codable {
     var negative: Bool
     var filterThreshold: Float
     var sky: SkySetting? = nil
+    var flare: [SIMD4<Float>]? = nil
 
     static func url(for print: URL) -> URL {
         print.deletingPathExtension().appendingPathExtension("shot.json")
