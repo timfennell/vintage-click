@@ -438,6 +438,8 @@ final class ViewfinderHUD: NSView {
         glow.shadowBlurRadius = 0.5 * u
         glow.shadowOffset = .zero
         NSGraphicsContext.saveGraphicsState()
+        // Projected onto the screen: only inside the image's rounded window.
+        NSBezierPath(roundedRect: img, xRadius: img.height * 0.025, yRadius: img.height * 0.025).addClip()
         glow.set()
         for (r, alpha, dash) in [(beam.hot, 0.45, false), (beam.edge, 0.75, false), (beam.falloff, 0.5, true)] {
             let rad = r * img.width

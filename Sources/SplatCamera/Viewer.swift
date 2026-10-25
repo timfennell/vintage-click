@@ -796,7 +796,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let p = s.pressed
         if p.contains(.gels) { openGels(); return }
         if p.contains(.modifiers) { openModifiers(); return }
-        if p.contains(.flare), !lighting.lights.isEmpty {
+        if p.contains(.flare) || p.contains(.view), !lighting.lights.isEmpty {
             let k = pov ?? min(lighting.selected, lighting.lights.count - 1)
             lighting.lights[k].flare = !lighting.lights[k].flareOn
             hud?.flash("LENS FLARE FROM LIGHT \(k + 1): \(lighting.lights[k].flareOn ? "ON" : "OFF")")
@@ -882,7 +882,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         let off = (Float(ProcessInfo.processInfo.environment["VC_FLARE_AIM"] ?? "0") ?? 0) * .pi / 180
         let at = simd_normalize(camera.position - pos)
         let aim = simd_normalize(at * cos(off) + camera.right * sin(off))
-        lighting.lights.append(PlacedLight(head: 2, position: pos, aim: aim))
+        let head = Int(ProcessInfo.processInfo.environment["VC_FLARE_HEAD"] ?? "2") ?? 2
+        lighting.lights.append(PlacedLight(head: head, position: pos, aim: aim))
     }
 
     func demoLights() {
@@ -1762,15 +1763,16 @@ final class Viewer: NSObject, MTKViewDelegate {
                 let mark = k == pov ? "◉" : " "
                 return String(format: "%@ %d %@  beam %.0f°  %@%@", mark, k + 1, l.kit.name, l.beamAngle,
                               l.dimmerStops == 0 ? "full" : String(format: "%+.1f stop", l.dimmerStops),
-                              (l.gel == 0 ? "" : "  · " + gels[l.gel].name) + (l.modifier == 0 ? "" : "  · " + lightModifiers[l.modifier].name))
+                              (l.gel == 0 ? "" : "  · " + gels[l.gel].name) + (l.modifier == 0 ? "" : "  · " + lightModifiers[l.modifier].name)
+                                + (l.flareOn ? "  · flare" : ""))
             }
             lines.append(String(format: "House lights: %@ (%.2f%%)   ·   next light: %@", lighting.ambientName,
                                 lighting.ambient * 100, lightKit[lighting.kitChoice].name))
             if pov != nil {
-                lines.append("Flying the light: WASD / sticks move it, mouse / right stick aims it · wheel or L2/R2 flood/spot · - = or ▲▼ dimmer · T / Y head")
+                lines.append("Flying the light: WASD / sticks move it, mouse / right stick aims it · wheel or L2/R2 flood/spot · - = or ▲▼ dimmer · T / Y head · P / Select lens flare")
                 lines.append("Backspace (or the menu) removes it · 0 or B back to the camera · 1-9 or ◀▶ another light · F / X add one · G / L3 house lights · L / R3 done")
             } else {
-                lines.append("1-9 or ◀▶ fly a light from its own view · F / X add one at your view · G / L3 house lights")
+                lines.append("1-9 or ◀▶ fly a light from its own view · F / X add one at your view · G / L3 house lights · P / Select lens flare")
                 lines.append("L / R3 back to the camera controls")
             }
             i.lines = lines

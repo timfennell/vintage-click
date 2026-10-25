@@ -390,7 +390,8 @@ float3 surround(float2 pos, float2 pe, float edge, device const float* f, consta
 // before exposure; `uv` 0...1 over the frame, `size` its pixels.
 //   F[0] = (lights, blades, blade rotation, openness)  F[1] = (single-coated, seed, obstruction, squeeze)
 //   F[2] = (axis uv, dispersion, field softness)  F[3] = the filter: (glass on the lens, star points, star strength, spectral)
-//   then per light (uv, face radius / diagonal, visible), (rgb, -)
+//   then per light (uv, face radius / diagonal, visible), (flare rgb, own blur / diagonal),
+//   (face half-extent vectors px), (face brightness rgb, 1 flare on + 2 round face)
 float flare_hash(float s, float k) { return fract(sin(s * 12.9898 + k * 78.233) * 43758.5453); }
 // Inside the aperture's shape (radius 1): 1 inside, soft edge; blades, or round.
 float aperture_mask(float2 d, constant float4* F, float soft) {
@@ -423,12 +424,37 @@ float3 lens_flare(float2 uv, float2 size, constant float4* F) {
     float2 p = uv * size;
     float3 add = 0;
     for (int li = 0; li < nl; li++) {
-        float4 a = F[4 + 2 * li], b = F[5 + 2 * li];
+        float4 a = F[4 + 4 * li], b = F[5 + 4 * li], fa = F[6 + 4 * li], fb = F[7 + 4 * li];
         float vis = a.w;
         if (vis <= 0.001) continue;
         float3 I = b.rgb * vis;                      // the frame's brightness were all its light spread evenly
         float2 s = a.xy * size;
         float2 v = s - axis;
+        // The lamp's own lit face, every light: its lens or panel at its true
+        // brightness, seen at its angle, spread by the light's own defocus; and
+        // the bloom the lens scatters round anything that bright.
+        if (any(fb.rgb > 0)) {
+            float2 A = fa.xy, B = fa.zw;
+            float det = A.x * B.y - A.y * B.x;
+            float rf = sqrt(max(abs(det), 0.25));                // its size, px
+            float blurPx = b.w * diag;
+            float grow = (rf + blurPx) / rf;
+            float2 d = p - s;
+            float2 ab = abs(det) > 1e-6 ? float2(d.x * B.y - d.y * B.x, A.x * d.y - A.y * d.x) / det : d / rf;
+            bool round = fmod(fb.w, 4.0) >= 2.0;
+            float rho = (round ? length(ab) : max(abs(ab.x), abs(ab.y))) / grow;
+            float soft = (0.7 + blurPx) / (rf * grow) + 0.02;
+            float face = 1 - smoothstep(1 - soft, 1 + soft, rho);
+            add += fb.rgb * vis * face / (grow * grow);
+            // Bloom: a few per cent of its light scattered close round it.
+            float flux = dot(fb.rgb, float3(0.2126, 0.7152, 0.0722)) * vis * M_PI_F * rf * rf;
+            float r0 = 4.0 + 0.6 * rf + blurPx;
+            float dd = length(d);
+            float bloom = (single ? 0.05 : 0.025) / (M_PI_F * r0 * r0) / pow(1 + (dd / r0) * (dd / r0), 2.0);
+            add += fb.rgb / max(dot(fb.rgb, float3(0.2126, 0.7152, 0.0722)), 1e-6) * flux * bloom;
+        }
+        // The flare's parts only for a light with flare on.
+        if (fmod(fb.w, 2.0) < 1.0) continue;
         // Veiling glare: a broad haze, strongest near the light.
         float rg = diag * 0.35;
         float dg = length(p - s);
