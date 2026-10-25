@@ -51,7 +51,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var meterLum: Float = 0.18
     private var lastFinderKey = ""
     /// Which page of the game menu is showing.
-    private enum MenuPage { case main, finder }
+    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder }
     private var menuPage = MenuPage.main
     /// A refined frame eases in over the shells frame it replaces: that frame, held, and when the fade began.
     private var fadeFrom: (buf: MTLBuffer, off: Int, slot: Int)?
@@ -1153,170 +1153,188 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.showingFilm = false
         menu.showingLenses = false
         menu.showingList = false
-        if menuPage == .finder {
-            // The viewfinder's own drawing, on a page of its own.
-            menu.items = [
-                .init(title: "Back to the menu", detail: "") { [weak self] in
-                    self?.menuPage = .main
-                    self?.openMenu() },
-            .init(title: "Finder blur: \(UserDefaults.standard.bool(forKey: "classicBlur") ? "classic" : "smooth")",
-                  detail: "smooth: rendered sharp, blurred like a print; classic: each splat blurred by the renderer") { [weak self] in
-                UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "classicBlur"), forKey: "classicBlur")
-                self?.reopenMenu() },
-            .init(title: "Finder focus (classic): \(UserDefaults.standard.bool(forKey: "fastFocus") ? "fast" : "smooth")",
-                  detail: "fast draws strong blur from fewer splats: quicker far out of focus, a little coarser") { [weak self] in
-                UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "fastFocus"), forKey: "fastFocus")
-                self?.reopenMenu() },
-            .init(title: "Distant shells: \(distantShells ? "on" : "off")",
-                  detail: "in a place, far splats drawn from a baked panorama: a faster finder (prints always draw everything)") { [weak self] in
-                guard let self else { return }
-                self.distantShells.toggle()
-                self.reopenMenu() },
-            ]
-            menu.selected = 0
-            menu.isHidden = false
-            return
-        }
-        var items: [MenuOverlay.Item] = [
-            .init(title: "Back to the \(mode == .sheet ? "light table" : mode == .lighting ? "lights" : "camera")",
-                  detail: "carry on where you were") { [weak self] in self?.closeMenu() },
-            .init(title: "Camera", detail: "frame, focus and expose") { [weak self] in
-                self?.closeMenu(); self?.switchTo(.camera) },
-            .init(title: "Lighting", detail: "place and fly the lights, set the house lights") { [weak self] in
-                self?.closeMenu(); self?.switchTo(.lighting) },
-            .init(title: "Light table", detail: "your rolls, through a loupe") { [weak self] in
-                self?.closeMenu(); self?.switchTo(.sheet) },
-        ]
-        if mode == .lighting, let i = pov {
-            items.append(.init(title: "Remove light \(i + 1)", detail: "the one you are flying") { [weak self] in
-                guard let self else { return }
-                self.lighting.lights.remove(at: i)
-                self.lighting.selected = max(0, i - 1)
-                self.pov = nil
-                self.closeMenu()
-            })
-        }
-        var gelTitle = "Gels…", gelDetail = "add a light first (lighting mode)"
-        if !lighting.lights.isEmpty {
-            let k = min(lighting.selected, lighting.lights.count - 1)
-            let name: String = gels[lighting.lights[k].gel].name
-            gelTitle = "Gel on light \(k + 1): " + name
-            gelDetail = "colour correction and effect colours for the light (C in lighting)"
-        }
-        let filterTitle: String = "Lens filter: " + body.filter.name
-        var modTitle = "Light modifiers…", modDetail = "add a light first (lighting mode)"
-        if !lighting.lights.isEmpty {
-            let k = min(lighting.selected, lighting.lights.count - 1)
-            let name: String = lightModifiers[lighting.lights[k].modifier].name
-            modTitle = "Modifier on light \(k + 1): " + name
-            modDetail = "barn doors, flags, cookies; gobos in an ellipsoidal (M in lighting, K focus)"
-        }
-        var flareItems: [MenuOverlay.Item] = []
-        if !lighting.lights.isEmpty {
-            let k = min(lighting.selected, lighting.lights.count - 1)
-            flareItems.append(.init(title: "Lens flare from light \(k + 1): \(lighting.lights[k].flareOn ? "on" : "off")",
-                                    detail: "ghosts, glare and a starburst when it shines into the lens (P in lighting)") { [weak self] in
-                guard let self else { return }
-                self.lighting.lights[k].flare = !self.lighting.lights[k].flareOn
-                self.reopenMenu() })
-        }
-        let skyItems: [MenuOverlay.Item] = [
-            .init(title: loop.sky.map { "Sky: \($0.name)" } ?? "Sky: the scan's own",
-                  detail: loop.sky == nil ? "choose an equirectangular .hdr to fill where the scan is empty"
-                                          : "select to remove it") { [weak self] in
-                guard let self else { return }
-                self.setSky(self.loop.sky == nil ? SkySetting.choose().map { SkySetting(path: $0) } : nil)
-                self.reopenMenu() },
-            .init(title: String(format: "Sky turn: %.0f°  ·  brightness %+.0f stops", loop.sky?.yawDegrees ?? 0, loop.sky?.stops ?? 0),
-                  detail: "select to turn the sky 30° (the brightness: Shift-select, or in steps with the sky turn at 0°)") { [weak self] in
-                guard let self, var s = self.loop.sky else { return }
-                if NSEvent.modifierFlags.contains(.shift) { s.stops = s.stops >= 2 ? -2 : s.stops + 1 }
-                else { s.yawDegrees = (s.yawDegrees + 30).truncatingRemainder(dividingBy: 360) }
-                self.setSky(s)
-                self.reopenMenu() },
-        ]
-        items += [
-            .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
-                self?.openLenses() },
-            .init(title: filterTitle, detail: "in the camera bag's Filters shelf: ND, colour, star, soft and mist (V)") { [weak self] in
-                self?.openFilters() },
-            .init(title: gelTitle, detail: gelDetail) { [weak self] in self?.openGels() },
-            .init(title: modTitle, detail: modDetail) { [weak self] in self?.openModifiers() },
-            .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") { [weak self] in
-                self?.openFilm() },
-            .init(title: "Set the scale (measure)…",
-                  detail: String(format: "now %.3g m per unit: aim at two points, say how far apart they are", body.metresPerUnit)) {
-                [weak self] in self?.startMeasure() },
-        ]
-        items += flareItems
-        items += skyItems
-        items += [
-            .init(title: "Viewfinder graphics…", detail: "how the finder draws: focus rendering, distant shells") { [weak self] in
-                self?.menuPage = .finder
-                self?.openMenu()
-                self?.menu?.selected = 1 },
-            .init(title: "Shutter makes: \(proofsAtShutter ? "proofs (enlarge at the light table)" : "full prints")",
-                  detail: "proofs keep the finder fast; at the light table Y / R sends the marked frames (or all) to the enlarger") { [weak self] in
-                guard let self else { return }
-                self.proofsAtShutter.toggle()
-                self.reopenMenu() },
-            .init(title: "Photo size: \(width * photoScale) × \(height * photoScale)",
-                  detail: "\(photoScale)× the finder · bigger takes longer to develop (select to change)") { [weak self] in
-                guard let self else { return }
-                self.photoScale = self.photoScale % 4 + 1 == 1 ? 2 : self.photoScale % 4 + 1
-                self.reopenMenu() },
-            .init(title: "Exposure quality: \(cellsPerExposure) lens samples",
-                  detail: "more: truer bokeh, smoother blur, slower; 64+ adds coloured bokeh fringes (select to change)") { [weak self] in
-                guard let self else { return }
-                self.cellsPerExposure = self.cellsPerExposure >= 128 ? 32 : self.cellsPerExposure * 2
-                self.reopenMenu() },
-            .init(title: "Digital negative (DNG): \(keepNegative ? "on" : "off")",
-                  detail: "a high-dynamic-range linear DNG beside each print, for a raw developer") { [weak self] in
-                guard let self else { return }
-                self.keepNegative.toggle()
-                self.reopenMenu() },
-            .init(title: "Reset the view", detail: "back to where you started") { [weak self] in
-                guard let self else { return }
-                self.camera = self.home
-                self.closeMenu()
-            },
-            .init(title: "Controls", detail: "every button, pad and keyboard") { [weak self] in
-                self?.menu?.showingHelp = true },
-            .init(title: "Scene light: " + (sceneLightChoices.first { $0.1 == body.sceneEV }?.0
-                                            ?? String(format: "EV %.0f", body.sceneEV)),
-                  detail: String(format: "the light on the scene's middle tone (calibrated: the scan's %.2f → mid grey, %+.1f stops) · select to change",
-                                 middleTone, body.calibration)) { [weak self] in
-                guard let self else { return }
-                let i = sceneLightChoices.firstIndex { $0.1 == self.body.sceneEV } ?? -1
-                let next = sceneLightChoices[(i + 1) % sceneLightChoices.count].1
-                self.body.sceneEV = next
-                self.onSceneLight?(next)
-                let keep = self.menu?.selected ?? 0
-                self.openMenu()
-                self.menu?.selected = keep
-            },
-            .init(title: sceneIsPlace ? "Treat this scan as an object" : "Treat this scan as a place",
-                  detail: sceneIsPlace ? "now: a place to stand in, about 30 m across — wrong size? switch"
-                                       : "now: an object about 60 cm across — wrong size? switch") { [weak self] in
-                self?.onSwitchKind?() },
-            .init(title: "Open another scene…", detail: "a .ply scan") { [weak self] in self?.appActions?.openScene() },
-            .init(title: "Where rolls are kept…", detail: ContactSheetView.root.path) { [weak self] in
-                self?.appActions?.chooseRolls()
-                self?.openMenu()
-            },
-            .init(title: "Camera sounds: " + (Sounds.shared.enabled ? "on" : "off"),
-                  detail: "shutter, film advance, lens and dial: a real Nikon (select to turn \(Sounds.shared.enabled ? "off" : "on"))") { [weak self] in
-                guard let self else { return }
-                Sounds.shared.enabled.toggle()
-                let keep = self.menu?.selected ?? 0
-                self.openMenu()
-                self.menu?.selected = keep
-            },
-            .init(title: "Quit", detail: "") { [weak self] in self?.appActions?.quit() },
-        ]
-        menu.items = items
+        menu.items = menuItems(menuPage)
         menu.selected = 0
         menu.isHidden = false
+    }
+
+    /// Opens a page of the menu (on its first item after Back).
+    private func go(_ page: MenuPage) {
+        menuPage = page
+        openMenu()
+        if page != .main { menu?.selected = 1 }
+    }
+
+    /// The game menu, page by page: the modes and a few headings at the top,
+    /// the settings under them.
+    private func menuItems(_ page: MenuPage) -> [MenuOverlay.Item] {
+        typealias Item = MenuOverlay.Item
+        func back(to parent: MenuPage, _ name: String = "Back to the menu") -> Item {
+            .init(title: name, detail: "") { [weak self] in self?.go(parent) }
+        }
+        let k = lighting.lights.isEmpty ? nil : min(lighting.selected, lighting.lights.count - 1)
+        switch page {
+        case .main:
+            return [
+                .init(title: "Back to the \(mode == .sheet ? "light table" : mode == .lighting ? "lights" : "camera")",
+                      detail: "carry on where you were") { [weak self] in self?.closeMenu() },
+                .init(title: "Camera", detail: "frame, focus and expose") { [weak self] in
+                    self?.closeMenu(); self?.switchTo(.camera) },
+                .init(title: "Lighting", detail: "place and fly the lights, set the house lights") { [weak self] in
+                    self?.closeMenu(); self?.switchTo(.lighting) },
+                .init(title: "Light table", detail: "your rolls, through a loupe") { [weak self] in
+                    self?.closeMenu(); self?.switchTo(.sheet) },
+                .init(title: "Camera bag…", detail: "lens, filter and film: \(body.lens.name) · \(body.rollName)") { [weak self] in
+                    self?.go(.bag) },
+                .init(title: "Lights…", detail: k.map { "light \($0 + 1): gel, modifier, lens flare" } ?? "add a light first (lighting mode)") {
+                    [weak self] in self?.go(.lights) },
+                .init(title: "Scene…", detail: "its light, sky and size; reset the view; open another scan") { [weak self] in
+                    self?.go(.scene) },
+                .init(title: "Photos…", detail: "proofs or prints, size, quality, negatives, where rolls are kept") { [weak self] in
+                    self?.go(.photos) },
+                .init(title: "Settings…", detail: "viewfinder graphics, camera sounds, controls") { [weak self] in
+                    self?.go(.settings) },
+                .init(title: "Quit", detail: "") { [weak self] in self?.appActions?.quit() },
+            ]
+        case .bag:
+            return [
+                back(to: .main),
+                .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
+                    self?.openLenses() },
+                .init(title: "Lens filter: " + body.filter.name, detail: "ND, colour, star, soft and mist (V)") { [weak self] in
+                    self?.openFilters() },
+                .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") {
+                    [weak self] in self?.openFilm() },
+            ]
+        case .lights:
+            var items: [Item] = [back(to: .main)]
+            guard let k else {
+                items.append(.init(title: "No lights yet", detail: "add one in lighting mode (F / X)") { [weak self] in
+                    self?.closeMenu(); self?.switchTo(.lighting) })
+                return items
+            }
+            let l = lighting.lights[k]
+            items += [
+                .init(title: "Gel on light \(k + 1): " + gels[l.gel].name,
+                      detail: "colour correction and effect colours for the light (C in lighting)") { [weak self] in self?.openGels() },
+                .init(title: "Modifier on light \(k + 1): " + lightModifiers[l.modifier].name,
+                      detail: "barn doors, flags, cookies; gobos in an ellipsoidal (M in lighting, K focus)") { [weak self] in
+                    self?.openModifiers() },
+                .init(title: "Lens flare from light \(k + 1): \(l.flareOn ? "on" : "off")",
+                      detail: "ghosts, glare and a starburst when it shines into the lens (P / Select in lighting)") { [weak self] in
+                    guard let self else { return }
+                    self.lighting.lights[k].flare = !self.lighting.lights[k].flareOn
+                    self.reopenMenu() },
+            ]
+            if mode == .lighting, let i = pov {
+                items.append(.init(title: "Remove light \(i + 1)", detail: "the one you are flying") { [weak self] in
+                    guard let self else { return }
+                    self.lighting.lights.remove(at: i)
+                    self.lighting.selected = max(0, i - 1)
+                    self.pov = nil
+                    self.closeMenu()
+                })
+            }
+            return items
+        case .scene:
+            return [
+                back(to: .main),
+                .init(title: "Scene light: " + (sceneLightChoices.first { $0.1 == body.sceneEV }?.0
+                                                ?? String(format: "EV %.0f", body.sceneEV)),
+                      detail: String(format: "the light on the scene's middle tone (calibrated: the scan's %.2f → mid grey, %+.1f stops) · select to change",
+                                     middleTone, body.calibration)) { [weak self] in
+                    guard let self else { return }
+                    let i = sceneLightChoices.firstIndex { $0.1 == self.body.sceneEV } ?? -1
+                    let next = sceneLightChoices[(i + 1) % sceneLightChoices.count].1
+                    self.body.sceneEV = next
+                    self.onSceneLight?(next)
+                    self.reopenMenu() },
+                .init(title: loop.sky.map { "Sky: \($0.name)" } ?? "Sky: the scan's own",
+                      detail: loop.sky == nil ? "choose an equirectangular .hdr to fill where the scan is empty"
+                                              : "select to remove it") { [weak self] in
+                    guard let self else { return }
+                    self.setSky(self.loop.sky == nil ? SkySetting.choose().map { SkySetting(path: $0) } : nil)
+                    self.reopenMenu() },
+                .init(title: String(format: "Sky turn: %.0f°  ·  brightness %+.0f stops", loop.sky?.yawDegrees ?? 0, loop.sky?.stops ?? 0),
+                      detail: "select to turn the sky 30° (Shift-select: brightness)") { [weak self] in
+                    guard let self, var s = self.loop.sky else { return }
+                    if NSEvent.modifierFlags.contains(.shift) { s.stops = s.stops >= 2 ? -2 : s.stops + 1 }
+                    else { s.yawDegrees = (s.yawDegrees + 30).truncatingRemainder(dividingBy: 360) }
+                    self.setSky(s)
+                    self.reopenMenu() },
+                .init(title: sceneIsPlace ? "Treat this scan as an object" : "Treat this scan as a place",
+                      detail: sceneIsPlace ? "now: a place to stand in, about 30 m across — wrong size? switch"
+                                           : "now: an object about 60 cm across — wrong size? switch") { [weak self] in
+                    self?.onSwitchKind?() },
+                .init(title: "Set the scale (measure)…",
+                      detail: String(format: "now %.3g m per unit: aim at two points, say how far apart they are", body.metresPerUnit)) {
+                    [weak self] in self?.startMeasure() },
+                .init(title: "Reset the view", detail: "back to where you started") { [weak self] in
+                    guard let self else { return }
+                    self.camera = self.home
+                    self.closeMenu() },
+                .init(title: "Open another scene…", detail: "a .ply scan") { [weak self] in self?.appActions?.openScene() },
+            ]
+        case .photos:
+            return [
+                back(to: .main),
+                .init(title: "Shutter makes: \(proofsAtShutter ? "proofs (enlarge at the light table)" : "full prints")",
+                      detail: "proofs keep the finder fast; at the light table Y / P sends the marked frames (or all) to the enlarger") {
+                    [weak self] in
+                    guard let self else { return }
+                    self.proofsAtShutter.toggle()
+                    self.reopenMenu() },
+                .init(title: "Photo size: \(width * photoScale) × \(height * photoScale)",
+                      detail: "\(photoScale)× the finder · bigger takes longer to develop (select to change)") { [weak self] in
+                    guard let self else { return }
+                    self.photoScale = self.photoScale % 4 + 1 == 1 ? 2 : self.photoScale % 4 + 1
+                    self.reopenMenu() },
+                .init(title: "Exposure quality: \(cellsPerExposure) lens samples",
+                      detail: "more: truer bokeh, smoother blur, slower; 64+ adds coloured bokeh fringes (select to change)") { [weak self] in
+                    guard let self else { return }
+                    self.cellsPerExposure = self.cellsPerExposure >= 128 ? 32 : self.cellsPerExposure * 2
+                    self.reopenMenu() },
+                .init(title: "Digital negative (DNG): \(keepNegative ? "on" : "off")",
+                      detail: "a high-dynamic-range linear DNG beside each print, for a raw developer") { [weak self] in
+                    guard let self else { return }
+                    self.keepNegative.toggle()
+                    self.reopenMenu() },
+                .init(title: "Where rolls are kept…", detail: ContactSheetView.root.path) { [weak self] in
+                    self?.appActions?.chooseRolls()
+                    self?.reopenMenu() },
+            ]
+        case .settings:
+            return [
+                back(to: .main),
+                .init(title: "Viewfinder graphics…", detail: "how the finder draws: blur, distant shells") { [weak self] in
+                    self?.go(.finder) },
+                .init(title: "Camera sounds: " + (Sounds.shared.enabled ? "on" : "off"),
+                      detail: "shutter, film advance, lens and dial: a real Nikon (select to turn \(Sounds.shared.enabled ? "off" : "on"))") {
+                    [weak self] in
+                    Sounds.shared.enabled.toggle()
+                    self?.reopenMenu() },
+                .init(title: "Controls", detail: "every button, pad and keyboard") { [weak self] in
+                    self?.menu?.showingHelp = true },
+            ]
+        case .finder:
+            return [
+                back(to: .settings, "Back to settings"),
+                .init(title: "Finder blur: \(UserDefaults.standard.bool(forKey: "classicBlur") ? "classic" : "smooth")",
+                      detail: "smooth: rendered sharp, blurred like a print; classic: each splat blurred by the renderer") { [weak self] in
+                    UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "classicBlur"), forKey: "classicBlur")
+                    self?.reopenMenu() },
+                .init(title: "Finder focus (classic): \(UserDefaults.standard.bool(forKey: "fastFocus") ? "fast" : "smooth")",
+                      detail: "fast draws strong blur from fewer splats: quicker far out of focus, a little coarser") { [weak self] in
+                    UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "fastFocus"), forKey: "fastFocus")
+                    self?.reopenMenu() },
+                .init(title: "Distant shells: \(distantShells ? "on" : "off")",
+                      detail: "in a place, far splats drawn from a baked panorama: a faster finder (prints always draw everything)") {
+                    [weak self] in
+                    guard let self else { return }
+                    self.distantShells.toggle()
+                    self.reopenMenu() },
+            ]
+        }
     }
 
     /// The camera bag: collections and their lenses (the pad's left button, B, or the menu).
@@ -1526,7 +1544,15 @@ final class Viewer: NSObject, MTKViewDelegate {
         if p.contains(.up) { menu.move(-1) }
         if p.contains(.down) { menu.move(1) }
         if p.contains(.a) { menu.choose() }
-        if p.contains(.b) || p.contains(.menu) { closeMenu() }
+        // B / Escape go back up a level; Start (or Menu) closes it from anywhere.
+        if p.contains(.b) {
+            switch menuPage {
+            case .main: closeMenu()
+            case .finder: go(.settings)
+            default: go(.main)
+            }
+        }
+        if p.contains(.menu) && !p.contains(.b) { closeMenu() }
     }
 
     // MARK: contact sheet
