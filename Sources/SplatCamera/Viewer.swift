@@ -1105,8 +1105,8 @@ final class Viewer: NSObject, MTKViewDelegate {
                 .init(title: "Back to the menu", detail: "") { [weak self] in
                     self?.menuPage = .main
                     self?.openMenu() },
-            .init(title: "Finder focus: \(UserDefaults.standard.bool(forKey: "fastFocus") ? "fast (some sparkle)" : "steady")",
-                  detail: "steady: blur drawn from every splat; fast: fewer splats when far out of focus, which shimmer as you focus") { [weak self] in
+            .init(title: "Finder focus: \(UserDefaults.standard.bool(forKey: "fastFocus") ? "fast" : "smooth")",
+                  detail: "fast draws strong blur from fewer splats: quicker far out of focus, a little coarser") { [weak self] in
                 UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "fastFocus"), forKey: "fastFocus")
                 self?.reopenMenu() },
             .init(title: "Distant shells: \(distantShells ? "on" : "off")",
