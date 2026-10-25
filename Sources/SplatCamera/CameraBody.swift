@@ -37,7 +37,7 @@ struct CameraBody: Codable {
     /// coarser. VC_THIN overrides it (0: every splat at its own, faint, opacity).
     static var finderThinning: Float {
         if let v = ProcessInfo.processInfo.environment["VC_THIN"].flatMap(Float.init) { return v }
-        return UserDefaults.standard.bool(forKey: "fastFocus") ? 0.15 : 0.09
+        return UserDefaults.standard.bool(forKey: "fastFocus") ? 0.1 : 0.05
     }
 
     /// The camera itself (its make, model and serial go on every frame).

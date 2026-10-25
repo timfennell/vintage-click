@@ -2831,7 +2831,7 @@ index ef7b72da..9f612088 100644
                      (uint32_t)batch, tile_width, tile_height, macro_log2, &p,
                      sizeof(p));
 diff --git a/src/backend/vulkan/shaders/projection_fwd.slang b/src/backend/vulkan/shaders/projection_fwd.slang
-index 9c30e617..3d198c21 100644
+index 9c30e617..d5acb3a1 100644
 --- a/src/backend/vulkan/shaders/projection_fwd.slang
 +++ b/src/backend/vulkan/shaders/projection_fwd.slang
 @@ -93,8 +93,148 @@ struct ProjectionFwdParams {
@@ -2950,16 +2950,16 @@ index 9c30e617..3d198c21 100644
 +    // fade each in or out over a band of p rather than switching it, so as focus
 +    // moves splats ease away instead of popping. Ramps in with the spread; a
 +    // splat in focus is unchanged.
-+    if (L[1].z > 0 && opac < L[1].z) {
++    if (L[1].z > 0) {
 +        float spread = sqrt(max(det1, 0.0f) / max(det0, 1e-20f));
-+        float target = lerp(opac, L[1].z, smoothstep(1.5f, 4.0f, spread));
++        float target = lerp(opac, max(opac, L[1].z), smoothstep(1.5f, 4.0f, spread));
 +        float p = opac / target;
 +        uint h = gid * 2654435761u;
 +        h = (h ^ (h >> 15)) * 2246822519u;
 +        h ^= h >> 13;
 +        float u = float(h & 0xFFFFFFu) / 16777216.0f;
 +        const float band = 0.25f;
-+        float w = clamp((p - u) / band + 0.5f, 0.0f, 1.0f);
++        float w = p >= 1.0f ? 1.0f : clamp((p - u) / band + 0.5f, 0.0f, 1.0f);
 +        if (w <= 0.0f) return false;
 +        opac = target * w;
 +    }
