@@ -22,6 +22,7 @@ struct FinderJob {
     var shells = false              // distant splats may come from the baked shells
     var refresh = false             // the same view again (a periodic refresh): always in full
     var refined = false             // set on the full frame that replaces a shells frame
+    var smoothBlur = true           // render sharp and blur in image space (else the renderer's own blur)
 }
 
 /// One exposure on its way through the camera: the scene as it was when the
@@ -158,6 +159,57 @@ final class RenderLoop {
     /// again in full, so what you settle on is the lens's own bokeh.
     private var refineWanted = false
     private var storePSO: MTLComputePipelineState!
+
+    // MARK: the finder's blur (image space)
+    private var dofPackPSO: MTLComputePipelineState!, dofTilesPSO: MTLComputePipelineState!, dofBlurPSO: MTLComputePipelineState!
+    private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?
+    /// 48 equal-area points over the unit disc.
+    static let dofSamples: [SIMD4<Float>] = (0..<48).map { j in let v = vogel(j, 48); return SIMD4(v.x, v.y, 0, 0) }
+
+    /// Blurs a sharp finder frame as the lens (rows `lens`) would (dof_* in Shaders.swift).
+    private func encodeDOF(_ cb: MTLCommandBuffer, frame: MTLBuffer, offset: Int, lens: [SIMD4<Float>], fx: Float, cx: Float, cy: Float) {
+        let W = finderSize.w, H = finderSize.h
+        if dofCol == nil {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: W, height: H, mipmapped: true)
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = .private
+            dofCol = device.makeTexture(descriptor: d)
+            d.pixelFormat = .r32Float
+            d.mipmapLevelCount = 1
+            dofDep = device.makeTexture(descriptor: d)
+            dofTiles = device.makeBuffer(length: ((W + 15) / 16) * ((H + 15) / 16) * 4, options: .storageModePrivate)
+        }
+        guard let col = dofCol, let dep = dofDep, let tiles = dofTiles else { return }
+        var D: [SIMD4<Float>] = [SIMD4(Float(W), Float(H), fx, fx * 0.25), SIMD4(cx, cy, metresPerUnit, Float(lens.count)),
+                                 SIMD4(Float(CameraBody.tableSize), Float(col.mipmapLevelCount), 0, 0)] + lens
+        var G = Self.dofSamples
+        let grid = MTLSize(width: W, height: H, depth: 1), tg = MTLSize(width: 16, height: 16, depth: 1)
+        if let e = cb.makeComputeCommandEncoder() {
+            e.setComputePipelineState(dofPackPSO)
+            e.setBuffer(frame, offset: offset, index: 0)
+            e.setBytes(&D, length: D.count * 16, index: 1)
+            e.setTexture(col, index: 0)
+            e.setTexture(dep, index: 1)
+            e.dispatchThreads(grid, threadsPerThreadgroup: tg)
+            e.endEncoding()
+        }
+        if let b = cb.makeBlitCommandEncoder() { b.generateMipmaps(for: col); b.endEncoding() }
+        if let e = cb.makeComputeCommandEncoder() {
+            e.setComputePipelineState(dofTilesPSO)
+            e.setTexture(dep, index: 0)
+            e.setBytes(&D, length: D.count * 16, index: 1)
+            e.setBuffer(tiles, offset: 0, index: 2)
+            e.dispatchThreads(MTLSize(width: (W + 15) / 16, height: (H + 15) / 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            e.setComputePipelineState(dofBlurPSO)
+            e.setBuffer(frame, offset: offset, index: 0)
+            e.setBuffer(tiles, offset: 0, index: 2)
+            e.setBytes(&G, length: G.count * 16, index: 3)
+            e.setTexture(col, index: 0)
+            e.setTexture(dep, index: 1)
+            e.dispatchThreads(grid, threadsPerThreadgroup: tg)
+            e.endEncoding()
+        }
+    }
     private lazy var dummy2D: MTLTexture? = device.makeTexture(descriptor: {
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
         return d }())
@@ -358,6 +410,9 @@ final class RenderLoop {
         accumulatePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "accumulate")!)
         skyPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "background_fill")!)
         storePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shell_store")!)
+        dofPackPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_pack")!)
+        dofTilesPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_tiles")!)
+        dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
@@ -637,13 +692,16 @@ final class RenderLoop {
         cond.unlock()
         guard let slot else { return }
         relight(job.lighting, eye: job.position, body: job.body, quality: .finder)
-        setLens(job.lens)
+        // Smooth: the view rendered sharp, blurred afterwards in image space.
+        let dof = job.smoothBlur && job.lens != nil && !job.fisheye && job.fromLight == nil
+        setLens(dof ? nil : job.lens)
         setCameraModel(job.fisheye)
         let t0 = CACurrentMediaTime()
         // A shifted lens moves the optical axis (never when seeing from a light).
         let axis = job.fromLight == nil ? job.body.axisOffset(width: finderSize.w) : .zero
         // Near splats only, when the distant ones are in the shells.
-        let shells = !full && shellsUsable(job) ? shellView(job) : nil
+        var shells = (!full || dof) && shellsUsable(job) ? shellView(job) : nil
+        if dof { shells?.lens = [] }                   // filled sharp: the blur comes after
         if shells != nil, let c = shellCentre { sr_set_region(c.x, c.y, c.z, shellRadius) }
         let ok = render(finderSlots[slot].index, view: job.view, fx: job.fx,
                         cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y)
@@ -652,8 +710,8 @@ final class RenderLoop {
         setCameraModel(false)
         lastFinderJob = job
         let wantBake = needsBake(job)
-        cond.lock(); bakeWanted = wantBake; refineWanted = shells != nil && !Self.noRefine; cond.unlock()
-        if ok, job.fromLight == nil, skyTex != nil || shells != nil,
+        cond.lock(); bakeWanted = wantBake; refineWanted = shells != nil && !dof && !Self.noRefine; cond.unlock()
+        if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof,
            let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:
             // a smaller copy, by the blur circle's size in the sky's texels.
@@ -661,8 +719,12 @@ final class RenderLoop {
             let texels = f * Float(skyTex?.texture.width ?? 1) / (2 * .pi * job.body.viewingAperture * (s - f))
             encodeBackground(enc, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, w: finderSize.w, h: finderSize.h,
                       view: job.view, fx: job.fx, cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
-                      fisheye: job.fisheye, up: job.lighting.up, level: log2(max(1, texels)), shells: shells)
+                      fisheye: job.fisheye, up: job.lighting.up, level: dof ? 0 : log2(max(1, texels)), shells: shells)
             enc.endEncoding()
+            if dof, let lens = job.lens {
+                encodeDOF(cb, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, lens: lens, fx: job.fx,
+                          cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y)
+            }
             cb.commit()
             cb.waitUntilCompleted()
         }

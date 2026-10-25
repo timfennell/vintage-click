@@ -358,6 +358,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             // Distant splats from baked shells: in a place, up to a short tele
             // (longer lenses magnify the shells' parallax and texels).
             job.shells = distantShells && sceneIsPlace && body.lens.focalMM <= 85
+            job.smoothBlur = !UserDefaults.standard.bool(forKey: "classicBlur")
         }
         loop.metresPerUnit = body.metresPerUnit
         loop.shellRadius = Self.shellMetres.map { $0 / body.metresPerUnit } ?? 4 / body.metresPerUnit
@@ -1105,7 +1106,11 @@ final class Viewer: NSObject, MTKViewDelegate {
                 .init(title: "Back to the menu", detail: "") { [weak self] in
                     self?.menuPage = .main
                     self?.openMenu() },
-            .init(title: "Finder focus: \(UserDefaults.standard.bool(forKey: "fastFocus") ? "fast" : "smooth")",
+            .init(title: "Finder blur: \(UserDefaults.standard.bool(forKey: "classicBlur") ? "classic" : "smooth")",
+                  detail: "smooth: rendered sharp, blurred like a print; classic: each splat blurred by the renderer") { [weak self] in
+                UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "classicBlur"), forKey: "classicBlur")
+                self?.reopenMenu() },
+            .init(title: "Finder focus (classic): \(UserDefaults.standard.bool(forKey: "fastFocus") ? "fast" : "smooth")",
                   detail: "fast draws strong blur from fewer splats: quicker far out of focus, a little coarser") { [weak self] in
                 UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "fastFocus"), forKey: "fastFocus")
                 self?.reopenMenu() },

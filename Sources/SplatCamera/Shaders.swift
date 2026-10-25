@@ -706,7 +706,7 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
         back = acc.rgb + (1 - acc.a) * back;
         // The focusing aids read depth: where the live render found little,
         // the shell's distance along the view axis.
-        if (t > 0.5 && c0.a > 0.5) f[4 * n + i] = dist * dc.z;
+        if (t > 0.5 && c0.a > 0.5) f[4 * n + i] = dist;
     }
     float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
     float3 o3;
@@ -739,8 +739,7 @@ kernel void shell_store(device const float* f [[buffer(0)]], constant float4* B 
         c = mix(c / max(1 - t, 0.03), c, keep);
         a = mix(1.0, 1 - t, keep);
     }
-    float2 q = (float2(p) + 0.5 - B[1].xy) / B[0].z;
-    float dist = (a < 0.03 || !(med > 0) || med > 1e8) ? 1e6 : med * sqrt(1 + dot(q, q));
+    float dist = (a < 0.03 || !(med > 0) || med > 1e8) ? 1e6 : med;   // the renderer's depth runs along the ray
     col.write(float4(c, a), p);
     dep.write(float4(dist), p);
 }
@@ -953,6 +952,130 @@ fragment float4 wire_fragment(LineOut in [[stage_in]], device const float* f [[b
     float profile = exp(-x * x * 3.2) * (1 - smoothstep(0.85, 1.0, x));
     float a = in.a * behind * profile * colour.a * inside;
     return float4(colour.rgb * a, a);
+}
+
+// ---- the finder's blur, in image space --------------------------------------
+//
+// The finder renders sharp; this blurs it as the lens would, like a print
+// (which averages sharp views through the lens): each pixel spreads its light
+// as a Gaussian with the pupil's spread at its place in the field (the pupil
+// table: shift, radial and tangential variance, light), sized by its own
+// defocus (tilt and field curvature included) and capped as the renderer caps
+// it; gathered from smaller copies of the frame so large blurs stay smooth.
+// Light from in front spreads over what is behind; what is behind is limited
+// to the blur of what it is behind, so a sharp subject keeps its edge.
+//   D[0] = (W, H, fx, cap px)  D[1] = (cx, cy, metres per unit, rows in L)
+//   D[2] = (table rows, mip levels, -, -)  D[3..] the lens rows (as sr_set_lens)
+struct DofSpread { float2 sr; float2 shift; float light; };     // (radial, tangential) sigma px, shift px
+DofSpread dof_spread(float2 pc, float zr, constant float4* D) {
+    constant float4* L = D + 3;
+    int nT = int(D[2].x);
+    float2 q = (pc - D[1].xy) / D[0].z;
+    float zc = max(zr / sqrt(1 + dot(q, q)), 1e-4);        // along the axis
+    float k = L[0].y - 1 / zc, a = L[0].z;
+    float2 centre = L[nT + 4].xy;
+    float2 qv = (pc - centre) / L[nT + 4].z;
+    float ql = length(qv);
+    float2 qd = ql > 1e-4 ? qv / ql : float2(1, 0);
+    float tt = clamp(ql / 1.25, 0.0, 1.0) * float(nT - 1);
+    int i0 = min(int(tt), nT - 2);
+    float4 m = mix(L[2 + i0], L[3 + i0], tt - float(i0));
+    float4 tilt = L[nT + 2];
+    float dk = tilt.x * qv.x + tilt.y * qv.y;
+    float kr = k + dk + tilt.z * ql * ql, kt = k + dk + tilt.w * ql * ql;
+    float fx = D[0].z;
+    DofSpread o;
+    o.sr = float2(abs(kr) * sqrt(max(m.y, 0.0)) * a, abs(kt) * sqrt(max(m.z, 0.0)) * a) * fx;
+    float tr = dot(o.sr, o.sr), cap = 2 * D[0].w * D[0].w;
+    if (tr > cap) o.sr *= sqrt(cap / tr);
+    o.sr = max(o.sr, float2(0.5));
+    o.shift = qd * (kr * m.x * a * fx);
+    o.light = m.w;
+    return o;
+}
+
+// The sharp frame into textures (colour premultiplied with coverage; depth),
+// and each 16-pixel tile's largest blur.
+kernel void dof_pack(device const float* f [[buffer(0)]], constant float4* D [[buffer(1)]],
+                     texture2d<float, access::write> col [[texture(0)]], texture2d<float, access::write> dep [[texture(1)]],
+                     uint2 p [[thread_position_in_grid]]) {
+    uint W = uint(D[0].x), H = uint(D[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
+    float t = f[3 * n + i], z = f[4 * n + i];
+    col.write(float4(f[3 * i], f[3 * i + 1], f[3 * i + 2], 1 - t), p);
+    dep.write(float4((t > 0.97 || !(z > 0)) ? 1e6 : z), p);
+}
+kernel void dof_tiles(texture2d<float> dep [[texture(0)]], constant float4* D [[buffer(1)]],
+                      device float* tiles [[buffer(2)]], uint2 tp [[thread_position_in_grid]]) {
+    uint W = uint(D[0].x), H = uint(D[0].y), tw = (W + 15) / 16, th = (H + 15) / 16;
+    if (tp.x >= tw || tp.y >= th) return;
+    float mx = 0;
+    for (uint y = 0; y < 16; y += 2)
+        for (uint x = 0; x < 16; x += 2) {
+            uint2 p = min(tp * 16 + uint2(x, y), uint2(W - 1, H - 1));
+            DofSpread s = dof_spread(float2(p) + 0.5, dep.read(p).r, D);
+            mx = max(mx, max(s.sr.x, s.sr.y) + length(s.shift));
+        }
+    tiles[tp.y * tw + tp.x] = mx;
+}
+kernel void dof_blur(device float* f [[buffer(0)]], constant float4* D [[buffer(1)]],
+                     device const float* tiles [[buffer(2)]], constant float4* G [[buffer(3)]],
+                     texture2d<float> col [[texture(0)]], texture2d<float> dep [[texture(1)]],
+                     uint2 p [[thread_position_in_grid]]) {
+    uint W = uint(D[0].x), H = uint(D[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
+    float2 pc = float2(p) + 0.5;
+    float z0 = dep.read(p).r;
+    DofSpread s0 = dof_spread(pc, z0, D);
+    // How far to look: the largest blur that could reach here (3 x 3 tiles).
+    int tw = int((W + 15) / 16), th = int((H + 15) / 16);
+    int2 tc = int2(p) / 16;
+    float reach = max(s0.sr.x, s0.sr.y);
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            int2 t = clamp(tc + int2(dx, dy), int2(0), int2(tw - 1, th - 1));
+            reach = max(reach, tiles[t.y * tw + t.x]);
+        }
+    if (reach < 0.75) {                                // in focus all round: as rendered, with the pupil's light
+        f[3 * i] *= s0.light; f[3 * i + 1] *= s0.light; f[3 * i + 2] *= s0.light;
+        return;
+    }
+    float R = 2.5 * reach;
+    const int N = 48;
+    float area = M_PI_F * R * R / float(N);
+    float lvl = clamp(0.5 * log2(area), 0.0, D[2].y - 1);
+    constexpr sampler sm(filter::linear, mip_filter::linear, address::clamp_to_edge);
+    float2 size = float2(W, H);
+    float4 acc = 0; float wsum = 0;
+    // Each sample (and the pixel itself) spreads its light as its own Gaussian.
+    for (int j = -1; j < N; j++) {
+        float2 ps; float4 c; float zs; float A;
+        if (j < 0) { ps = pc; c = col.read(p); zs = z0; A = 1; }
+        else {
+            float2 v = G[j].xy * R;
+            ps = pc + v;
+            c = col.sample(sm, ps / size, level(lvl));
+            zs = dep.sample(sm, ps / size, level(0)).r;
+            A = area;
+        }
+        DofSpread s = dof_spread(ps, zs, D);
+        float2 sr = s.sr;
+        if (zs > z0 * 1.02) sr = min(sr, s0.sr);       // behind: no wider than what is in front
+        float2 qv = (ps - D[3 + int(D[2].x) + 4].xy);
+        float ql = length(qv);
+        float2 qd = ql > 1e-4 ? qv / ql : float2(1, 0), qp = float2(-qd.y, qd.x);
+        float2 d = pc - (ps + s.shift);
+        float u = dot(d, qd) / sr.x, w2 = dot(d, qp) / sr.y;
+        float w = exp(-0.5 * (u * u + w2 * w2)) / (2 * M_PI_F * sr.x * sr.y) * A;
+        acc += c * float4(float3(s.light), 1) * w;
+        wsum += w;
+    }
+    if (wsum < 1e-8) return;
+    acc /= wsum;
+    f[3 * i] = acc.r; f[3 * i + 1] = acc.g; f[3 * i + 2] = acc.b;
+    f[3 * n + i] = 1 - acc.a;
 }
 
 // Relighting (gs_render's model, made for scans lit from the camera): each
