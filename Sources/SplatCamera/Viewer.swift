@@ -46,6 +46,9 @@ final class Viewer: NSObject, MTKViewDelegate {
     private lazy var input = GamepadInput()   // made on the main thread, at the first frame
     private var meterLum: Float = 0.18
     private var lastFinderKey = ""
+    /// Which page of the game menu is showing.
+    private enum MenuPage { case main, finder }
+    private var menuPage = MenuPage.main
     /// A refined frame eases in over the shells frame it replaces: that frame, held, and when the fade began.
     private var fadeFrom: (buf: MTLBuffer, off: Int, slot: Int)?
     private var fadeStart = 0.0
@@ -1096,6 +1099,26 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.showingFilm = false
         menu.showingLenses = false
         menu.showingList = false
+        if menuPage == .finder {
+            // The viewfinder's own drawing, on a page of its own.
+            menu.items = [
+                .init(title: "Back to the menu", detail: "") { [weak self] in
+                    self?.menuPage = .main
+                    self?.openMenu() },
+            .init(title: "Finder focus: \(UserDefaults.standard.bool(forKey: "fastFocus") ? "fast (some sparkle)" : "steady")",
+                  detail: "steady: blur drawn from every splat; fast: fewer splats when far out of focus, which shimmer as you focus") { [weak self] in
+                UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "fastFocus"), forKey: "fastFocus")
+                self?.reopenMenu() },
+            .init(title: "Distant shells: \(distantShells ? "on" : "off")",
+                  detail: "in a place, far splats drawn from a baked panorama: a faster finder (prints always draw everything)") { [weak self] in
+                guard let self else { return }
+                self.distantShells.toggle()
+                self.reopenMenu() },
+            ]
+            menu.selected = 0
+            menu.isHidden = false
+            return
+        }
         var items: [MenuOverlay.Item] = [
             .init(title: "Back to the \(mode == .sheet ? "light table" : mode == .lighting ? "lights" : "camera")",
                   detail: "carry on where you were") { [weak self] in self?.closeMenu() },
@@ -1160,11 +1183,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         ]
         items += skyItems
         items += [
-            .init(title: "Distant shells: \(distantShells ? "on" : "off")",
-                  detail: "in a place, far splats drawn from a baked panorama: a faster finder (prints always draw everything)") { [weak self] in
-                guard let self else { return }
-                self.distantShells.toggle()
-                self.reopenMenu() },
+            .init(title: "Viewfinder graphics…", detail: "how the finder draws: focus rendering, distant shells") { [weak self] in
+                self?.menuPage = .finder
+                self?.openMenu()
+                self?.menu?.selected = 1 },
             .init(title: "Shutter makes: \(proofsAtShutter ? "proofs (enlarge at the light table)" : "full prints")",
                   detail: "proofs keep the finder fast; at the light table Y / R sends the marked frames (or all) to the enlarger") { [weak self] in
                 guard let self else { return }
@@ -1371,6 +1393,7 @@ final class Viewer: NSObject, MTKViewDelegate {
 
     private func closeMenu() {
         menuOpen = false
+        menuPage = .main
         menu?.isHidden = true
     }
 

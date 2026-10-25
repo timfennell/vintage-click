@@ -31,9 +31,13 @@ func vogel(_ k: Int, _ n: Int) -> SIMD2<Float> {
 
 /// What the photographer has set, and the optics that follow from it.
 struct CameraBody: Codable {
-    /// Focus LOD for the finder: blurred splats are thinned to this opacity
-    /// (0: off). Prints never thin. VC_THIN overrides it, for comparisons.
-    static let finderThinning: Float = ProcessInfo.processInfo.environment["VC_THIN"].flatMap(Float.init) ?? 0.06
+    /// Finder thinning: blurred splats kept by chance up to this opacity (0: off,
+    /// steady). Faster when far out of focus, but the chance flickers as focus
+    /// moves; the menu's "Finder focus" chooses. VC_THIN overrides it.
+    static var finderThinning: Float {
+        if let v = ProcessInfo.processInfo.environment["VC_THIN"].flatMap(Float.init) { return v }
+        return UserDefaults.standard.bool(forKey: "fastFocus") ? 0.06 : 0
+    }
 
     /// The camera itself (its make, model and serial go on every frame).
     var model = CameraModel.ohiKorS2

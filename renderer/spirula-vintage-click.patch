@@ -2831,10 +2831,10 @@ index ef7b72da..9f612088 100644
                      (uint32_t)batch, tile_width, tile_height, macro_log2, &p,
                      sizeof(p));
 diff --git a/src/backend/vulkan/shaders/projection_fwd.slang b/src/backend/vulkan/shaders/projection_fwd.slang
-index 9c30e617..c209f34b 100644
+index 9c30e617..6310ca09 100644
 --- a/src/backend/vulkan/shaders/projection_fwd.slang
 +++ b/src/backend/vulkan/shaders/projection_fwd.slang
-@@ -93,8 +93,132 @@ struct ProjectionFwdParams {
+@@ -93,8 +93,138 @@ struct ProjectionFwdParams {
      uint32_t wgs_per_row; // grid fold (flat id = wg.y * wgs_per_row*128 + x)
      uint32_t num_sh_buffer;
      uint32_t _pad0;
@@ -2935,6 +2935,12 @@ index 9c30e617..c209f34b 100644
 +    float det1 = determinant(C);
 +    if (!(det1 > 0)) return false;
 +    opac *= sqrt(max(det0, 0.0f) / det1);   // same energy, spread wider
++    // A splat is drawn only where it is above the alpha cut-off, so its
++    // drawn light is (opacity - cut-off) x area: spread wider and fainter it
++    // would lose more of it (blurred fields darkened). Restore exactly what
++    // it drew in focus: opac' = thr + (opac0 - thr) / spread. Deterministic,
++    // so nothing flickers as focus moves; a splat in focus is unchanged.
++    opac += ALPHA_THRESHOLD * (1.0f - sqrt(max(det0, 0.0f) / det1));
 +    // Too faint to draw: keep it at the threshold with probability opac/thr
 +    // (dropping them all lost the light of whole blurred fields of tiny splats).
 +    // Viewfinder (L[1].z > 0): blurred splats are also kept by chance up to
@@ -2967,7 +2973,7 @@ index 9c30e617..c209f34b 100644
  void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      ProjectionFwdParams p, uint idx) {
      uint cid = (idx / p.N) % p.C;
-@@ -120,6 +244,16 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -120,6 +250,16 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
                           p.quats[4 * gid + 2], p.quats[4 * gid + 3]);
      float3 scale = float3(p.scales[3 * gid], p.scales[3 * gid + 1],
                            p.scales[3 * gid + 2]);
@@ -2984,7 +2990,7 @@ index 9c30e617..c209f34b 100644
      float in_opacity = p.opacities[gid];
      float3 dc = float3(p.features_dc[3 * gid], p.features_dc[3 * gid + 1],
                         p.features_dc[3 * gid + 2]);
-@@ -130,12 +264,21 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -130,12 +270,21 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
      float s_depth;
      float3 s_conic;
      float s_opac;
@@ -3008,7 +3014,7 @@ index 9c30e617..c209f34b 100644
  
      // SH -> rgb, gated exactly like _Base3DGS::project.
      float3 rgb = float3(0.0f);
-@@ -143,6 +286,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
+@@ -143,6 +292,12 @@ void run_projection<let cam: CameraModelType, D : ICameraDistortion>(
          rgb = eval_splat_color(mean, R, t, dc, p.features_sh, p.sh_stride,
                                 gid, p.sh_packed, p.sh_bounds,
                                 p.num_sh_buffer, i64mem_get(p.sh_bounds_stride));
