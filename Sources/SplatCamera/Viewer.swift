@@ -635,17 +635,43 @@ final class Viewer: NSObject, MTKViewDelegate {
                   V[8] * p.x + V[9] * p.y + V[10] * p.z + V[11])
         }
         let near = 0.02 / scale
+        // Where the render puts things: the same principal point, and through a
+        // fisheye its equidistant projection (radius = f x angle off the axis).
+        let fisheye = frame.job.fisheye && frame.job.fromLight == nil
+        let centre = SIMD2(Float(width), Float(height)) / 2 + (frame.job.fromLight == nil ? frame.job.body.axisOffset(width: width) : .zero)
+        func onScreen(_ q: SIMD3<Float>) -> SIMD2<Float> {
+            if fisheye {
+                let r = simd_length(SIMD2(q.x, q.y)), th = atan2(r, q.z)
+                return centre + (r > 1e-9 ? SIMD2(q.x, q.y) / r : .zero) * (fx * th)
+            }
+            return centre + SIMD2(q.x, q.y) / q.z * fx
+        }
         for (segs, chosen) in shapes {
             var verts: [SIMD4<Float>] = []
             for (a, b) in segs {
                 var pa = cam(a), pb = cam(b)
+                if fisheye {
+                    // Straight edges bow through a fisheye: in short pieces, each kept
+                    // while it is within the lens's field (a little past 90 degrees).
+                    let n = 12
+                    var prev: SIMD3<Float>? = nil
+                    for i in 0...n {
+                        let q = pa + (pb - pa) * (Float(i) / Float(n))
+                        let ok = atan2(simd_length(SIMD2(q.x, q.y)), q.z) < 1.65 && simd_length(q) > near
+                        if ok, let pq = prev {
+                            for w in [pq, q] { let s2 = onScreen(w); verts.append(SIMD4(s2.x, s2.y, max(w.z, near) * scale, 1)) }
+                        }
+                        prev = ok ? q : nil
+                    }
+                    continue
+                }
                 if pa.z < near && pb.z < near { continue }
                 // Clip to just in front of the lens.
                 if pa.z < near { pa = pb + (pa - pb) * ((pb.z - near) / (pb.z - pa.z)) }
                 if pb.z < near { pb = pa + (pb - pa) * ((pa.z - near) / (pa.z - pb.z)) }
                 for q in [pa, pb] {
-                    verts.append(SIMD4(fx * q.x / q.z + Float(width) / 2, fx * q.y / q.z + Float(height) / 2,
-                                       q.z * scale, 1))
+                    let s2 = onScreen(q)
+                    verts.append(SIMD4(s2.x, s2.y, q.z * scale, 1))
                 }
             }
             guard !verts.isEmpty,
