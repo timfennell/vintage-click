@@ -90,6 +90,26 @@ Aperture, shutter speed and film speed then behave as on a real camera, film
 loses sensitivity on long exposures (reciprocity failure) as real film does,
 and the meter does not know about that, as real meters did not.
 
+### Camera bodies
+
+The camera bag holds three bodies (select **Camera body** in the bag to change):
+
+- **Ohi Kor S2** (1974): the manual SLR above, needle on a speed scale, LED
+  readouts, 1 s to 1/4000.
+- **Kwanon EF** (1973, after the Canon EF): shutter-priority automatic. You set
+  the speed; the needle on an **aperture scale** at the right of the finder
+  shows the f-number the camera will choose. Its screen is a plain split
+  image. Turn the aperture ring to go manual.
+- **Lahntal R5** (1971, after the Leica M5): a **rangefinder**. You look through
+  a clear window beside the lens, not through it: an illuminated **bright
+  frame** for each focal length shows what will be on film, and it shifts with
+  the focus distance to correct for **parallax**. Focus by lining up the gilded
+  **focusing patch** in the middle until its doubled image becomes one.
+  Lenses of 21 mm and wider use a separate finder on the hot shoe. The R5
+  takes only rangefinder lenses. Photos are taken from the lens, so close
+  subjects frame a little differently from what the window shows, as on the
+  real camera.
+
 ### Lenses
 
 ![The camera bag](docs/screenshots/bag.jpg)
@@ -104,6 +124,8 @@ lens (with fictional maker names that hint at the originals):
 - **Exotic:** the f/0.7 satellite lens a director used to film by candlelight,
   a 13 mm rectilinear ultra-wide, full-frame and circular fisheyes, a Petzval,
   a mirror lens with ring bokeh, a soft-focus portrait lens.
+- **Rangefinder:** small lenses for the Lahntal R5, 21 mm to 135 mm, including
+  a 50 mm f/1.0.
 - **Toys & Mods:** a Lomo-style compact lens, a plastic toy lens, a Helios-type
   58 mm with its front element reversed (a whirlpool of swirl) or with an
   oval insert and a fishing line across the stop (oval bokeh and horizontal
@@ -198,6 +220,13 @@ The camera sounds are a real Nikon, recorded for the game: the shutter at every
 speed from 1/2000 to 1 s, the film-advance lever (thirteen takes), the aperture
 ring, the shutter-speed dial, changing lenses and loading film. Menu > Camera
 sounds turns them on or off.
+
+**Haptics:** each sound is felt as well, in time with it. On a Force Touch
+trackpad you feel the shutter, the film advance, the dial clicks, a lens change
+and loading film; a shutter fired by a click knocks just as you let go. On a game
+controller that macOS can rumble (DualShock 4, DualSense, Xbox, or an 8BitDo
+wired, which appears as a DualShock 4), only lens changes and the film advance are felt, lightly. Menu
+> Settings > Haptics turns it off.
 
 ### The menu
 
