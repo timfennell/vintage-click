@@ -26,8 +26,9 @@ final class Sounds {
         var feel: Float? {
             switch self {
             case .shutter, .shutterOpen, .shutterClose: return 1
-            case .lensChange: return 0.8
-            case .advance, .mirror: return 0.65
+            case .lensChange, .filmChange, .back: return 0.85
+            case .shutterDial, .aperture: return 0.9
+            case .advance, .mirror, .rewind: return 0.7
             default: return nil
             }
         }

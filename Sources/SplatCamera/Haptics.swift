@@ -37,9 +37,7 @@ final class Haptics {
             if !self.pressed, let p = self.waiting {
                 self.waiting = nil
                 // Just after the click lets go: click, then the knock.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.012) {
-                    NSHapticFeedbackManager.defaultPerformer.perform(p, performanceTime: .now)
-                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.012) { Self.tap(p) }
             }
             return e
         }
@@ -65,9 +63,9 @@ final class Haptics {
     /// strongest hits, kept apart so they stay taps, the firmest for a hard hit.
     private func trackpad(_ hits: [HapticHit], rate: Double, gain: Float) {
         var last = -1.0, count = 0
-        for h in hits where h.strength * gain >= 0.3 && count < 4 {
+        for h in hits where h.strength * gain >= 0.25 && count < 8 {
             let t = h.time / rate
-            guard t - last >= 0.05 else { continue }
+            guard t - last >= 0.06 else { continue }
             last = t
             count += 1
             let pattern: NSHapticFeedbackManager.FeedbackPattern = h.strength * gain > 0.6 ? .levelChange : .generic
@@ -77,19 +75,29 @@ final class Haptics {
                     // Keep the firmest due while pressed for the release.
                     if self.waiting != .levelChange { self.waiting = pattern }
                 } else {
-                    NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
+                    Self.tap(pattern)
                 }
             }
             if t <= 0.002 { fire() } else { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: fire) }
         }
     }
 
+    /// A tap, made firmer than the trackpad's own: a hard one is two of its
+    /// firmest a moment apart, felt as one heavier knock.
+    private static func tap(_ p: NSHapticFeedbackManager.FeedbackPattern) {
+        let performer = NSHapticFeedbackManager.defaultPerformer
+        performer.perform(p, performanceTime: .now)
+        if p == .levelChange {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.018) { performer.perform(.levelChange, performanceTime: .now) }
+        }
+    }
+
     private func controller(_ c: GCController, _ hits: [HapticHit], rate: Double, gain: Float) {
         guard let engine = engine(for: c) else { return }
-        // Transients only: each a short knock, at most about half the motor.
+        // Transients only: each a short knock, firm but well short of a rumble.
         let events = hits.map { h in
             CHHapticEvent(eventType: .hapticTransient, parameters: [
-                CHHapticEventParameter(parameterID: .hapticIntensity, value: min(1, 0.12 + h.strength * gain * 0.5)),
+                CHHapticEventParameter(parameterID: .hapticIntensity, value: min(1, 0.25 + h.strength * gain * 0.75)),
                 CHHapticEventParameter(parameterID: .hapticSharpness, value: h.sharpness),
             ], relativeTime: h.time / rate)
         }
