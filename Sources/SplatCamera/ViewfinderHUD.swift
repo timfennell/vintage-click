@@ -33,6 +33,10 @@ final class ViewfinderHUD: NSView {
         /// Readouts in a lit window under the image (no LEDs), and the auto mark.
         var windowReadout = false
         var auto = false
+        /// A rangefinder: its bright frame (fractions of the image), and a shoe finder's name if one is on.
+        var rangefinder = false
+        var rfFrame = CGRect.zero
+        var rfExternal = ""
         var shutterIndex = 7           // the speed set, index into shutterSpeeds
         var mode = ""                  // DOF preview, lighting, developing...
         var stats = ""                 // render speed: shown only when asked for (--stats)
@@ -144,6 +148,9 @@ final class ViewfinderHUD: NSView {
         if let beam = info.beam {
             meterShape = nil
             if !mirrorUp { drawBeam(beam, in: img, u: u) }
+        } else if info.rangefinder {
+            meterShape = nil
+            drawRangefinder(img, u: u)
         } else {
             drawMeter(img, u: u)
         }
@@ -164,7 +171,8 @@ final class ViewfinderHUD: NSView {
             text(info.stats, at: NSPoint(x: img.maxX, y: max(2, top)), size: 0.7 * u, color: dim.withAlphaComponent(0.6),
                  align: .right, width: img.width * 0.4, projected: false)
         }
-        if info.windowReadout { drawWindow(img, u: u) } else { drawLEDs(img, u: u) }
+        if info.rangefinder { drawRangefinderReadouts(img, u: u) }
+        else if info.windowReadout { drawWindow(img, u: u) } else { drawLEDs(img, u: u) }
         if let m = info.measure { drawMeasure(m, in: img, u: u) }
     }
 
@@ -357,6 +365,84 @@ final class ViewfinderHUD: NSView {
         if !info.mode.isEmpty { notes.append(info.mode) }
         if !notes.isEmpty {
             text(notes.joined(separator: "   ·   "), at: NSPoint(x: img.midX, y: y + h * 1.4), size: 0.75 * u,
+                 color: cream.withAlphaComponent(0.8), align: .center, width: img.width)
+        }
+    }
+
+    // MARK: the rangefinder
+
+    /// The Lahntal's finder: the mounted lens's bright frame, lit (cool white,
+    /// a soft glow), corners a touch heavier, moved by parallax as you focus; and
+    /// the meter's needle across the top, centred when the exposure is right.
+    private func drawRangefinder(_ img: NSRect, u: CGFloat) {
+        let f = info.rfFrame
+        let r = NSRect(x: img.minX + f.minX * img.width, y: img.minY + f.minY * img.height,
+                       width: f.width * img.width, height: f.height * img.height)
+        // Projected light on the scene, not paint: the view shows through it, as
+        // through the meter's scale.
+        let lit = NSColor(calibratedRed: 0.93, green: 0.96, blue: 1.0, alpha: 0.5)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: img, xRadius: img.height * 0.025, yRadius: img.height * 0.025).addClip()
+        let glow = NSShadow()
+        glow.shadowColor = lit.withAlphaComponent(0.3)
+        glow.shadowBlurRadius = 0.35 * u
+        glow.shadowOffset = .zero
+        glow.set()
+        let frame = NSBezierPath(rect: r)
+        frame.lineWidth = 0.12 * u
+        lit.setStroke()
+        frame.stroke()
+        // Heavier corners, as the etched frames are.
+        let k = min(r.width, r.height) * 0.08
+        let corners = NSBezierPath()
+        for (x, y, dx, dy) in [(r.minX, r.minY, 1.0, 1.0), (r.maxX, r.minY, -1.0, 1.0), (r.minX, r.maxY, 1.0, -1.0), (r.maxX, r.maxY, -1.0, -1.0)] {
+            corners.move(to: NSPoint(x: x + CGFloat(dx) * k, y: y)); corners.line(to: NSPoint(x: x, y: y))
+            corners.line(to: NSPoint(x: x, y: y + CGFloat(dy) * k))
+        }
+        corners.lineWidth = 0.24 * u
+        corners.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+        // The meter: a needle swinging across a short scale at the top of the window.
+        let cx = img.midX, top = img.minY + 1.6 * u
+        let span = 5.0 * u
+        let scale = NSBezierPath()
+        for k in -2...2 {
+            let x = cx + CGFloat(k) * span / 2
+            scale.move(to: NSPoint(x: x, y: top)); scale.line(to: NSPoint(x: x, y: top + (k == 0 ? 1.0 : 0.6) * u))
+        }
+        scale.lineWidth = 0.12 * u
+        NSColor(calibratedRed: 1, green: 0.9, blue: 0.78, alpha: 0.8).setStroke()
+        scale.stroke()
+        text("−", at: NSPoint(x: cx - span * 1.25, y: top - 0.25 * u), size: 1.0 * u,
+             color: NSColor(calibratedRed: 1, green: 0.9, blue: 0.78, alpha: 0.8), projected: true)
+        text("+", at: NSPoint(x: cx + span * 1.12, y: top - 0.25 * u), size: 1.0 * u,
+             color: NSColor(calibratedRed: 1, green: 0.9, blue: 0.78, alpha: 0.8), projected: true)
+        let stops = max(-2.4, min(2.4, CGFloat(info.meterStops)))
+        let needleX = cx + stops * span / 2
+        let needle = NSBezierPath()
+        needle.move(to: NSPoint(x: needleX, y: top - 0.6 * u)); needle.line(to: NSPoint(x: needleX, y: top + 1.6 * u))
+        needle.lineWidth = 0.16 * u
+        NSColor(calibratedRed: 0.95, green: 0.15, blue: 0.08, alpha: 0.95).setStroke()
+        needle.stroke()
+        if !info.rfExternal.isEmpty {
+            text(info.rfExternal, at: NSPoint(x: img.midX, y: img.maxY - 2.4 * u), size: 0.9 * u,
+                 color: NSColor(calibratedRed: 1, green: 0.9, blue: 0.78, alpha: 0.75), align: .center, width: img.width, projected: true)
+        }
+    }
+
+    /// Under the window: what is set, plainly lit (no LEDs in 1971).
+    private func drawRangefinderReadouts(_ img: NSRect, u: CGFloat) {
+        let h = 2.0 * u
+        let y = img.maxY + (bounds.maxY - img.maxY - h) * 0.45
+        let cream = NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.80, alpha: 0.9)
+        let speed = info.shutter.hasSuffix("\"") ? String(info.shutter.dropLast()) + " s" : "1/" + info.shutter
+        let line = "f/\(info.aperture)     \(speed)     \(info.focus == "∞" ? "∞" : info.focus)     \(info.counter)     ISO \(info.iso)"
+        text(line, at: NSPoint(x: img.midX, y: y), size: h * 0.62, color: cream, align: .center, width: img.width, projected: true)
+        var notes: [String] = []
+        if let m = message, CACurrentMediaTime() < m.until { notes.append(m.text) }
+        if !info.mode.isEmpty { notes.append(info.mode) }
+        if !notes.isEmpty {
+            text(notes.joined(separator: "   ·   "), at: NSPoint(x: img.midX, y: y + h * 1.1), size: 0.75 * u,
                  color: cream.withAlphaComponent(0.8), align: .center, width: img.width)
         }
     }

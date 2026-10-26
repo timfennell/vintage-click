@@ -564,7 +564,29 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     float R = O[5].x;
     float r = length(p - c);
     float3 col;
-    if (r < R) {
+    // A rangefinder's window (O[13].y): clear glass, no screen; its focusing
+    // patch in the middle shows a second image from the rangefinder's window,
+    // displaced by fx B (1/z - 1/s): it lies on the first where focused.
+    bool clearGlass = O[13].y > 0.5;
+    if (clearGlass) {
+        col = to_lin(frame_rgb(f, clamp_px(int2(p), O), O));
+        if (O[12].x > 0.5) {
+            float2 dp = abs(p - c), ph = O[12].yz;
+            float inPatch = (1 - smoothstep(ph.x - 1.5, ph.x + 1.5, dp.x)) * (1 - smoothstep(ph.y - 1.5, ph.y + 1.5, dp.y));
+            if (inPatch > 0) {
+                float z = max(frame_z(f, clamp_px(int2(p), O), O), 0.05);
+                float shift = O[12].w * (1 / z - O[13].x);
+                float3 second = to_lin(frame_rgb(f, clamp_px(int2(p + float2(shift, 0)), O), O));
+                // The patch is warm and brighter (its mirror is gilded), the two images
+                // half and half.
+                float3 patchCol = mix(col, second, 0.55) * float3(1.45, 1.2, 0.62);
+                // Its edge: a fine bright rim where the gilded mirror ends.
+                float rim = smoothstep(2.5, 0.0, min(ph.x - dp.x, ph.y - dp.y));
+                patchCol *= 1 + 0.35 * rim;
+                col = mix(col, patchCol, inPatch);
+            }
+        }
+    } else if (r < R) {
         // Split image: each half shows the image displaced by its own defocus.
         float side = p.y < c.y ? 1 : -1;
         // One depth for each half, read across it: the wedge moves its half as
@@ -607,15 +629,17 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
         col = max(col + filter_fx(src, p, col, O, 16), 0.0);
     }
 
-    if (abs(r - R) < 0.8 || abs(r - R * 1.75) < 0.8) col *= 0.55;
-    // The fresnel's grooves: faint rings centred on the axis.
-    float ring = fract(r / max(O[0].y / 70, 4.0));
-    col *= 1 - 0.035 * smoothstep(0.85, 1.0, ring);
+    if (!clearGlass) {
+        if (abs(r - R) < 0.8 || abs(r - R * 1.75) < 0.8) col *= 0.55;
+        // The fresnel's grooves: faint rings centred on the axis.
+        float ring = fract(r / max(O[0].y / 70, 4.0));
+        col *= 1 - 0.035 * smoothstep(0.85, 1.0, ring);
+    }
     // Light fall-off: the lens's own (at the aperture it is set to) and the
     // condenser's toward the corners of the screen.
     float2 q = field(p, O);
-    float vig = 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
-    col *= vig * (1 - 0.22 * dot(q, q)) * O[5].y;
+    float vig = clearGlass ? 1.0 : 1 - O[3].w * pow(saturate(O[2].z / O[2].y), 1.5) * dot(q, q);
+    col *= vig * (1 - (clearGlass ? 0.06 : 0.22) * dot(q, q)) * O[5].y;
     // A circular fisheye's image is a disc: black beyond it, but for a soft
     // glow of the light near its rim scattered past it inside the lens.
     if (O[6].z > 0) {

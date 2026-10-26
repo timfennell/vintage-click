@@ -54,6 +54,9 @@ struct Lens {
     enum Movement { case none, tilt(Float), shift(Float) }
 
     var isFisheye: Bool { projection != .rectilinear }
+    /// A rangefinder lens (the Kwanon f/0.95 was one too); the rest fit the reflexes.
+    var forRangefinder: Bool { collection == "Rangefinder" || name.hasPrefix("Kwanon 50mm f/0.95") }
+    var forReflex: Bool { collection != "Rangefinder" }
 
     /// The clicks on the aperture ring: full stops, plus the wide-open value.
     var apertureStops: [Float] {
@@ -246,6 +249,41 @@ let lensCollections: [LensCollection] = [
     LensCollection(name: "Macro", about: "close focusing, flat field, sharp corners", lenses: macroLenses),
     LensCollection(name: "Exotic", about: "rare vintage and odd optics", lenses: exoticLenses),
     LensCollection(name: "Toys & Mods", about: "plastic, reversed, bent and shifted: lenses for breaking the rules", lenses: toysAndMods),
+    // Last, so the lenses before keep their places (saved shots name them by place).
+    LensCollection(name: "Rangefinder", about: "the Lahntal R5's own lenses: small, sharp, quiet", lenses: rangefinderLenses),
+]
+
+/// The Lahntal rangefinder's lenses (after the Leica M lenses of the 1960s-80s).
+let rangefinderLenses: [Lens] = [
+    Lens(name: "Lahntal Elmax 21mm f/3.4", inspiredBy: "the symmetrical 21 (Super-Angulon type): deep, dark-cornered, needs a shoe finder",
+         focalMM: 21, maxAperture: 3.4, minAperture: 22, blades: 10, bladeRotation: 0,
+         catsEye: 0.2, soapBubble: 0, vignette: 0.65, minFocusM: 0.4, lateralCA: 0.0007, axialCA: 0.004),
+    Lens(name: "Lahntal Elmarit 28mm f/2.8", inspiredBy: "the compact reportage 28",
+         focalMM: 28, maxAperture: 2.8, minAperture: 22, blades: 8, bladeRotation: 0.2,
+         catsEye: 0.25, soapBubble: 0, vignette: 0.45, minFocusM: 0.7, lateralCA: 0.0005, axialCA: 0.006),
+    Lens(name: "Lahntal Summax 35mm f/2", inspiredBy: "the little 35 f/2 of 1979, the 'bokeh king': soft, round, calm",
+         focalMM: 35, maxAperture: 2, minAperture: 16, blades: 8, bladeRotation: 0.1,
+         catsEye: 0.3, soapBubble: -0.25, vignette: 0.35, minFocusM: 0.7, lateralCA: 0.0004, axialCA: 0.01),
+    Lens(name: "Lahntal Summax 50mm f/2", inspiredBy: "the rangefinder's standard 50 f/2: sharp wide open, quietly rendered",
+         focalMM: 50, maxAperture: 2, minAperture: 16, blades: 10, bladeRotation: 0,
+         catsEye: 0.2, soapBubble: 0, vignette: 0.25, minFocusM: 0.7, lateralCA: 0.0003, axialCA: 0.008),
+    Lens(name: "Lahntal Summilar 50mm f/1.4", inspiredBy: "the fast 50 f/1.4: a glow and swirl wide open, crisp by f/4",
+         focalMM: 50, maxAperture: 1.4, minAperture: 16, blades: 10, bladeRotation: 0,
+         catsEye: 0.4, soapBubble: 0.1, vignette: 0.4, minFocusM: 0.7, lateralCA: 0.0004, axialCA: 0.02,
+         sphericalAberration: 0.05),
+    Lens(name: "Lahntal Noctar 50mm f/1.0", inspiredBy: "the 1976 f/1 night fifty: dreamy, heavy, bright-rimmed bokeh",
+         focalMM: 50, maxAperture: 1.0, minAperture: 16, blades: 10, bladeRotation: 0,
+         catsEye: 0.55, soapBubble: 0.25, vignette: 0.55, minFocusM: 1.0, lateralCA: 0.0005, axialCA: 0.03,
+         sphericalAberration: 0.08),
+    Lens(name: "Lahntal Summilar 75mm f/1.4", inspiredBy: "the 1980 portrait 75 f/1.4: wafer-thin focus, creamy backgrounds",
+         focalMM: 75, maxAperture: 1.4, minAperture: 16, blades: 9, bladeRotation: 0,
+         catsEye: 0.35, soapBubble: 0, vignette: 0.35, minFocusM: 0.75, lateralCA: 0.0004, axialCA: 0.03),
+    Lens(name: "Lahntal Elmarit 90mm f/2.8", inspiredBy: "the slim 90 f/2.8: the rangefinder's portrait lens",
+         focalMM: 90, maxAperture: 2.8, minAperture: 22, blades: 9, bladeRotation: 0,
+         catsEye: 0.2, soapBubble: 0, vignette: 0.2, minFocusM: 1.0, lateralCA: 0.0003, axialCA: 0.01),
+    Lens(name: "Lahntal Tele-Elmax 135mm f/4", inspiredBy: "the short-barrelled 135 f/4: the longest the rangefinder frames",
+         focalMM: 135, maxAperture: 4, minAperture: 22, blades: 9, bladeRotation: 0,
+         catsEye: 0.15, soapBubble: 0, vignette: 0.15, minFocusM: 1.5, lateralCA: 0.0002, axialCA: 0.008),
 ]
 
 /// All of them, collection by collection (a lens's index is its place here).

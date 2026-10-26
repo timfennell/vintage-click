@@ -170,7 +170,13 @@ struct CameraBody: Codable {
     mutating func chooseBody(_ m: CameraModel) {
         model = m
         shutterIndex = min(shutterIndex, m.fastestShutter)
+        // The lens has to fit: a rangefinder takes its own, a reflex the rest.
+        if !fits(lens) {
+            let want = m.rangefinder ? "Lahntal Summax 50mm f/2" : "Ohi Kor 50mm f/1.4"
+            if let i = lensBag.firstIndex(where: { $0.name == want }) { chooseLens(i) }
+        }
     }
+    func fits(_ l: Lens) -> Bool { model.rangefinder ? l.forRangefinder : l.forReflex }
     mutating func turnFocus(_ rate: Float, dt: Float) {
         focusM = max(lens.minFocusM, min(200, focusM * exp(rate * dt * 1.1)))
     }

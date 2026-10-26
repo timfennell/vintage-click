@@ -364,6 +364,13 @@ final class Viewer: NSObject, MTKViewDelegate {
                 body: body, lighting: lighting, fisheye: fisheye)
             // Distant splats from baked shells: in a place, up to a short tele
             // (longer lenses magnify the shells' parallax and texels).
+            if body.model.rangefinder {
+                let rf = rangefinderFinder()
+                var c = carried
+                c.position += rf.offset
+                job = FinderJob(view: c.viewMatrix, position: c.position, fx: rf.fx, lens: nil,
+                                body: body, lighting: lighting, fisheye: rf.external && body.lens.isFisheye)
+            }
             job.shells = distantShells && sceneIsPlace && body.lens.focalMM <= 85
             job.smoothBlur = !UserDefaults.standard.bool(forKey: "classicBlur")
         }
@@ -516,6 +523,13 @@ final class Viewer: NSObject, MTKViewDelegate {
             Self.finderInset(width: width, height: height),
             SIMD4(l.squeeze, 0, 0, 0),
         ] + b.filter.optics(threshold: filterThreshold)
+        // The rangefinder (O[12], O[13]): a clear window and its focusing patch,
+        // whose second image (from the rangefinder's window, 69 mm along) moves by
+        // fx B (1/z - 1/s) pixels; a shoe finder has no patch.
+        let rf = b.model.rangefinder && job.fromLight == nil
+        let ext = rf && (l.focalMM < 27 || l.isFisheye)
+        o.append(SIMD4(rf && !ext ? 1 : 0, Float(width) * 0.055, Float(height) * 0.045, 0.069 * job.fx))
+        o.append(SIMD4(1 / max(b.focusM, 0.05), rf ? 1 : 0, 0, 0))
         if job.fromLight != nil {
             o.replaceSubrange(9...11, with: lensFilters[0].optics(threshold: 1))     // no filter on a light's view
             o[5].x = 0          // no focusing aids
@@ -1396,6 +1410,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.lensShelf = shelf
         menu.lensChoice = lensCollections[shelf].lenses.firstIndex { $0.name == body.lens.name } ?? 0
         menu.mountedLens = body.lensIndex
+        let b = body
+        menu.shelfAllowed = { i in lensCollections[i].lenses.contains { b.fits($0) } }
         menu.onMountLens = { [weak self] i in
             self?.mount(i)
             self?.closeMenu()
@@ -1655,6 +1671,38 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
 
 
+    // MARK: the rangefinder
+
+    /// The Lahntal's finder: a window 35 mm left of and 15 mm above the lens, at
+    /// 0.72x (a little wider than the 28 mm frame); for 21 mm and wider (and the
+    /// fisheyes) a finder on the hot shoe, 60 mm above the lens, at the lens's own field.
+    func rangefinderFinder() -> (fx: Float, offset: SIMD3<Float>, external: Bool) {
+        let m = 1 / body.metresPerUnit
+        let c = carriedCamera
+        let up = -c.down
+        if body.lens.focalMM < 27 || body.lens.isFisheye {
+            return (body.focalPixels(width: width, height: height) * 0.9, up * (0.06 * m), true)
+        }
+        return (28 / 36 * Float(width) * 0.94, c.right * (-0.035 * m) + up * (0.015 * m), false)
+    }
+
+    /// The bright frame for the mounted lens (fractions of the image), moved by
+    /// parallax for the distance focused on (the lens sees from right of and below the window).
+    func rangefinderFrame() -> CGRect {
+        let rf = rangefinderFinder()
+        let lensFx = body.focalPixels(width: width, height: height)
+        let s = CGFloat(rf.fx / lensFx) * (rf.external ? 1 : 1)
+        var cx: CGFloat = 0.5, cy: CGFloat = 0.5
+        if !rf.external {
+            let d = CGFloat(max(body.focusM, 0.5))
+            cx += CGFloat(rf.fx) * 0.035 / d / CGFloat(width)
+            cy += CGFloat(rf.fx) * 0.015 / d / CGFloat(height)
+        } else {
+            cy -= CGFloat(rf.fx) * 0.06 / CGFloat(max(body.focusM, 0.5)) / CGFloat(height)
+        }
+        return CGRect(x: cx - s / 2, y: cy - s / 2, width: s, height: s)
+    }
+
     // MARK: the print wall
 
     /// The print wall over the light table, on the table's session (or the latest with prints).
@@ -1786,7 +1834,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         Sounds.shared.fire(shutterSeconds: body.shutter.seconds)
         body.framesShot += 1
         // Mirror travel (~1/15 s round trip) plus the shutter time.
-        mirrorUpUntil = CACurrentMediaTime() + 0.07 + Double(body.shutter.seconds)
+        // A rangefinder has no mirror: its window never blacks out.
+        if !body.model.rangefinder { mirrorUpUntil = CACurrentMediaTime() + 0.07 + Double(body.shutter.seconds) }
         print("Shutter: frame \(job.frameNumber), \(body.lens.name) f/\(body.takingAperture) " +
               "1/\(body.shutter.label), focus \(String(format: "%.2f", body.focusM)) m")
     }
@@ -1857,6 +1906,12 @@ final class Viewer: NSObject, MTKViewDelegate {
         i.counter = b.framesLeft > 0 ? "\(b.framesShot + 1)" : "E"
         i.focus = b.focusM >= 100 ? "∞" : String(format: "%.2f m", b.focusM)
         i.meterStops = b.exposureStops + log2(max(meterLum, 1e-4) / 0.18)
+        if b.model.rangefinder && pov == nil {
+            i.rangefinder = true
+            i.rfFrame = rangefinderFrame()
+            i.rfExternal = rangefinderFinder().external ? String(format: "%.0f mm finder on the shoe", b.lens.focalMM) : ""
+            i.aperture = String(format: b.takingAperture < 10 ? "%.1f" : "%.0f", b.takingAperture)
+        }
         if b.model.shutterPriority {
             // The aperture scale: smallest openings at the top, the camera's choice set.
             i.meterLabels = b.lens.apertureStops.map { $0 < 10 ? String(format: "%.1f", $0) : String(format: "%.0f", $0) }

@@ -15,16 +15,23 @@ struct CameraModel: Codable {
     /// needle on an aperture scale at the right of the finder.
     static let kwanonEF = CameraModel(make: "Kwanon", model: "EF", serial: "0213874", year: 1973)
 
+    /// Inspired by the early-1970s Leica M5: a rangefinder, its own small lenses.
+    static let lahntalR5 = CameraModel(make: "Lahntal", model: "R5", serial: "1287415", year: 1971)
+
     /// The bodies in the bag.
-    static let all: [CameraModel] = [ohiKorS2, kwanonEF]
+    static let all: [CameraModel] = [ohiKorS2, kwanonEF, lahntalR5]
+    var rangefinder: Bool { make == "Lahntal" }
 
     /// How each one works (looked up by model, so saved shots keep only the name).
     var shutterPriority: Bool { make == "Kwanon" && model == "EF" }
     /// The fastest speed it has (index into shutterSpeeds; the slowest is 1 s).
-    var fastestShutter: Int { shutterPriority ? (shutterSpeeds.firstIndex { $0.label == "1000" } ?? shutterSpeeds.count - 1) : shutterSpeeds.count - 1 }
+    var fastestShutter: Int {
+        shutterPriority || rangefinder ? (shutterSpeeds.firstIndex { $0.label == "1000" } ?? shutterSpeeds.count - 1) : shutterSpeeds.count - 1
+    }
     var about: String {
-        shutterPriority ? "1973 · shutter-priority auto, needle on an aperture scale, 1 s to 1/1000"
-                        : "1974 · manual, needle on a speed scale, LED readouts, 1 s to 1/4000"
+        if rangefinder { return "1971 · rangefinder: bright frames, a focusing patch, its own lenses, 1 s to 1/1000" }
+        return shutterPriority ? "1973 · shutter-priority auto, needle on an aperture scale, 1 s to 1/1000"
+                               : "1974 · manual, needle on a speed scale, LED readouts, 1 s to 1/4000"
     }
 }
 

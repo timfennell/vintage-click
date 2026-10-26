@@ -41,8 +41,13 @@ final class MenuOverlay: NSView {
         let n = onFilterShelf ? lensFilters.count : lensCollections[lensShelf].lenses.count
         lensChoice = (lensChoice + d + n) % n
     }
+    /// Shelves whose lenses fit the camera body (the filters always do).
+    var shelfAllowed: (Int) -> Bool = { _ in true }
     func moveShelf(_ d: Int) {
-        lensShelf = (lensShelf + d + filterShelf + 1) % (filterShelf + 1)
+        for _ in 0...filterShelf {
+            lensShelf = (lensShelf + d + filterShelf + 1) % (filterShelf + 1)
+            if onFilterShelf || shelfAllowed(lensShelf) { break }
+        }
         lensChoice = onFilterShelf ? mountedFilter : 0
     }
     func mountLens() {
@@ -343,8 +348,9 @@ final class MenuOverlay: NSView {
                 amber.withAlphaComponent(0.25).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 0.4 * u, yRadius: 0.4 * u).fill()
             }
+            let fits = i >= lensCollections.count || shelfAllowed(i)
             text(name, NSPoint(x: r.minX + ts / 1.05, y: r.minY + 0.35 * u + (1.05 * u - ts) / 2), size: ts,
-                 color: i == lensShelf ? amber : NSColor(white: 0.7, alpha: 1), weight: .semibold)
+                 color: i == lensShelf ? amber : NSColor(white: fits ? 0.7 : 0.3, alpha: 1), weight: .semibold)
             x += tw + 0.6 * u * fit
         }
         if onFilterShelf {
