@@ -518,6 +518,7 @@ final class ViewfinderHUD: NSView {
     /// cream, slow speeds and the ends in red, the set speed's tab in green.
     /// Drawn in this view's points into the current (flipped) context.
     static func drawPlate(_ m: MeterShape) {
+        if !m.labels.isEmpty { drawApertureScale(m); return }
         let card = m.card, u = m.u
         let cap = 2.0 * u
         let cream = NSColor(calibratedRed: 1.0, green: 0.90, blue: 0.78, alpha: 1)
@@ -572,6 +573,53 @@ final class ViewfinderHUD: NSView {
         tab.line(to: NSPoint(x: edge, y: ty + 0.45 * step))
         tab.close()
         tab.fill()
+    }
+
+    /// The Kwanon's scale, unlike the Ohi Kor's: a dark strip with cool white
+    /// f-numbers in a narrow face, small red over and under marks beyond its
+    /// ends, and an orange index at the aperture the camera has chosen.
+    static func drawApertureScale(_ m: MeterShape) {
+        let card = m.card, u = m.u
+        let strip = card.insetBy(dx: card.width * 0.12, dy: 0)
+        NSColor(white: 0.02, alpha: 0.5).setFill()
+        NSBezierPath(rect: strip).fill()
+        let white = NSColor(calibratedRed: 0.86, green: 0.92, blue: 1.0, alpha: 1)
+        let red = NSColor(calibratedRed: 1.0, green: 0.22, blue: 0.16, alpha: 1)
+        let n = m.labels.count
+        let step = (card.height - 4.0 * u) / CGFloat(n)
+        // Over (top) and under (bottom): red triangles pointing out of the scale.
+        for (y, dir) in [(card.minY + 0.9 * u, -1.0), (card.maxY - 0.9 * u, 1.0)] {
+            let t = NSBezierPath()
+            let cx = strip.midX, h = 0.7 * u * CGFloat(dir)
+            t.move(to: NSPoint(x: cx - 0.6 * u, y: y - h / 2)); t.line(to: NSPoint(x: cx + 0.6 * u, y: y - h / 2))
+            t.line(to: NSPoint(x: cx, y: y + h / 2)); t.close()
+            red.withAlphaComponent(0.85).setFill()
+            t.fill()
+        }
+        for (i, label) in m.labels.enumerated() {
+            let y = speedY(CGFloat(i), card: card, u: u, count: n)
+            let size = min(step * 0.62, strip.width * 0.32)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont(name: "AvenirNextCondensed-DemiBold", size: size) ?? NSFont.systemFont(ofSize: size, weight: .semibold),
+                .foregroundColor: white,
+            ]
+            let str = NSAttributedString(string: label, attributes: attrs)
+            let sz = str.size()
+            str.draw(at: NSPoint(x: strip.midX - sz.width / 2 - (m.right ? 0.3 * u : -0.3 * u), y: y - sz.height / 2))
+            // A short dash at the needle's edge: no ticks fanning to the pivot.
+            let x0 = m.right ? strip.maxX : strip.minX
+            let dash = NSBezierPath()
+            dash.move(to: NSPoint(x: x0, y: y)); dash.line(to: NSPoint(x: x0 + (m.right ? -0.5 : 0.5) * u, y: y))
+            dash.lineWidth = 0.1 * u
+            white.withAlphaComponent(0.7).setStroke()
+            dash.stroke()
+        }
+        // The chosen aperture: a small orange bar on the numbers' side.
+        let ty = speedY(CGFloat(m.shutterIndex), card: card, u: u, count: n)
+        let bx = m.right ? strip.minX - 0.9 * u : strip.maxX + 0.2 * u
+        NSColor(calibratedRed: 1.0, green: 0.58, blue: 0.12, alpha: 0.9).setFill()
+        NSBezierPath(roundedRect: NSRect(x: bx, y: ty - 0.18 * u, width: 0.7 * u, height: 0.36 * u),
+                     xRadius: 0.1 * u, yRadius: 0.1 * u).fill()
     }
 
     // MARK: flying a light

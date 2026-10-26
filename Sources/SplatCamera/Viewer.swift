@@ -529,7 +529,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         let rf = b.model.rangefinder && job.fromLight == nil
         let ext = rf && (l.focalMM < 27 || l.isFisheye)
         o.append(SIMD4(rf && !ext ? 1 : 0, Float(width) * 0.055, Float(height) * 0.045, 0.069 * job.fx))
-        o.append(SIMD4(1 / max(b.focusM, 0.05), rf ? 1 : 0, 0, 0))
+        // The live focus, not the rendered frame's: turning the ring moves only
+        // the patch's second image, every display frame, without a new render.
+        // O[13].z: the Kwanon's screen, a diagonal split in a narrow collar.
+        o.append(SIMD4(1 / max((rf ? body : b).focusM, 0.05), rf ? 1 : 0, b.model.shutterPriority ? 1 : 0, 0))
         if job.fromLight != nil {
             o.replaceSubrange(9...11, with: lensFilters[0].optics(threshold: 1))     // no filter on a light's view
             o[5].x = 0          // no focusing aids

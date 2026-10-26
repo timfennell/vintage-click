@@ -568,6 +568,8 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     // patch in the middle shows a second image from the rangefinder's window,
     // displaced by fx B (1/z - 1/s): it lies on the first where focused.
     bool clearGlass = O[13].y > 0.5;
+    bool diag = O[13].z > 0.5;
+    float collar = diag ? 1.4 : 1.75;
     if (clearGlass) {
         col = to_lin(frame_rgb(f, clamp_px(int2(p), O), O));
         if (O[12].x > 0.5) {
@@ -586,25 +588,30 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
                 col = mix(col, patchCol, inPatch);
             }
         }
-    } else if (r < R) {
-        // Split image: each half shows the image displaced by its own defocus.
-        float side = p.y < c.y ? 1 : -1;
+    } else if (r < R * (diag ? 0.82 : 1.0)) {
+        // Split image: each half shows the image displaced by its own defocus,
+        // along the split (level on the Ohi Kor, at 45 degrees on the Kwanon).
+        float Rs = R * (diag ? 0.82 : 1.0);
+        float2 along = diag ? float2(M_SQRT1_2_F, -M_SQRT1_2_F) : float2(1, 0);
+        float2 across = float2(-along.y, along.x);
+        float d = dot(p - c, across);
+        float side = d < 0 ? 1 : -1;
         // One depth for each half, read across it: the wedge moves its half as
         // one (per-pixel depths jump about in blur and tore seams through it).
-        float z = prism_depth(f, float2(c.x, c.y - side * R * 0.5), R * 0.18, O);
+        float z = prism_depth(f, c - side * across * Rs * 0.5, Rs * 0.18, O);
         // Displacement follows defocus but levels off (a wedge bends light only
         // so far): badly out of focus the halves stay apart, not flung away.
-        float shift = clamp(coc_px(z, O) * 0.6, -R * 0.45, R * 0.45) * side;
-        col = prism_sample(f, p, float2(shift, 0), z, O);
+        float shift = clamp(coc_px(z, O) * 0.6, -Rs * 0.45, Rs * 0.45) * side;
+        col = prism_sample(f, p, shift * along, z, O);
         // A prism needs a fast lens: it blacks out half when stopped down.
         float dark = saturate((O[2].y - 4.0) / 3.0);
         if (side > 0) col *= 1 - 0.85 * dark;
-        if (abs(p.y - c.y) < 0.6) col *= 0.4;
-    } else if (r < R * 1.75) {
+        if (abs(d) < 0.6) col *= 0.4;
+    } else if (r < R * collar) {
         // Microprisms: a fine grid of tiny prisms. Each moves as one, by the
         // defocus at its centre, so an out-of-focus image breaks up and
         // shimmers while a focused one sits still.
-        float cell = max(3.0, O[0].y / 300);
+        float cell = max(diag ? 2.0 : 3.0, O[0].y / (diag ? 420 : 300));
         float2 g = floor(p / cell);
         // Each tiny pyramid sends its cell one of six ways (scattered, not in rows).
         float a = (floor(hash(uint2(g + 4096), 23) * 6) + 0.5) * M_PI_F / 3;
@@ -630,7 +637,7 @@ float3 finder_base(float2 pos, device const float* f, constant float4* O) {
     }
 
     if (!clearGlass) {
-        if (abs(r - R) < 0.8 || abs(r - R * 1.75) < 0.8) col *= 0.55;
+        if (abs(r - R * (diag ? 0.82 : 1.0)) < 0.8 || abs(r - R * collar) < 0.8) col *= 0.55;
         // The fresnel's grooves: faint rings centred on the axis.
         float ring = fract(r / max(O[0].y / 70, 4.0));
         col *= 1 - 0.035 * smoothstep(0.85, 1.0, ring);
