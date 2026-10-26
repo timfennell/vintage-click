@@ -95,12 +95,13 @@ final class Haptics {
 
     private func controller(_ c: GCController, _ hits: [HapticHit], rate: Double, gain: Float) {
         guard let engine = engine(for: c) else { return }
-        // Each a short knock: a transient (for controllers with fine actuators)
-        // and a brief burst under it, as rumble motors need some time to spin up
-        // and a bare transient barely moves them. Firm, but well short of a rumble.
+        // As light as the motors still answer (an 8BitDo's felt 0.15 for 40 ms,
+        // not 0.08): the strongest few hits only, each a brief burst at the floor,
+        // a touch more for the hardest. A transient over it for fine actuators.
         var events: [CHHapticEvent] = []
-        for h in hits {
-            let t = h.time / rate, k = min(1, 0.25 + h.strength * gain * 0.75)
+        let few = hits.sorted { $0.strength > $1.strength }.prefix(4)
+        for h in few {
+            let t = h.time / rate, k = 0.15 + 0.05 * min(1, h.strength * gain)
             events.append(CHHapticEvent(eventType: .hapticTransient, parameters: [
                 CHHapticEventParameter(parameterID: .hapticIntensity, value: k),
                 CHHapticEventParameter(parameterID: .hapticSharpness, value: h.sharpness),
@@ -108,7 +109,7 @@ final class Haptics {
             events.append(CHHapticEvent(eventType: .hapticContinuous, parameters: [
                 CHHapticEventParameter(parameterID: .hapticIntensity, value: k),
                 CHHapticEventParameter(parameterID: .hapticSharpness, value: h.sharpness),
-            ], relativeTime: t, duration: 0.04 + 0.02 * Double(h.strength)))
+            ], relativeTime: t, duration: 0.04))
         }
         do {
             let player = try engine.makePlayer(with: CHHapticPattern(events: events, parameters: []))
