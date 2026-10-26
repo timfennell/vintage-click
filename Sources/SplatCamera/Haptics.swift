@@ -52,11 +52,12 @@ final class Haptics {
     }
 
     /// Plays `hits` from now, as a take played at `rate` (its times shrink with
-    /// it). `gain` scales them all (a mirror is felt less than the shutter).
-    func play(_ hits: [HapticHit], rate: Double = 1, gain: Float = 1) {
+    /// it). `gain` scales them all (a mirror is felt less than the shutter);
+    /// `pad`: on game controllers too (else the trackpad only).
+    func play(_ hits: [HapticHit], rate: Double = 1, gain: Float = 1, pad: Bool = true) {
         guard enabled, !hits.isEmpty else { return }
         trackpad(hits, rate: rate, gain: gain)
-        for c in GCController.controllers() { controller(c, hits, rate: rate, gain: gain) }
+        if pad { for c in GCController.controllers() { controller(c, hits, rate: rate, gain: gain) } }
     }
 
     /// The trackpad has only a few fixed taps and felt only under a finger: the

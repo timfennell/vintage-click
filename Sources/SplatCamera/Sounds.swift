@@ -33,6 +33,10 @@ final class Sounds {
             }
         }
 
+        /// Shaken on a game controller as well: only the lens going on and the
+        /// film wound on (the rest is the trackpad's).
+        var shakesPad: Bool { self == .lensChange || self == .advance }
+
         /// The names its files may start with.
         var names: [String] {
             switch self {
@@ -145,7 +149,7 @@ final class Sounds {
         last[e] = i
         let take = list[i]
         lock.unlock()
-        play(take, feel: e.feel, after: delay, volume: volume)
+        play(take, feel: e.feel, pad: e.shakesPad, after: delay, volume: volume)
     }
 
     /// Camera sounds on or off (the menu's toggle), remembered.
@@ -156,11 +160,11 @@ final class Sounds {
 
     /// Plays the take, and its hits felt from the same moment (felt even with
     /// the sounds off).
-    private func play(_ take: Take, feel: Float?, after delay: Double, volume: Float) {
+    private func play(_ take: Take, feel: Float?, pad: Bool, after delay: Double, volume: Float) {
         let start = { [weak self] in
             let rate = Float.random(in: 0.97...1.03)
             guard let self, self.enabled, let p = try? AVAudioPlayer(data: take.data) else {
-                if let feel { Haptics.shared.play(take.hits, rate: Double(rate), gain: feel) }
+                if let feel { Haptics.shared.play(take.hits, rate: Double(rate), gain: feel, pad: pad) }
                 return
             }
             p.enableRate = true
@@ -168,7 +172,7 @@ final class Sounds {
             p.volume = volume * Float.random(in: 0.88...1.0)
             p.prepareToPlay()
             p.play()
-            if let feel { Haptics.shared.play(take.hits, rate: Double(rate), gain: feel) }
+            if let feel { Haptics.shared.play(take.hits, rate: Double(rate), gain: feel, pad: pad) }
             self.playing.insert(p)
             // Let go of it once it has finished.
             DispatchQueue.main.asyncAfter(deadline: .now() + p.duration / Double(p.rate) + 0.5) { self.playing.remove(p) }
@@ -197,7 +201,7 @@ final class Sounds {
         }
         lock.unlock()
         if let take {
-            play(take, feel: Event.shutter.feel, after: 0, volume: 1)
+            play(take, feel: Event.shutter.feel, pad: Event.shutter.shakesPad, after: 0, volume: 1)
         } else if has(.shutterOpen) && has(.shutterClose) {
             // The curtains, apart by the exposure (at fast speeds they all but meet).
             play(.shutterOpen)
