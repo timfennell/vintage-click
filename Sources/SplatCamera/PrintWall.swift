@@ -27,7 +27,7 @@ final class PrintWallView: NSView {
     // MARK: layout (wall metres)
 
     static let printWidth: CGFloat = 0.40          // the image
-    static let border: CGFloat = 0.035            // white paper round it
+    static let border: CGFloat = 0.075            // the mat round it
     static let gap: CGFloat = 0.16                // between prints
     private var columns: Int { max(1, min(8, Int(ceil(sqrt(Double(prints.count) * 1.6))))) }
 
@@ -197,14 +197,14 @@ final class PrintWallView: NSView {
     override func draw(_ dirty: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let b = bounds
-        // The wall: warm white, a little darker away from the lights.
-        ctx.setFillColor(NSColor(calibratedRed: 0.66, green: 0.65, blue: 0.63, alpha: 1).cgColor)
+        // The wall: eggshell white, softer away from the lights.
+        ctx.setFillColor(NSColor(calibratedRed: 0.78, green: 0.76, blue: 0.70, alpha: 1).cgColor)
         ctx.fill(b)
         let cs = CGColorSpaceCreateDeviceRGB()
         // Track lights: a pool of light on each column of prints, brightest a little above centre.
         if !prints.isEmpty {
-            let pool = CGGradient(colorsSpace: cs, colors: [NSColor(calibratedRed: 1, green: 0.97, blue: 0.9, alpha: 0.75).cgColor,
-                                                            NSColor(calibratedRed: 1, green: 0.97, blue: 0.9, alpha: 0.35).cgColor,
+            let pool = CGGradient(colorsSpace: cs, colors: [NSColor(calibratedRed: 0.99, green: 0.97, blue: 0.91, alpha: 0.85).cgColor,
+                                                            NSColor(calibratedRed: 0.99, green: 0.97, blue: 0.91, alpha: 0.4).cgColor,
                                                             NSColor(calibratedWhite: 1, alpha: 0.0).cgColor] as CFArray,
                                   locations: [0, 0.45, 1])!
             let rows = (prints.count + columns - 1) / columns
@@ -224,20 +224,19 @@ final class PrintWallView: NSView {
             let fr = viewRect(frame(of: i))
             guard fr.intersects(b.insetBy(dx: -50, dy: -50)) else { continue }
             let p = prints[i]
-            // Paper, lifted a little off the wall.
+            // The mat: a thick cream board standing off the wall (its shadow falls below).
             ctx.saveGState()
-            ctx.setShadow(offset: CGSize(width: 0, height: max(1, 0.006 * zoom)), blur: max(2, 0.012 * zoom),
-                          color: NSColor(calibratedWhite: 0, alpha: 0.35).cgColor)
-            ctx.setFillColor(NSColor(calibratedRed: 0.97, green: 0.96, blue: 0.93, alpha: 1).cgColor)
+            ctx.setShadow(offset: CGSize(width: 0, height: -max(3, 0.02 * zoom)), blur: max(4, 0.03 * zoom),
+                          color: NSColor(calibratedWhite: 0, alpha: 0.42).cgColor)
+            ctx.setFillColor(NSColor(calibratedRed: 0.975, green: 0.975, blue: 0.97, alpha: 1).cgColor)   // white mat board
             ctx.fill(fr)
             ctx.restoreGState()
-            // The image.
+            // The image in the mat's window.
             let inset = Self.border * zoom
             let imgRect = fr.insetBy(dx: inset, dy: inset)
             if let im = image(p, pixels: imgRect.width * (window?.backingScaleFactor ?? 2)) {
                 ctx.saveGState()
                 ctx.interpolationQuality = .high
-                // Fit the print's own shape inside the paper's window.
                 let a = CGFloat(im.width) / CGFloat(im.height)
                 var r = imgRect
                 if a > r.width / r.height { let h = r.width / a; r.origin.y += (r.height - h) / 2; r.size.height = h }
@@ -250,16 +249,48 @@ final class PrintWallView: NSView {
                 ctx.setFillColor(NSColor(calibratedWhite: 0.85, alpha: 1).cgColor)
                 ctx.fill(imgRect)
             }
-            // Pins at the top corners.
-            let pin = max(2, 0.008 * zoom)
-            for x in [fr.minX + inset * 0.5, fr.maxX - inset * 0.5] {
-                let c = CGPoint(x: x, y: fr.minY + inset * 0.5)
-                ctx.setFillColor(NSColor(calibratedWhite: 0, alpha: 0.25).cgColor)
-                ctx.fillEllipse(in: CGRect(x: c.x - pin + pin * 0.3, y: c.y - pin + pin * 0.4, width: 2 * pin, height: 2 * pin))
-                ctx.setFillColor(NSColor(calibratedRed: 0.72, green: 0.70, blue: 0.66, alpha: 1).cgColor)
-                ctx.fillEllipse(in: CGRect(x: c.x - pin, y: c.y - pin, width: 2 * pin, height: 2 * pin))
-                ctx.setFillColor(NSColor(calibratedWhite: 1, alpha: 0.7).cgColor)
-                ctx.fillEllipse(in: CGRect(x: c.x - pin * 0.45, y: c.y - pin * 0.55, width: pin * 0.6, height: pin * 0.6))
+            // The window's bevel: the board's white core, lit from above (the
+            // bottom bevel faces up into the light, the top one away from it).
+            let bev = max(1, 0.0035 * zoom)
+            let outer = imgRect.insetBy(dx: -bev, dy: -bev)
+            func bevel(_ pts: [CGPoint], _ shade: CGFloat) {
+                ctx.setFillColor(NSColor(calibratedRed: shade, green: shade * 0.995, blue: shade * 0.975, alpha: 1).cgColor)
+                ctx.beginPath(); ctx.addLines(between: pts); ctx.closePath(); ctx.fillPath()
+            }
+            bevel([outer.origin, CGPoint(x: outer.maxX, y: outer.minY), CGPoint(x: imgRect.maxX, y: imgRect.minY), imgRect.origin], 0.80)
+            bevel([CGPoint(x: outer.minX, y: outer.maxY), CGPoint(x: outer.maxX, y: outer.maxY),
+                   CGPoint(x: imgRect.maxX, y: imgRect.maxY), CGPoint(x: imgRect.minX, y: imgRect.maxY)], 1.0)
+            bevel([outer.origin, CGPoint(x: outer.minX, y: outer.maxY), CGPoint(x: imgRect.minX, y: imgRect.maxY), imgRect.origin], 0.92)
+            bevel([CGPoint(x: outer.maxX, y: outer.minY), CGPoint(x: outer.maxX, y: outer.maxY),
+                   CGPoint(x: imgRect.maxX, y: imgRect.maxY), CGPoint(x: imgRect.maxX, y: imgRect.minY)], 0.90)
+            // L-pins: two along the top edge and two along the bottom, set in from
+            // the corners. The long leg goes into the wall just past the edge; the
+            // short leg lies across the mat's edge, holding it.
+            let leg = max(3, 0.011 * zoom), wire = max(0.7, 0.0011 * zoom)
+            for (x, top) in [(fr.minX + fr.width * 0.14, true), (fr.maxX - fr.width * 0.14, true),
+                             (fr.minX + fr.width * 0.14, false), (fr.maxX - fr.width * 0.14, false)] {
+                let edgeY = top ? fr.minY : fr.maxY
+                let into = top ? 1.0 : -1.0                   // the short leg points onto the mat
+                let wallPt = CGPoint(x: x, y: edgeY - CGFloat(into) * wire * 1.6)
+                let end = CGPoint(x: x, y: edgeY + CGFloat(into) * leg)
+                // Its shadow, a little below.
+                ctx.saveGState()
+                ctx.setShadow(offset: CGSize(width: 0, height: -wire * 2.2), blur: wire * 2.5,
+                              color: NSColor(calibratedWhite: 0, alpha: 0.5).cgColor)
+                ctx.setStrokeColor(NSColor(calibratedRed: 0.70, green: 0.71, blue: 0.73, alpha: 1).cgColor)
+                ctx.setLineWidth(wire)
+                ctx.setLineCap(.round)
+                ctx.move(to: wallPt); ctx.addLine(to: end); ctx.strokePath()
+                // Where it goes into the wall: the long leg seen end on.
+                ctx.setFillColor(NSColor(calibratedRed: 0.45, green: 0.46, blue: 0.48, alpha: 1).cgColor)
+                ctx.fillEllipse(in: CGRect(x: wallPt.x - wire * 0.8, y: wallPt.y - wire * 0.8, width: wire * 1.6, height: wire * 1.6))
+                ctx.restoreGState()
+                // A glint along the steel.
+                ctx.setStrokeColor(NSColor(calibratedWhite: 1, alpha: 0.75).cgColor)
+                ctx.setLineWidth(max(0.4, wire * 0.35))
+                ctx.move(to: CGPoint(x: x - wire * 0.2, y: edgeY + CGFloat(into) * leg * 0.15))
+                ctx.addLine(to: CGPoint(x: x - wire * 0.2, y: edgeY + CGFloat(into) * leg * 0.75))
+                ctx.strokePath()
             }
             // A pencilled caption under each, once near enough to read.
             if zoom > 900 {
