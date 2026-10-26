@@ -72,6 +72,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var mirrorUpUntil = 0.0
     var hud: ViewfinderHUD?
     var sheet: ContactSheetView?
+    var wall: PrintWallView?
     var menu: MenuOverlay?
     /// The app's own jobs, wired by main: another scene, where rolls go, quit.
     var appActions: (openScene: () -> Void, chooseRolls: () -> Void, quit: () -> Void)?
@@ -1593,6 +1594,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
 
     private func closeSheet() {
+        wall?.isHidden = true
         mode = .camera
         sheet?.isHidden = true
         hud?.isHidden = false
@@ -1600,7 +1602,10 @@ final class Viewer: NSObject, MTKViewDelegate {
 
     private func sheetInput(_ s: GamepadInput.State, dt: Float) {
         guard let sheet else { return }
+        if let wall, !wall.isHidden { wallInput(wall, s, dt: dt); return }
         let p = s.pressed
+        // X / G: the print wall, this session's enlarged prints.
+        if p.contains(.x) { openWall(); return }
         // Either stick slides the loupe over the table; the triggers turn its power.
         let v = s.move + s.look
         let speed = CGFloat(sheet.bounds.height) * 0.9
@@ -1625,6 +1630,30 @@ final class Viewer: NSObject, MTKViewDelegate {
         if loop.pendingFrames(roll: body.rollNumber) != sheet.pending.frames { sheet.reload(showRoll: nil) }
     }
 
+
+    // MARK: the print wall
+
+    /// The print wall over the light table, on the table's session (or the latest with prints).
+    func openWall() {
+        guard let wall, let sheet else { return }
+        wall.frame = sheet.frame
+        wall.reload(session: sheet.currentSessionName)
+        wall.isHidden = false
+    }
+
+    private func wallInput(_ wall: PrintWallView, _ s: GamepadInput.State, dt: Float) {
+        let p = s.pressed
+        let v = s.move + s.look
+        wall.update(move: CGVector(dx: CGFloat(v.x), dy: CGFloat(-v.y)), zoomBy: CGFloat(s.triggers), dt: CGFloat(dt))
+        if s.wheel != 0 { wall.wheel(CGFloat(s.wheel), at: s.pointer) }
+        let dx = (p.contains(.right) ? 1 : 0) - (p.contains(.left) ? 1 : 0)
+        let dy = (p.contains(.down) ? 1 : 0) - (p.contains(.up) ? 1 : 0)
+        if dx != 0 || dy != 0 { wall.step(dx: dx, dy: dy) }
+        if p.contains(.a) { wall.toggleCloseUp() }
+        if p.contains(.l1) { wall.changeSession(-1) }
+        if p.contains(.r1) { wall.changeSession(1) }
+        if p.contains(.b) || p.contains(.x) || p.contains(.view) { wall.isHidden = true; sheet?.needsDisplay = true }
+    }
 
     // MARK: the sky
 

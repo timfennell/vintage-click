@@ -98,6 +98,8 @@ final class ContactSheetView: NSView {
     }
 
     private var sessionRolls: [Int] { sessions.indices.contains(sessionIndex) ? sessions[sessionIndex] : [] }
+    /// The session on the table (for the print wall to open on).
+    var currentSessionName: String? { sessionRolls.first.map { rolls[$0].session } }
 
     func reload(showRoll dir: URL?) {
         let keepSession = sessionRolls.first.map { rolls[$0].session }
@@ -475,7 +477,7 @@ final class ContactSheetView: NSView {
             let c = L.cells[selected]
             chosen = " · roll \(rolls[c.roll].number) frame \(c.frame + 1)"
         }
-        let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×%@     sticks: loupe  L2/R2: power  d-pad: frame  A: mark  Y / P: enlarge %@  L1/R1: session  B: back",
+        let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×%@     sticks: loupe  L2/R2: power  d-pad: frame  A: mark  Y / P: enlarge %@  X / G: print wall  L1/R1: session  B: back",
                           when.isEmpty ? "" : when + " · ", rollsHere.count, rollsHere.count == 1 ? "roll" : "rolls",
                           sessionIndex + 1, sessions.count, chosen, loupePower,
                           enlargerStatus.isEmpty ? "" : " · " + enlargerStatus,

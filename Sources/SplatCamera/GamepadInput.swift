@@ -223,7 +223,7 @@ final class GamepadInput {
                          (.comma, .slower), (.period, .faster)]
             case .sheet:
                 keys += [(.leftArrow, .left), (.rightArrow, .right), (.upArrow, .up), (.downArrow, .down),
-                         (.keyQ, .l1), (.keyE, .r1), (.escape, .b), (.returnOrEnter, .a), (.keyP, .y), (.keyR, .y)]
+                         (.keyQ, .l1), (.keyE, .r1), (.escape, .b), (.returnOrEnter, .a), (.keyP, .y), (.keyR, .y), (.keyG, .x)]
                 s.look = .zero
                 s.shoulders = 0
             }

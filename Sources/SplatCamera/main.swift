@@ -268,7 +268,12 @@ func configureSession() {
         viewer.camera.yaw -= t[0] * .pi / 180
         viewer.camera.pitch += t[1] * .pi / 180
     }
-    if openSheet { DispatchQueue.main.async { viewer.openSheet() } }
+    if args.contains("--wall") || openSheet {
+        DispatchQueue.main.async {
+            viewer.openSheet()
+            if args.contains("--wall") { viewer.openWall() }
+        }
+    }
     // Start with the shutter matched to the scene, as a photographer would.
     viewer.body.meterShutter(sceneLuminance: 0.18)
     print("Uploaded to the GPU")
@@ -293,6 +298,11 @@ func configureSession() {
     sheet.isHidden = true
     view.addSubview(sheet)
     viewer.sheet = sheet
+    let wall = PrintWallView(frame: view.bounds)
+    wall.autoresizingMask = [.width, .height]
+    wall.isHidden = true
+    view.addSubview(wall)
+    viewer.wall = wall
     let menu = MenuOverlay(frame: view.bounds)
     menu.autoresizingMask = [.width, .height]
     menu.isHidden = true
