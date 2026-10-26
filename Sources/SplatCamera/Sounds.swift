@@ -22,6 +22,16 @@ final class Sounds {
         case filmChange = "film-change"       // the whole of loading a new roll
         case lensChange = "lens-change"       // a lens off the mount and another on
 
+        /// How strongly it is felt (nil: not at all): the shutter, the lever, a lens.
+        var feel: Float? {
+            switch self {
+            case .shutter, .shutterOpen, .shutterClose: return 1
+            case .lensChange: return 0.8
+            case .advance, .mirror: return 0.65
+            default: return nil
+            }
+        }
+
         /// The names its files may start with.
         var names: [String] {
             switch self {
@@ -48,10 +58,16 @@ final class Sounds {
         return !fm.fileExists(atPath: now.path) && fm.fileExists(atPath: before.path) ? before : now
     }
 
-    private var takes: [Event: [Data]] = [:]
+    /// A recording, and where it knocks (for the haptics; empty if not felt).
+    struct Take {
+        var data: Data
+        var hits: [HapticHit] = []
+    }
+
+    private var takes: [Event: [Take]] = [:]
     /// Shutter recordings made at a known speed (seconds -> takes): played for
     /// the exposure nearest to theirs, so 1/1000 snaps and 1 s comes apart.
-    private var shutterAt: [Float: [Data]] = [:]
+    private var shutterAt: [Float: [Take]] = [:]
     private var lastSpeedTake: [Float: Int] = [:]
 
     /// "1000" -> 1/1000 s, "8" -> 1/8 s; seconds: "1" or "1s", "0.5", "0.125", "2s".
@@ -64,7 +80,10 @@ final class Sounds {
     private var playing: Set<AVAudioPlayer> = []
     private let lock = NSLock()
 
-    init() { reload() }
+    init() {
+        reload()
+        _ = Haptics.shared     // controllers' engines ready before the first shot
+    }
 
     /// (Re)reads the folder. Files are matched by name: "advance-3.wav" is a take
     /// of `advance`; "shutter-open-2.aiff" of `shutterOpen`.
@@ -72,8 +91,8 @@ final class Sounds {
         let fm = FileManager.default
         try? fm.createDirectory(at: Self.folder, withIntermediateDirectories: true)
         writeReadme()
-        var found: [Event: [Data]] = [:]
-        var atSpeed: [Float: [Data]] = [:]
+        var found: [Event: [Take]] = [:]
+        var atSpeed: [Float: [Take]] = [:]
         // The app's own recordings, then yours (they add to them).
         var files: [URL] = []
         for dir in [Self.bundled, Self.folder].compactMap({ $0 }) {
@@ -87,15 +106,16 @@ final class Sounds {
             let stem = f.deletingPathExtension().lastPathComponent.lowercased()
             guard let (e, name) = names.first(where: { stem == $0.1 || stem.hasPrefix($0.1 + "-") || stem.hasPrefix($0.1 + "_") }),
                   let data = try? Data(contentsOf: f) else { continue }
+            let take = Take(data: data, hits: e.feel == nil ? [] : Haptics.hits(in: f))
             // "shutter-125" or "shutter-125-2": recorded at 1/125 ("shutter-0.5": half a second).
             if e == .shutter {
                 let parts = stem.dropFirst(name.count + 1).split(whereSeparator: { $0 == "-" || $0 == "_" })
                 if let first = parts.first, let sp = Self.speed(String(first)) {
-                    atSpeed[sp, default: []].append(data)
+                    atSpeed[sp, default: []].append(take)
                     continue
                 }
             }
-            found[e, default: []].append(data)
+            found[e, default: []].append(take)
         }
         lock.lock()
         takes = found
@@ -122,9 +142,9 @@ final class Sounds {
         var i = Int.random(in: 0..<list.count)
         if list.count > 1, i == last[e] { i = (i + 1 + Int.random(in: 0..<(list.count - 1))) % list.count }
         last[e] = i
-        let data = list[i]
+        let take = list[i]
         lock.unlock()
-        play(data, after: delay, volume: volume)
+        play(take, feel: e.feel, after: delay, volume: volume)
     }
 
     /// Camera sounds on or off (the menu's toggle), remembered.
@@ -133,15 +153,21 @@ final class Sounds {
         set { UserDefaults.standard.set(newValue, forKey: "cameraSounds") }
     }
 
-    private func play(_ data: Data, after delay: Double, volume: Float) {
-        guard enabled else { return }
+    /// Plays the take, and its hits felt from the same moment (felt even with
+    /// the sounds off).
+    private func play(_ take: Take, feel: Float?, after delay: Double, volume: Float) {
         let start = { [weak self] in
-            guard let self, let p = try? AVAudioPlayer(data: data) else { return }
+            let rate = Float.random(in: 0.97...1.03)
+            guard let self, self.enabled, let p = try? AVAudioPlayer(data: take.data) else {
+                if let feel { Haptics.shared.play(take.hits, rate: Double(rate), gain: feel) }
+                return
+            }
             p.enableRate = true
-            p.rate = Float.random(in: 0.97...1.03)
+            p.rate = rate
             p.volume = volume * Float.random(in: 0.88...1.0)
             p.prepareToPlay()
             p.play()
+            if let feel { Haptics.shared.play(take.hits, rate: Double(rate), gain: feel) }
             self.playing.insert(p)
             // Let go of it once it has finished.
             DispatchQueue.main.asyncAfter(deadline: .now() + p.duration / Double(p.rate) + 0.5) { self.playing.remove(p) }
@@ -156,7 +182,7 @@ final class Sounds {
         // A recording made at (or within a stop of) this speed sounds right as it is.
         lock.lock()
         let nearest = shutterAt.keys.min { abs(log2($0 / seconds)) < abs(log2($1 / seconds)) }
-        var take: Data?
+        var take: Take?
         if let sp = nearest, let list = shutterAt[sp], !list.isEmpty {
             let close = abs(log2(sp / seconds)) <= 1
             let curtains = !(takes[.shutterOpen]?.isEmpty ?? true) && !(takes[.shutterClose]?.isEmpty ?? true)
@@ -170,7 +196,7 @@ final class Sounds {
         }
         lock.unlock()
         if let take {
-            play(take, after: 0, volume: 1)
+            play(take, feel: Event.shutter.feel, after: 0, volume: 1)
         } else if has(.shutterOpen) && has(.shutterClose) {
             // The curtains, apart by the exposure (at fast speeds they all but meet).
             play(.shutterOpen)

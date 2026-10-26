@@ -1381,6 +1381,11 @@ final class Viewer: NSObject, MTKViewDelegate {
                     [weak self] in
                     Sounds.shared.enabled.toggle()
                     self?.reopenMenu() },
+                .init(title: "Haptics: " + (Haptics.shared.enabled ? "on" : "off"),
+                      detail: "shutter, film advance and lens felt on the trackpad and controller (select to turn \(Haptics.shared.enabled ? "off" : "on"))") {
+                    [weak self] in
+                    Haptics.shared.enabled.toggle()
+                    self?.reopenMenu() },
                 .init(title: "Controls", detail: "every button, pad and keyboard") { [weak self] in
                     self?.menu?.showingHelp = true },
             ]
