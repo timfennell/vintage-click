@@ -135,7 +135,7 @@ struct CameraBody: Codable {
 
     /// Sets the shutter speed that best matches the meter reading.
     mutating func meterShutter(sceneLuminance lum: Float) {
-        let best = (0..<shutterSpeeds.count).min { a, b in
+        let best = (0...model.fastestShutter).min { a, b in
             var x = self, y = self
             x.shutterIndex = a
             y.shutterIndex = b
@@ -148,7 +148,28 @@ struct CameraBody: Codable {
         apertureIndex = max(0, min(lens.apertureStops.count - 1, apertureIndex + d))
     }
     mutating func changeShutter(_ d: Int) {
-        shutterIndex = max(0, min(shutterSpeeds.count - 1, shutterIndex + d))
+        shutterIndex = max(0, min(model.fastestShutter, shutterIndex + d))
+    }
+
+    /// Shutter-priority automatic (a body that has it): the camera sets the aperture.
+    var autoExposure: Bool? = nil
+    var autoOn: Bool { model.shutterPriority && (autoExposure ?? true) }
+
+    /// The aperture that best matches the meter at the set speed (shutter-priority).
+    mutating func meterAperture(sceneLuminance lum: Float) {
+        let stops = lens.apertureStops.indices
+        apertureIndex = stops.min { a, b in
+            var x = self, y = self
+            x.apertureIndex = a
+            y.apertureIndex = b
+            return abs(x.exposureStops + log2(lum / 0.18)) < abs(y.exposureStops + log2(lum / 0.18))
+        } ?? apertureIndex
+    }
+
+    /// Another body: its speeds and modes.
+    mutating func chooseBody(_ m: CameraModel) {
+        model = m
+        shutterIndex = min(shutterIndex, m.fastestShutter)
     }
     mutating func turnFocus(_ rate: Float, dt: Float) {
         focusM = max(lens.minFocusM, min(200, focusM * exp(rate * dt * 1.1)))

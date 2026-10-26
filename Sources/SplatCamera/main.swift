@@ -248,6 +248,9 @@ func configureSession() {
     if let t = tiltChoice { viewer.body.tilt = t }
     if let t = shiftChoice { viewer.body.shift = t }
     if let i = filterChoice, lensFilters.indices.contains(i) { viewer.body.filterIndex = i }
+    if let b = option("--body"), let m = CameraModel.all.first(where: { $0.model.lowercased() == b.lowercased() || $0.make.lowercased().hasPrefix(b.lowercased()) }) {
+        viewer.body.chooseBody(m)
+    }
     if let g = gelChoice, gels.indices.contains(g) {
         for k in viewer.lighting.lights.indices { viewer.lighting.lights[k].gel = g }
     }

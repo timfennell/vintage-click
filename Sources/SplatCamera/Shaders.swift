@@ -685,6 +685,10 @@ float3 meter_light(float3 outc, float2 pos, device const float* f, constant floa
     // it swings in from the dark surround.
     float edgeX = O[7].x;
     float lit = smoothstep(edgeX, edgeX + 3.5 * u, pos.x);
+    if (M[2].z > 0.5) {                     // a meter at the right: lit in from that edge
+        float edgeR = O[7].x + O[0].x * O[7].z;
+        lit = smoothstep(edgeR, edgeR - 3.5 * u, pos.x);
+    }
     float3 red = float3(0.9, 0.08, 0.05);
     lin = mix(lin, red * 0.75, core * 0.75 * lit) + red * glow * 0.03 * lit;
     return to_srgb(lin);

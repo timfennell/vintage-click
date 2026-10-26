@@ -25,6 +25,14 @@ final class ViewfinderHUD: NSView {
         var counter = ""
         var focus = ""
         var meterStops: Float = 0      // + over, - under
+        /// The meter's scale when it is not the shutter speeds (the Kwanon EF's
+        /// f-numbers), the setting marked on it, and whether it sits at the right.
+        var meterLabels: [String] = []
+        var meterSet = -1
+        var meterRight = false
+        /// Readouts in a lit window under the image (no LEDs), and the auto mark.
+        var windowReadout = false
+        var auto = false
         var shutterIndex = 7           // the speed set, index into shutterSpeeds
         var mode = ""                  // DOF preview, lighting, developing...
         var stats = ""                 // render speed: shown only when asked for (--stats)
@@ -156,7 +164,7 @@ final class ViewfinderHUD: NSView {
             text(info.stats, at: NSPoint(x: img.maxX, y: max(2, top)), size: 0.7 * u, color: dim.withAlphaComponent(0.6),
                  align: .right, width: img.width * 0.4, projected: false)
         }
-        drawLEDs(img, u: u)
+        if info.windowReadout { drawWindow(img, u: u) } else { drawLEDs(img, u: u) }
         if let m = info.measure { drawMeasure(m, in: img, u: u) }
     }
 
@@ -318,6 +326,41 @@ final class ViewfinderHUD: NSView {
              color: ledRed.withAlphaComponent(0.85), align: .center, width: img.width)
     }
 
+    /// The Kwanon EF's readout: no LEDs in 1973, but the set speed lit in a
+    /// small window under the image (lit from the scene, cream on black), with
+    /// an A while the camera sets the aperture; the distance and the frame beside it.
+    private func drawWindow(_ img: NSRect, u: CGFloat) {
+        let h = 2.0 * u
+        let y = img.maxY + (bounds.maxY - img.maxY - h) * 0.4
+        let cream = NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.80, alpha: 0.95)
+        let speed = info.shutter.hasSuffix("\"") ? String(info.shutter.dropLast()) + " s" : info.shutter
+        let win = NSRect(x: img.midX - 5 * u, y: y - 0.3 * u, width: 10 * u, height: h + 0.6 * u)
+        NSColor(white: 0.02, alpha: 0.9).setFill()
+        NSBezierPath(roundedRect: win, xRadius: 0.3 * u, yRadius: 0.3 * u).fill()
+        NSColor(white: 0.35, alpha: 0.6).setStroke()
+        let rim = NSBezierPath(roundedRect: win, xRadius: 0.3 * u, yRadius: 0.3 * u)
+        rim.lineWidth = 0.12 * u
+        rim.stroke()
+        text(speed, at: NSPoint(x: win.midX - (info.auto ? 1.2 * u : 0), y: y - 0.05 * u), size: h * 0.95, color: cream,
+             align: .center, width: win.width, projected: true)
+        if info.auto {
+            text("A", at: NSPoint(x: win.maxX - 2.0 * u, y: y + 0.15 * u), size: h * 0.7,
+                 color: NSColor(calibratedRed: 0.45, green: 0.95, blue: 0.70, alpha: 0.95), projected: true)
+        }
+        let dim2 = cream.withAlphaComponent(0.6)
+        text(info.focus == "∞" ? "∞" : info.focus, at: NSPoint(x: img.minX + img.width * 0.18, y: y + 0.2 * u), size: h * 0.6,
+             color: dim2, projected: true)
+        text("\(info.counter)  ·  \(info.iso)", at: NSPoint(x: img.maxX - img.width * 0.18, y: y + 0.2 * u), size: h * 0.6,
+             color: dim2, align: .right, width: img.width * 0.3, projected: true)
+        var notes: [String] = []
+        if let m = message, CACurrentMediaTime() < m.until { notes.append(m.text) }
+        if !info.mode.isEmpty { notes.append(info.mode) }
+        if !notes.isEmpty {
+            text(notes.joined(separator: "   ·   "), at: NSPoint(x: img.midX, y: y + h * 1.4), size: 0.75 * u,
+                 color: cream.withAlphaComponent(0.8), align: .center, width: img.width)
+        }
+    }
+
     // MARK: the meter
 
     /// Where the meter is, for the finder's shader to show it through the
@@ -330,20 +373,23 @@ final class ViewfinderHUD: NSView {
         var u: CGFloat
         var shutterIndex: Int
         var bounds: NSSize
+        var labels: [String] = []      // the scale, bottom to top (empty: the shutter speeds)
+        var red: [Bool] = []
+        var right = false
         /// The plate's texture covers the card and the set-speed tab beside it.
-        var plateRect: NSRect { NSRect(x: card.minX, y: card.minY, width: card.width + 2 * u, height: card.height) }
+        var plateRect: NSRect { NSRect(x: right ? card.minX - 2 * u : card.minX, y: card.minY, width: card.width + 2 * u, height: card.height) }
     }
     private(set) var meterShape: MeterShape?
 
-    private static func meterLayout(_ img: NSRect, u: CGFloat) -> NSRect {
+    private static func meterLayout(_ img: NSRect, u: CGFloat, right: Bool = false) -> NSRect {
         let cardW = 3.6 * u, cardH = img.height * 0.66
-        // Inside the frame, just in from its left edge (the needle swings in from outside).
-        return NSRect(x: img.minX + 1.0 * u, y: img.midY - cardH / 2, width: cardW, height: cardH)
+        // Inside the frame, just in from its edge (the needle swings in from outside).
+        return NSRect(x: right ? img.maxX - 1.0 * u - cardW : img.minX + 1.0 * u, y: img.midY - cardH / 2, width: cardW, height: cardH)
     }
 
-    /// Fastest at the top: the height of a (fractional) speed index on the card.
-    private static func speedY(_ index: CGFloat, card: NSRect, u: CGFloat) -> CGFloat {
-        let n = shutterSpeeds.count
+    /// Highest at the top: the height of a (fractional) index on a scale of n.
+    private static func speedY(_ index: CGFloat, card: NSRect, u: CGFloat, count: Int = shutterSpeeds.count) -> CGFloat {
+        let n = count
         let cap = 2.0 * u
         let step = (card.height - 2 * cap) / CGFloat(n)
         return card.minY + cap + (CGFloat(n - 1) - index + 0.5) * step
@@ -352,9 +398,11 @@ final class ViewfinderHUD: NSView {
     /// The needle swings (it has mass) to the speed the meter wants at this
     /// aperture; the finder's shader draws it and the plate.
     private func drawMeter(_ img: NSRect, u: CGFloat) {
-        let n = shutterSpeeds.count
-        let card = Self.meterLayout(img, u: u)
-        let set = CGFloat(info.shutterIndex)
+        let custom = !info.meterLabels.isEmpty
+        let n = custom ? info.meterLabels.count : shutterSpeeds.count
+        let right = info.meterRight
+        let card = Self.meterLayout(img, u: u, right: right)
+        let set = CGFloat(custom ? info.meterSet : info.shutterIndex)
         let want = max(-1.5, min(CGFloat(n) + 0.5, set + CGFloat(info.meterStops)))
         let now = CACurrentMediaTime()
         let dt = CGFloat(min(0.05, now - lastDraw))
@@ -363,13 +411,16 @@ final class ViewfinderHUD: NSView {
         needleSpeed += (k * (want - needle) - damp * needleSpeed) * dt
         needle += needleSpeed * dt
         // The needle aims through the reading's tick (ticks point at the pivot).
-        let pivot = NSPoint(x: card.minX - 9 * u, y: card.midY)
-        let aim = NSPoint(x: card.minX + 0.1 * u, y: Self.speedY(needle, card: card, u: u))
+        let pivot = NSPoint(x: right ? card.maxX + 9 * u : card.minX - 9 * u, y: card.midY)
+        let aim = NSPoint(x: right ? card.maxX - 0.1 * u : card.minX + 0.1 * u, y: Self.speedY(needle, card: card, u: u, count: n))
         // The tip ends just past the ticks, short of the numbers.
-        let reach = (card.minX + 1.15 * u - pivot.x) / (aim.x - pivot.x)
+        let reach = ((right ? card.maxX - 1.15 * u : card.minX + 1.15 * u) - pivot.x) / (aim.x - pivot.x)
+        // Ends of a custom scale in red: beyond them the camera cannot follow.
+        let red: [Bool] = custom ? info.meterLabels.indices.map { _ in false } : []
         meterShape = MeterShape(card: card, pivot: pivot,
                                 tip: NSPoint(x: pivot.x + (aim.x - pivot.x) * reach, y: pivot.y + (aim.y - pivot.y) * reach),
-                                u: u, shutterIndex: info.shutterIndex, bounds: bounds.size)
+                                u: u, shutterIndex: custom ? info.meterSet : info.shutterIndex, bounds: bounds.size,
+                                labels: info.meterLabels, red: red, right: right)
         // Keep animating while it is still swinging.
         if abs(needleSpeed) > 0.01 || abs(want - needle) > 0.01 {
             DispatchQueue.main.async { [weak self] in self?.needsDisplay = true }
@@ -396,21 +447,25 @@ final class ViewfinderHUD: NSView {
         let mAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 1.0 * u, weight: .semibold),
                                                      .foregroundColor: NSColor(white: 0.0, alpha: 0.55)]
         let mark = NSAttributedString(string: "M", attributes: mAttrs)
-        mark.draw(at: NSPoint(x: card.midX - mark.size().width / 2, y: card.maxY - cap * 0.8 + (cap * 0.8 - mark.size().height) / 2))
-        let step = (card.height - 2 * cap) / CGFloat(shutterSpeeds.count)
-        for (i, sp) in shutterSpeeds.enumerated() {
-            let slow = sp.seconds >= 1.0 / 30
-            let y = speedY(CGFloat(i), card: card, u: u)
+        if m.labels.isEmpty { mark.draw(at: NSPoint(x: card.midX - mark.size().width / 2, y: card.maxY - cap * 0.8 + (cap * 0.8 - mark.size().height) / 2)) }
+        let labels: [(String, Bool)] = m.labels.isEmpty ? shutterSpeeds.map { ($0.label, $0.seconds >= 1.0 / 30) }
+                                                        : m.labels.indices.map { (m.labels[$0], m.red.indices.contains($0) && m.red[$0]) }
+        let n = labels.count
+        let step = (card.height - 2 * cap) / CGFloat(n)
+        for (i, item) in labels.enumerated() {
+            let slow = item.1
+            let y = speedY(CGFloat(i), card: card, u: u, count: n)
             let size = min(step * 0.58, card.width * 0.25)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont(name: "Futura-Medium", size: size) ?? NSFont.systemFont(ofSize: size, weight: .medium),
                 .foregroundColor: slow ? red : cream,
             ]
-            let str = NSAttributedString(string: sp.label, attributes: attrs)
+            let str = NSAttributedString(string: item.0, attributes: attrs)
             let sz = str.size()
-            str.draw(at: NSPoint(x: card.maxX - sz.width - 0.35 * u, y: y - sz.height / 2))
-            // A tick at each speed, along the needle's line when it points there.
-            let p0 = NSPoint(x: card.minX + 0.1 * u, y: y)
+            // Numbers on the far side from the needle.
+            str.draw(at: NSPoint(x: m.right ? card.minX + 0.35 * u : card.maxX - sz.width - 0.35 * u, y: y - sz.height / 2))
+            // A tick at each mark, along the needle's line when it points there.
+            let p0 = NSPoint(x: m.right ? card.maxX - 0.1 * u : card.minX + 0.1 * u, y: y)
             let dx = p0.x - m.pivot.x, dy = p0.y - m.pivot.y
             let len = (dx * dx + dy * dy).squareRoot()
             let tick = NSBezierPath()
@@ -420,14 +475,15 @@ final class ViewfinderHUD: NSView {
             (slow ? red : cream).withAlphaComponent(0.85).setStroke()
             tick.stroke()
         }
-        // The green tab: the speed you set.
+        // The green tab: what is set (the speed, or the camera's aperture).
         NSColor(calibratedRed: 0.45, green: 0.95, blue: 0.70, alpha: 0.9).setFill()
         let tab = NSBezierPath()
-        let ty = speedY(CGFloat(m.shutterIndex), card: card, u: u)
-        tab.move(to: NSPoint(x: card.maxX - 0.2 * u, y: ty - 0.45 * step))
-        tab.line(to: NSPoint(x: card.maxX + 1.4 * u, y: ty - 0.25 * step))
-        tab.line(to: NSPoint(x: card.maxX + 1.4 * u, y: ty + 0.25 * step))
-        tab.line(to: NSPoint(x: card.maxX - 0.2 * u, y: ty + 0.45 * step))
+        let ty = speedY(CGFloat(m.shutterIndex), card: card, u: u, count: n)
+        let edge = m.right ? card.minX + 0.2 * u : card.maxX - 0.2 * u, out = m.right ? card.minX - 1.4 * u : card.maxX + 1.4 * u
+        tab.move(to: NSPoint(x: edge, y: ty - 0.45 * step))
+        tab.line(to: NSPoint(x: out, y: ty - 0.25 * step))
+        tab.line(to: NSPoint(x: out, y: ty + 0.25 * step))
+        tab.line(to: NSPoint(x: edge, y: ty + 0.45 * step))
         tab.close()
         tab.fill()
     }

@@ -491,6 +491,8 @@ final class Viewer: NSObject, MTKViewDelegate {
             let hit: SIMD3<Float>? = p[0] > 0 && fromCamera ? eye + axis * p[0] : nil
             DispatchQueue.main.async {
                 self?.meterLum = lum
+                // Shutter-priority: the camera sets the aperture from the meter.
+                if let self, self.body.autoOn { self.body.meterAperture(sceneLuminance: lum) }
                 self?.crosshairHit = hit
             }
         }
@@ -584,7 +586,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         func px(_ p: NSPoint) -> SIMD2<Float> { SIMD2(Float(p.x * sx), Float(p.y * sy)) }
         return [SIMD4(Float(pr.minX * sx), Float(pr.minY * sy), Float(pr.width * sx), Float(pr.height * sy)),
                 SIMD4(lowHalf: px(shape.pivot), highHalf: px(shape.tip)),
-                SIMD4(1, Float(shape.u * sy), 0, 0)]
+                SIMD4(1, Float(shape.u * sy), shape.right ? 1 : 0, 0)]
     }
 
     private static func drawMeterTexture(_ shape: ViewfinderHUD.MeterShape, sx: CGFloat, sy: CGFloat,
@@ -748,6 +750,11 @@ final class Viewer: NSObject, MTKViewDelegate {
             return
         case .camera:
             let stop = body.apertureIndex
+            if (p.contains(.left) || p.contains(.right)) && body.autoOn {
+                // Turning the ring off A: manual.
+                body.autoExposure = false
+                hud?.flash("MANUAL EXPOSURE")
+            }
             if p.contains(.left) { body.changeAperture(-1) }
             if p.contains(.right) { body.changeAperture(1) }
             if body.apertureIndex != stop { Sounds.shared.play(.aperture, volume: 0.6) }
@@ -1224,8 +1231,25 @@ final class Viewer: NSObject, MTKViewDelegate {
                 .init(title: "Quit", detail: "") { [weak self] in self?.appActions?.quit() },
             ]
         case .bag:
-            return [
+            var bagItems: [Item] = [
                 back(to: .main),
+                .init(title: "Camera body: " + body.model.fullName, detail: body.model.about + " (select to change)") { [weak self] in
+                    guard let self else { return }
+                    let all = CameraModel.all
+                    let i = all.firstIndex { $0.fullName == self.body.model.fullName } ?? 0
+                    self.body.chooseBody(all[(i + 1) % all.count])
+                    Sounds.shared.play(.lensChange)
+                    self.reopenMenu() },
+            ]
+            if body.model.shutterPriority {
+                bagItems.append(.init(title: "Exposure: " + (body.autoOn ? "shutter-priority auto" : "manual"),
+                                      detail: "auto: set the speed, the camera sets the aperture; turning the aperture yourself is manual") {
+                    [weak self] in
+                    guard let self else { return }
+                    self.body.autoExposure = !self.body.autoOn
+                    self.reopenMenu() })
+            }
+            return bagItems + [
                 .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
                     self?.openLenses() },
                 .init(title: "Lens filter: " + body.filter.name, detail: "ND, colour, star, soft and mist (V)") { [weak self] in
@@ -1707,7 +1731,15 @@ final class Viewer: NSObject, MTKViewDelegate {
         guard !enlargeQueue.isEmpty, loop.pendingExposures == 0 else { return }
         let u = enlargeQueue.removeFirst()
         enlargeDone += 1
-        guard let r = ShotRecord.load(for: u), let accum = loop.makeAccumulator(r.width, r.height) else { return }
+        guard var r = ShotRecord.load(for: u), let accum = loop.makeAccumulator(r.width, r.height) else { return }
+        // Lenses are numbered by their place in the bag, which grows: find it by name.
+        if let d = try? Data(contentsOf: u.deletingPathExtension().appendingPathExtension("json")),
+           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let name = o["lens"] as? String,
+           let i = lensBag.firstIndex(where: { $0.name == name }), i != r.body.lensIndex {
+            let stop = r.body.takingAperture
+            r.body.lensIndex = i
+            r.body.apertureIndex = r.body.lens.apertureStops.indices.min { abs(r.body.lens.apertureStops[$0] - stop) < abs(r.body.lens.apertureStops[$1] - stop) } ?? 0
+        }
         let job = ExposureJob(camera: r.camera, body: r.body, lighting: r.lighting, frameNumber: r.frameNumber,
                               cells: r.body.lens.isFisheye ? [.zero] : r.body.cellCentres(r.cells),
                               accum: accum, size: (r.width, r.height), wantsNegative: r.negative)
@@ -1825,6 +1857,14 @@ final class Viewer: NSObject, MTKViewDelegate {
         i.counter = b.framesLeft > 0 ? "\(b.framesShot + 1)" : "E"
         i.focus = b.focusM >= 100 ? "∞" : String(format: "%.2f m", b.focusM)
         i.meterStops = b.exposureStops + log2(max(meterLum, 1e-4) / 0.18)
+        if b.model.shutterPriority {
+            // The aperture scale: smallest openings at the top, the camera's choice set.
+            i.meterLabels = b.lens.apertureStops.map { $0 < 10 ? String(format: "%.1f", $0) : String(format: "%.0f", $0) }
+            i.meterSet = b.apertureIndex
+            i.meterRight = true
+            i.windowReadout = true
+            i.auto = b.autoOn
+        }
         var modes: [String] = []
         if b.dofPreview { modes.append("DOF PREVIEW") }
         if mode == .lighting { modes.append("LIGHTING") }

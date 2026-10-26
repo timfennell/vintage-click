@@ -11,6 +11,21 @@ struct CameraModel: Codable {
     var fullName: String { "\(make) \(model)" }
 
     static let ohiKorS2 = CameraModel(make: "Ohi Kor", model: "S2", serial: "7392051", year: 1974)
+    /// Inspired by the 1973 Canon EF: shutter-priority automatic, the meter's
+    /// needle on an aperture scale at the right of the finder.
+    static let kwanonEF = CameraModel(make: "Kwanon", model: "EF", serial: "0213874", year: 1973)
+
+    /// The bodies in the bag.
+    static let all: [CameraModel] = [ohiKorS2, kwanonEF]
+
+    /// How each one works (looked up by model, so saved shots keep only the name).
+    var shutterPriority: Bool { make == "Kwanon" && model == "EF" }
+    /// The fastest speed it has (index into shutterSpeeds; the slowest is 1 s).
+    var fastestShutter: Int { shutterPriority ? (shutterSpeeds.firstIndex { $0.label == "1000" } ?? shutterSpeeds.count - 1) : shutterSpeeds.count - 1 }
+    var about: String {
+        shutterPriority ? "1973 · shutter-priority auto, needle on an aperture scale, 1 s to 1/1000"
+                        : "1974 · manual, needle on a speed scale, LED readouts, 1 s to 1/4000"
+    }
 }
 
 /// What a camera of the day would have written on the frame, had it had
