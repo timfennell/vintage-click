@@ -285,16 +285,21 @@ final class ViewfinderHUD: NSView {
         let h = 2.0 * u
         let y = img.maxY + (bounds.maxY - img.maxY - h) * 0.4
         // Fixed displays, as in the camera: aperture (an F, then three places),
-        // speed (four), distance (four), the frame counter (two).
-        let ax = img.minX + img.width * 0.16
+        // speed (four), film speed (five), distance (four), the frame counter (two).
+        let ax = img.minX + img.width * 0.07
         led("F", at: NSPoint(x: ax, y: y), height: h, cells: 1)
         led(info.aperture, at: NSPoint(x: ax + h * 0.52 * 1.45, y: y), height: h, cells: 3)
         // Whole seconds carry a small "s" (2 s is not 1/2), in its fixed place.
         let seconds = info.shutter.hasSuffix("\"")
         let sEnd = led(seconds ? String(info.shutter.dropLast()) : info.shutter,
-                       at: NSPoint(x: img.minX + img.width * 0.34, y: y), height: h, cells: 4)
+                       at: NSPoint(x: img.minX + img.width * 0.25, y: y), height: h, cells: 4)
         if seconds { text("s", at: NSPoint(x: sEnd + 0.1 * u, y: y + h * 0.1), size: h * 0.75, color: ledRed, projected: false) }
-        let fx = img.minX + img.width * 0.54
+        // The film's speed as rated: ISO at box speed, EI pushed or pulled.
+        let isoX = img.minX + img.width * 0.45
+        let rated = info.stock.contains(" at EI ")
+        text(rated ? "EI" : "ISO", at: NSPoint(x: isoX - h * 1.15, y: y + h * 0.1), size: h * 0.5, color: ledRed, projected: false)
+        led(String(info.iso), at: NSPoint(x: isoX, y: y), height: h, cells: 5)
+        let fx = img.minX + img.width * 0.66
         if info.focus == "∞" {
             let end = led("", at: NSPoint(x: fx, y: y), height: h, cells: 4)
             text("∞", at: NSPoint(x: end - h * 1.6, y: y - 0.45 * h), size: h * 1.3, color: ledRed, projected: false)
@@ -303,12 +308,12 @@ final class ViewfinderHUD: NSView {
             let end = led(info.focus.replacingOccurrences(of: " m", with: ""), at: NSPoint(x: fx, y: y), height: h, cells: 4)
             text("m", at: NSPoint(x: end + 0.2 * u, y: y + h * 0.1), size: h * 0.75, color: ledRed, projected: false)
         }
-        led(info.counter, at: NSPoint(x: img.minX + img.width * 0.80, y: y), height: h, cells: 2)
+        led(info.counter, at: NSPoint(x: img.minX + img.width * 0.87, y: y), height: h, cells: 2)
         // Small red notes under them: modes, messages, the film's speed.
         var notes: [String] = []
         if let m = message, CACurrentMediaTime() < m.until { notes.append(m.text) }
         if !info.mode.isEmpty { notes.append(info.mode) }
-        notes.append(info.stock.contains(" at EI ") ? "EI \(info.iso) · " + (info.stock.contains("push") ? "PUSH" : "PULL") : "ISO \(info.iso)")
+        if rated { notes.append(info.stock.contains("push") ? "PUSHED" : "PULLED") }
         text(notes.joined(separator: "   ·   "), at: NSPoint(x: img.midX, y: y + h * 1.3), size: 0.75 * u,
              color: ledRed.withAlphaComponent(0.85), align: .center, width: img.width)
     }
