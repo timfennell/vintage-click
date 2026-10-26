@@ -25,8 +25,24 @@ final class Haptics {
     }
 
     private var engines: [ObjectIdentifier: CHHapticEngine] = [:]
+    /// The trackpad pressed in (a click): its own click is all that is felt
+    /// then, so a tap due meanwhile waits for the release.
+    private var pressed = false
+    private var waiting: NSHapticFeedbackManager.FeedbackPattern?
 
     init() {
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] e in
+            guard let self else { return e }
+            self.pressed = e.type == .leftMouseDown
+            if !self.pressed, let p = self.waiting {
+                self.waiting = nil
+                // Just after the click lets go: click, then the knock.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.012) {
+                    NSHapticFeedbackManager.defaultPerformer.perform(p, performanceTime: .now)
+                }
+            }
+            return e
+        }
         // Engines are slow to start: have one ready on each controller as it arrives.
         NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] n in
             if let c = n.object as? GCController { _ = self?.engine(for: c) }
@@ -46,7 +62,7 @@ final class Haptics {
     }
 
     /// The trackpad has only a few fixed taps and felt only under a finger: the
-    /// strongest hits, kept apart so they stay taps, a firmer one for a hard hit.
+    /// strongest hits, kept apart so they stay taps, the firmest for a hard hit.
     private func trackpad(_ hits: [HapticHit], rate: Double, gain: Float) {
         var last = -1.0, count = 0
         for h in hits where h.strength * gain >= 0.3 && count < 4 {
@@ -54,8 +70,16 @@ final class Haptics {
             guard t - last >= 0.05 else { continue }
             last = t
             count += 1
-            let pattern: NSHapticFeedbackManager.FeedbackPattern = h.strength * gain > 0.7 ? .generic : .alignment
-            let fire = { NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now) }
+            let pattern: NSHapticFeedbackManager.FeedbackPattern = h.strength * gain > 0.6 ? .levelChange : .generic
+            let fire = { [weak self] in
+                guard let self else { return }
+                if self.pressed {
+                    // Keep the firmest due while pressed for the release.
+                    if self.waiting != .levelChange { self.waiting = pattern }
+                } else {
+                    NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
+                }
+            }
             if t <= 0.002 { fire() } else { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: fire) }
         }
     }
