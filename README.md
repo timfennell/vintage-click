@@ -110,6 +110,16 @@ The camera bag holds three bodies (select **Camera body** in the bag to change):
   subjects frame a little differently from what the window shows, as on the
   real camera.
 
+<p>
+<img src="docs/screenshots/body-kwanon-ef.jpg" width="49%" alt="The Kwanon EF's finder">
+<img src="docs/screenshots/body-lahntal-r5.jpg" width="49%" alt="The Lahntal R5's rangefinder window">
+</p>
+
+*Left: the Kwanon EF, the needle on its aperture scale. Right: the Lahntal R5
+focused at 0.7 m. The 50 mm bright frame has moved down and right for parallax,
+and the gilded patch in the middle shows the distant trees doubled, because
+they are out of focus.*
+
 ### Lenses
 
 ![The camera bag](docs/screenshots/bag.jpg)
@@ -200,6 +210,22 @@ theatre-style hard-edged zoom spot, takes metal **gobos** in its gate: a
 window, venetian blinds, a church window, bars, a leaf breakup. **K** steps a
 gobo's focus from sharp to soft, or a cookie's distance from the lamp.
 
+**Lens flare** (**P** or Select in lighting mode, for each light): a light
+facing the lens flares as that lens would. You get veiling glare, a starburst
+from the aperture blades (more points as you stop down), and ghosts shaped
+like the aperture. The ghosts are coloured by the lens's dispersion, softened
+by its field curvature, and brighter on single-coated glass. A filter on the
+lens adds a ghost of its own. The same flare shows in the finder at the
+taking aperture.
+
+<p>
+<img src="docs/screenshots/flare-finder.jpg" width="49%" alt="A Fresnel facing the lens, in the finder">
+<img src="docs/screenshots/photo-flare.jpg" width="49%" alt="The same light on film at f/8">
+</p>
+
+*A Fresnel aimed into the lens: its glow in the finder at f/1.4 (left), and on
+film at f/8 at dusk (right), with an 8-point starburst, coloured ghosts and veiling glare.*
+
 ### The light table
 
 ![The light table](docs/screenshots/lighttable.jpg)
@@ -210,6 +236,15 @@ on a pad): the whole session's rolls, each cut into strips of six with real
 edge printing, under an old brass loupe with its own optics. Slide the loupe
 around, turn its knob to zoom from 2x to 10x, and mark keepers with a red
 grease pencil.
+
+**The enlarger and the print wall:** mark the frames you like and press **Y**
+(or **P**) to enlarge them. Each one is printed again at full quality from how it
+was taken. Then press **X** (or **G**) to see the session's enlargements matted and
+L-pinned to an eggshell gallery wall under track lights. Walk along it with the
+sticks or WASD, step closer with the triggers or wheel, move from print to print
+with the d-pad, and press **A** to look closely.
+
+![The print wall](docs/screenshots/print-wall.jpg)
 
 Every frame is saved as a PNG with a JSON of how it was taken, and optionally as
 a high-dynamic-range linear **DNG** (menu > Digital negative) for a raw developer.
