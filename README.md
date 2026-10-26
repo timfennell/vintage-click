@@ -215,8 +215,8 @@ facing the lens flares as that lens would. You get veiling glare, a starburst
 from the aperture blades (more points as you stop down), and ghosts shaped
 like the aperture. The ghosts are coloured by the lens's dispersion, softened
 by its field curvature, and brighter on single-coated glass. A filter on the
-lens adds a ghost of its own. The same flare shows in the finder at the
-taking aperture.
+lens adds a ghost of its own. You see the flare in the finder too, before
+you shoot.
 
 <p>
 <img src="docs/screenshots/flare-finder.jpg" width="49%" alt="A Fresnel facing the lens, in the finder">
@@ -224,7 +224,7 @@ taking aperture.
 </p>
 
 *A Fresnel aimed into the lens: its glow in the finder at f/1.4 (left), and on
-film at f/8 at dusk (right), with an 8-point starburst, coloured ghosts and veiling glare.*
+film at f/8 at dusk (right), with a starburst, coloured ghosts and veiling glare.*
 
 ### The light table
 
