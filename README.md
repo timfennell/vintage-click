@@ -236,6 +236,11 @@ also scatters more of the light into haze. Each lens's flaws are its own, and
 each ghost shows those of a different element.
 
 <p>
+<img src="docs/screenshots/flare-ghost-spectral.jpg" width="49%" alt="A Petzval ghost on film: its edge fringes continuously from blue to red, with dust specks and cleaning marks">
+<img src="docs/screenshots/grating-magenta-gel.jpg" width="49%" alt="A Spectral Star grating on a lamp through a magenta gel: rainbow spikes mostly red and blue">
+</p>
+
+<p>
 <img src="docs/screenshots/flare-finder.jpg" width="49%" alt="A Fresnel facing the lens, in the finder">
 <img src="docs/screenshots/photo-flare.jpg" width="49%" alt="The same light on film at f/8">
 </p>
