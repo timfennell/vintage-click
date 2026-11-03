@@ -213,10 +213,27 @@ gobo's focus from sharp to soft, or a cookie's distance from the lamp.
 **Lens flare** (**P** or Select in lighting mode, for each light): a light
 facing the lens flares as that lens would. You get veiling glare, a starburst
 from the aperture blades (more points as you stop down), and ghosts shaped
-like the aperture. The ghosts are coloured by the lens's dispersion, softened
-by its field curvature, and brighter on single-coated glass. A filter on the
-lens adds a ghost of its own. You see the flare in the finder too, before
-you shoot.
+like the aperture. The ghosts are softened by the lens's field curvature and
+brighter on single-coated glass. A filter on the lens adds a ghost of its own.
+You see the flare in the finder too, before you shoot.
+
+The flare is worked out wavelength by wavelength, from the light's own
+spectrum: 3200 K tungsten through its gel (each gel has a transmission curve,
+fitted to its colour). The glass's dispersion bends each part of the spectrum
+its own amount, so a ghost's edge runs continuously through the colours, as
+strong in each as the light is there. A diffraction grating spreads that same
+spectrum along its spikes, order after order, so the rainbow isn't even. A
+tungsten lamp's is dim in the blue and strong in the red, and a magenta gel's
+all but loses the green. Bright points in the scene spike from a smooth
+spectrum fitted to their colour.
+
+Old glass shows its age in the ghosts. Every lens carries some dust (small
+dark specks with a faint bright fringe), and the old, rare and home-made ones
+carry more. They also have cleaning marks, scratches in the coating that
+throw soft streaks through a bright light, and on some of them fungus (a dark,
+branching lace). The Soviet and old Jena glass has seed bubbles. Worn glass
+also scatters more of the light into haze. Each lens's flaws are its own, and
+each ghost shows those of a different element.
 
 <p>
 <img src="docs/screenshots/flare-finder.jpg" width="49%" alt="A Fresnel facing the lens, in the finder">

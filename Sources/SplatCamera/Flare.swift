@@ -33,6 +33,21 @@ enum Flare {
         ["Exotic", "Toys & Mods"].contains(l.collection) || l.name.contains("Petzval") || l.name.contains("Holga")
     }
 
+    /// How much dust and how many cleaning marks a lens's glass carries (0 clean, up to 3):
+    /// every real lens some, the old, rare and home-made more.
+    static func dustGrade(_ l: Lens) -> Int {
+        switch l.collection {
+        case "Toys & Mods": return 3
+        case "Exotic", "Screw-Mount Classics", "Bokeh Monsters": return 2
+        default: return 1
+        }
+    }
+
+    /// Seed bubbles in the glass: the old Soviet and Jena lenses'.
+    static func bubbles(_ l: Lens) -> Bool {
+        ["Krasnogorsk", "Leningrad", "Jena"].contains { l.name.hasPrefix($0) }
+    }
+
     /// A light as seen from the camera: where it is on the frame (0...1, may be
     /// off it), its lit face (round or a panel: two half-extent vectors in
     /// pixels, and its brightness in frame light), and, for the flare, how
@@ -48,6 +63,7 @@ enum Flare {
         var faceRound = true
         var face: SIMD3<Float> = .zero          // the face's brightness (frame light)
         var flare = false
+        var gel = 0                             // its gel (index into gels): the light's spectrum
     }
 
     static func sources(plot: LightingPlot, view V: [Float], position: SIMD3<Float>, fx: Float, axis: SIMD2<Float>,
@@ -101,7 +117,7 @@ enum Flare {
             let blur = (b.lens.focalMM / 1000 / n) * abs(1 / dm - 1 / max(b.focusM, 0.05)) * fx / diag
             out.append(Source(uv: uv, radius: fx * max(fw, fh) * 0.5 * units / dist / diag, rgb: e * (.pi / omega),
                               distance: dist, px: px, blur: blur, faceA: pa - px, faceB: pb - px,
-                              faceRound: round, face: face, flare: light.flareOn))
+                              faceRound: round, face: face, flare: light.flareOn, gel: light.gel))
             if out.count == maxLights { break }
         }
         return out
@@ -114,7 +130,9 @@ enum Flare {
         for c in l.name.utf8 { seed = (seed ^ UInt32(c)) &* 16777619 }
         var rows: [SIMD4<Float>] = [
             SIMD4(Float(s.count), Float(l.blades), l.bladeRotation, min(1, l.maxAperture / n)),
-            SIMD4(singleCoated(l) ? 1 : 0, Float(seed % 10000), l.obstruction, l.squeeze),
+            SIMD4(singleCoated(l) ? 1 : 0,
+                  Float(seed % 10000) + 10000 * Float(dustGrade(l)) + (bubbles(l) ? 40000 : 0),
+                  l.obstruction, l.squeeze),
             // Dispersion (from the lens's lateral colour) and how fast ghosts soften
             // away from the axis (field curvature and spherical aberration).
             SIMD4(axisUV.x, axisUV.y, 0.008 + l.lateralCA * 4,
@@ -127,7 +145,7 @@ enum Flare {
             rows.append(SIMD4(src.uv.x, src.uv.y, src.radius, i < visibility.count ? visibility[i] : 1))
             rows.append(SIMD4(src.rgb, src.blur))
             rows.append(SIMD4(src.faceA.x, src.faceA.y, src.faceB.x, src.faceB.y))
-            rows.append(SIMD4(src.face, (src.flare ? 1 : 0) + (src.faceRound ? 2 : 0)))
+            rows.append(SIMD4(src.face, (src.flare ? 1 : 0) + (src.faceRound ? 2 : 0) + 4 * Float(src.gel)))
         }
         while rows.count < rowCount { rows.append(.zero) }
         return rows
