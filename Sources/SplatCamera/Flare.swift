@@ -26,7 +26,8 @@ extension BeamTable {
 
 enum Flare {
     static let maxLights = 8
-    static var rowCount: Int { 4 + 4 * maxLights }
+    /// The lens, the filter, four rows per light, then the lights' distances (four to a row).
+    static var rowCount: Int { 4 + 4 * maxLights + maxLights / 4 }
 
     /// Older and odd optics are single-coated: brighter, more colourful ghosts.
     static func singleCoated(_ l: Lens) -> Bool {
@@ -160,7 +161,13 @@ enum Flare {
             rows.append(SIMD4(src.faceA.x, src.faceA.y, src.faceB.x, src.faceB.y))
             rows.append(SIMD4(src.face, (src.flare ? 1 : 0) + (src.faceRound ? 2 : 0) + 4 * Float(src.gel)))
         }
-        while rows.count < rowCount { rows.append(.zero) }
+        while rows.count < 4 + 4 * maxLights { rows.append(.zero) }
+        // How far each light is (scene units): its face hides behind anything nearer.
+        for r in 0..<(maxLights / 4) {
+            var d = SIMD4<Float>.zero
+            for k in 0..<4 where r * 4 + k < s.count { d[k] = s[r * 4 + k].distance }
+            rows.append(d)
+        }
         return rows
     }
 

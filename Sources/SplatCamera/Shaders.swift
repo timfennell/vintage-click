@@ -536,6 +536,39 @@ float glass_flaws(float2 d, float seed, float k, float dust, bool bubbles) {
                + 0.15 * min(lace, 1.0) * (1 - min(lace, 1.0)) * 4, 0.0);
 }
 
+// Each lamp's own lit face at pixel `p` (px), as far as this pixel sees it:
+// hidden where the scan has a surface nearer than the lamp (T its
+// transmittance, z the ray depth there). Its lens or panel at its true
+// brightness, seen at its angle, spread by the lamp's own defocus.
+// The lamps' distances follow the per-light rows: F[36 + li / 4][li % 4].
+float3 flare_faces(float2 p, float2 size, constant float4* F, float T, float z) {
+    int nl = int(F[0].x);
+    float diag = length(size);
+    float3 add = 0;
+    for (int li = 0; li < nl; li++) {
+        float4 a = F[4 + 4 * li], b = F[5 + 4 * li], fa = F[6 + 4 * li], fb = F[7 + 4 * li];
+        if (!any(fb.rgb > 0)) continue;
+        float dist = F[36 + li / 4][li % 4];
+        float seen = (dist > 0 && z > 0 && z < dist * 0.97) ? T : 1.0;
+        if (seen <= 0.001) continue;
+        float2 s = a.xy * size;
+        float2 A = fa.xy, B = fa.zw;
+        float det = A.x * B.y - A.y * B.x;
+        float rf = sqrt(max(abs(det), 0.25));                // its size, px
+        float blurPx = b.w * diag;
+        float grow = (rf + blurPx) / rf;
+        float2 d = p - s;
+        if (dot(d, d) > (rf * grow + 4) * (rf * grow + 4) * 4) continue;
+        float2 ab = abs(det) > 1e-6 ? float2(d.x * B.y - d.y * B.x, A.x * d.y - A.y * d.x) / det : d / rf;
+        bool round = fmod(fb.w, 4.0) >= 2.0;
+        float rho = (round ? length(ab) : max(abs(ab.x), abs(ab.y))) / grow;
+        float soft = (0.7 + blurPx) / (rf * grow) + 0.02;
+        float face = 1 - smoothstep(1 - soft, 1 + soft, rho);
+        add += fb.rgb * seen * face / (grow * grow);
+    }
+    return add;
+}
+
 float3 lens_flare(float2 uv, float2 size, constant float4* F) {
     int nl = int(F[0].x);
     if (nl <= 0) return 0;
@@ -559,19 +592,14 @@ float3 lens_flare(float2 uv, float2 size, constant float4* F) {
         // The lamp's own lit face, every light: its lens or panel at its true
         // brightness, seen at its angle, spread by the light's own defocus; and
         // the bloom the lens scatters round anything that bright.
+        // (The face itself is flare_faces: drawn behind the scan, so what stands
+        // in front of the lamp hides it.)
         if (any(fb.rgb > 0)) {
             float2 A = fa.xy, B = fa.zw;
             float det = A.x * B.y - A.y * B.x;
             float rf = sqrt(max(abs(det), 0.25));                // its size, px
             float blurPx = b.w * diag;
-            float grow = (rf + blurPx) / rf;
             float2 d = p - s;
-            float2 ab = abs(det) > 1e-6 ? float2(d.x * B.y - d.y * B.x, A.x * d.y - A.y * d.x) / det : d / rf;
-            bool round = fmod(fb.w, 4.0) >= 2.0;
-            float rho = (round ? length(ab) : max(abs(ab.x), abs(ab.y))) / grow;
-            float soft = (0.7 + blurPx) / (rf * grow) + 0.02;
-            float face = 1 - smoothstep(1 - soft, 1 + soft, rho);
-            add += fb.rgb * vis * face / (grow * grow);
             // Bloom: a few per cent of its light scattered close round it.
             float flux = dot(fb.rgb, float3(0.2126, 0.7152, 0.0722)) * vis * M_PI_F * rf * rf;
             float r0 = 4.0 + 0.6 * rf + blurPx;
@@ -901,7 +929,12 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
         float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;
         float inside = 1 - smoothstep(-1.0, 1.0, edge);
         if (inside > 0) {
-            float3 fl = lens_flare(pe / O[0].xy, O[0].xy, FL) * O[5].y * O[9].rgb * inside;
+            // The lamps' faces behind the scan, as the frame's depth has it here.
+            uint W = uint(O[0].x), H = uint(O[0].y), n = W * H;
+            uint2 q = uint2(clamp(pe, float2(0), O[0].xy - 1));
+            uint j = q.y * W + q.x;
+            float3 faces = flare_faces(pe, O[0].xy, FL, f[3 * n + j], f[4 * n + j]);
+            float3 fl = (lens_flare(pe / O[0].xy, O[0].xy, FL) + faces) * O[5].y * O[9].rgb * inside;
             outc = float3(lin_to_srgb(srgb_to_lin(outc.r) + fl.r), lin_to_srgb(srgb_to_lin(outc.g) + fl.g),
                           lin_to_srgb(srgb_to_lin(outc.b) + fl.b));
         }
@@ -1125,6 +1158,7 @@ kernel void shell_store(device const float* f [[buffer(0)]], constant float4* B 
 
 kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [[buffer(1)]],
                        device float4* acc [[buffer(2)]], constant float4* L [[buffer(3)]],
+                       constant float4* FL [[buffer(4)]],
                        uint2 g [[thread_position_in_grid]]) {
     uint tw = uint(L[2].z), th = uint(L[2].w);
     uint2 p = g + uint2(L[2].xy);
@@ -1134,7 +1168,9 @@ kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [
     uint i = idx(p, O);
     float w = pupil(L[0].xy, field(float2(p) + 0.5, O), O, L[1].w) * L[0].z;
     float4 prev = L[0].w > 0.5 ? float4(0) : acc[i];
-    acc[i] = prev + float4(to_lin(c) * L[1].rgb * w, w);
+    // The lamps' own faces, behind whatever of the scan stands in front of them.
+    float3 faces = FL[0].x > 0 ? flare_faces(float2(p) + 0.5, O[0].xy, FL, f[3 * n + j], f[4 * n + j]) : 0;
+    acc[i] = prev + float4((to_lin(c) + faces) * L[1].rgb * w, w);
 }
 
 float3 acc_at(device const float4* acc, float2 p, constant float4* O) {

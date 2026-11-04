@@ -343,6 +343,8 @@ final class RenderLoop {
     private let accumulatePSO: MTLComputePipelineState
     private let developPSO: MTLComputePipelineState
     private let develop16PSO: MTLComputePipelineState
+    private let flareProbePSO: MTLComputePipelineState
+    private let flareProbeBuf: MTLBuffer
     private let relightPSO: MTLComputePipelineState
     private let negativePSO: MTLComputePipelineState
     private let streakPSO: MTLComputePipelineState
@@ -435,6 +437,8 @@ final class RenderLoop {
         dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         develop16PSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop16")!)
+        flareProbePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "flare_probe")!)
+        flareProbeBuf = device.makeBuffer(length: 4 * Flare.maxLights, options: .storageModeShared)!
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
         streakPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "streak")!)
@@ -784,6 +788,42 @@ final class RenderLoop {
         ] + b.filter.optics(threshold: e.filterThreshold * exp2(b.filmStops))   // the finder's, in exposed light
     }
 
+    /// How much of each flaring light this frame's camera sees past the scan
+    /// (a trunk in front of a lamp hides its face and its flare), measured as
+    /// the finder does: a sharp finder-sized look, probed over each light's face.
+    /// Written into the job's flare rows.
+    private func probeFlare(_ e: ExposureJob) {
+        let b = e.body
+        let (W, H) = finderSize
+        // The same sources, in the same order, as the rows were made from.
+        let fx = b.focalPixels(width: W, height: H)
+        let axis = SIMD2(Float(W), Float(H)) / 2 + b.axisOffset(width: W)
+        let src = Flare.sources(plot: e.lighting, view: e.camera.viewMatrix, position: e.camera.position, fx: fx, axis: axis,
+                                width: W, height: H, fisheye: b.lens.isFisheye, body: b, fNumber: b.takingAperture)
+        guard !src.isEmpty, Int(e.flare[0].x) == src.count, e.flare.count >= 4 + 4 * src.count else { return }
+        setCameraModel(b.lens.isFisheye)
+        setLens(nil)
+        defer { setCameraModel(false) }
+        guard render(photoSlot.index, view: e.camera.viewMatrix, fx: fx, cx: axis.x, cy: axis.y),
+              let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return }
+        var o = [SIMD4(Float(W), Float(H), fx, fx)]
+        var probes = Flare.probes(src, diag: simd_length(SIMD2(Float(W), Float(H))))
+        var count = UInt32(probes.count)
+        ce.setComputePipelineState(flareProbePSO)
+        ce.setBuffer(photoSlot.buf, offset: photoSlot.off, index: 0)
+        ce.setBytes(&o, length: 16, index: 1)
+        ce.setBytes(&probes, length: probes.count * 16, index: 2)
+        ce.setBuffer(flareProbeBuf, offset: 0, index: 3)
+        ce.setBytes(&count, length: 4, index: 4)
+        ce.dispatchThreads(MTLSize(width: probes.count, height: 1, depth: 1),
+                           threadsPerThreadgroup: MTLSize(width: probes.count, height: 1, depth: 1))
+        ce.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        let seen = flareProbeBuf.contents().bindMemory(to: Float.self, capacity: src.count)
+        for i in 0..<src.count { e.flare[4 + 4 * i].w = seen[i] }
+    }
+
     /// One sub-pupil of the exposure: render the view sheared to that lens
     /// point (focus plane fixed), add it to the film; develop after the last.
     private func step(_ e: ExposureJob) {
@@ -794,6 +834,9 @@ final class RenderLoop {
         let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
         let cam = e.camera(forCell: e.next)
         relight(e.lighting, eye: cam.position, body: b, quality: .photo)
+        // A movie frame can't take its flare's visibility from the finder (it
+        // is held still while the take develops): look for itself.
+        if e.next == 0 && e.cameraAt != nil && !e.flare.isEmpty { probeFlare(e) }
         // Axial colour: with it, each sub-pupil carries one channel, focused
         // where that colour focuses (red a little beyond green, blue short).
         // Splitting the samples by colour needs enough of them: with fewer, each
@@ -826,6 +869,8 @@ final class RenderLoop {
         let mask: SIMD4<Float> = channel < 0 ? [1, 1, 1, 1]
             : (channel == 0 ? [1, 0, 0, 1] : (channel == 1 ? [0, 1, 0, 1] : [0, 0, 1, 1]))
         let tg = MTLSize(width: 16, height: 16, depth: 1)
+        // The lamps' faces go onto the film with the scan, behind what hides them.
+        var faceRows = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
         let (tw, th) = finderSize
         // The photo in finder-sized tiles: each a render with the principal
         // point moved so it sees its part of the frame.
@@ -856,6 +901,7 @@ final class RenderLoop {
                 te.setBytes(&o, length: o.count * 16, index: 1)
                 te.setBuffer(e.accum, offset: 0, index: 2)
                 te.setBytes(&l, length: 48, index: 3)
+                te.setBytes(&faceRows, length: faceRows.count * 16, index: 4)
                 te.dispatchThreads(MTLSize(width: tw, height: th, depth: 1), threadsPerThreadgroup: tg)
                 te.endEncoding()
                 tcb.commit()
