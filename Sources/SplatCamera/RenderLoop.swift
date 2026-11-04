@@ -56,6 +56,8 @@ final class ExposureJob {
     /// A movie frame's print, half floats (rgba), handed over on the render
     /// thread instead of an image.
     var sink: ((MTLBuffer) -> Void)?
+    /// A movie frame that couldn't be rendered (the darkroom is told, not left waiting).
+    var failed: ((String) -> Void)?
 
     /// The moment through the shutter's opening sub-pupil `k` stands for:
     /// spread evenly over it, in an order unrelated to the lens rings.
@@ -832,6 +834,7 @@ final class RenderLoop {
                              cy: axis.y + fx * d.y * invFocus - Float(y0)),
                       let tcb = queue.makeCommandBuffer(), let te = tcb.makeComputeCommandEncoder() else {
                     finish(e)
+                    e.failed?("the renderer failed on sub-pupil \(e.next + 1) of \(e.cells.count)")
                     return
                 }
                 encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
@@ -854,6 +857,7 @@ final class RenderLoop {
         }
         guard let cb = queue.makeCommandBuffer() else {
             finish(e)
+            e.failed?("no command buffer")
             return
         }
         let grid = MTLSize(width: w, height: h, depth: 1)
@@ -930,8 +934,8 @@ final class RenderLoop {
         if done {
             finish(e)
             if let negBuf { e.negative = Data(bytes: negBuf.contents(), count: negBuf.length) }
-            if let print, let sink = e.sink {
-                sink(print)
+            if let sink = e.sink {
+                if let print { sink(print) } else { e.failed?("no memory for the print") }
             } else if let print, let image = makeImage(print, w, h) {
                 let seconds = CACurrentMediaTime() - e.started
                 DispatchQueue.main.async { [weak self] in self?.onDeveloped?(e, image, seconds) }

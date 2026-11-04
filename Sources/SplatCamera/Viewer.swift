@@ -1780,8 +1780,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         feedEnlarger()
         let printing = enlargeQueue.count + loop.pendingExposures
         if printing == 0 { enlargeTotal = 0; enlargeDone = 0 }
-        if let mv = movie {
-            sheet.enlargerStatus = "DEVELOPING TAKE \(mv.take.takeNumber) \(mv.kind == .preview ? "PREVIEW" : mv.kind.name.uppercased()) \(mv.written) of \(mv.total)"
+        if movie != nil {
+            sheet.enlargerStatus = movieProgress()?.0 ?? ""
         } else if enlargeTotal > 0 || sheet.enlargerStatus.hasPrefix("ENLARGING") {
             sheet.enlargerStatus = enlargeTotal == 0 ? "" : "ENLARGING \(enlargeDone) of \(enlargeTotal)"
         }
@@ -2021,6 +2021,11 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// A take in the darkroom, its frames out (at most two at once), and the body it is shot with.
     private var movie: MovieDeveloper?
     private var movieInFlight = 0
+    /// The movie's frames in the darkroom now (the oldest is being exposed).
+    private var movieJobs: [ExposureJob] = []
+    private var movieStarted = 0.0
+    /// How the last take ended, kept up on the strip a while.
+    private var movieNote: (text: String, until: Double)?
     private var movieBody = CameraBody()
     /// Where the take's poster frames are, for the light table once it is done.
     private var movieDone: ((Bool) -> Void)?
@@ -2166,8 +2171,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         t.scene = scenePath ?? ""
         t.frameRate = body.frameRate
         if t.body == nil { t.body = body }
-        t.lighting = lighting
-        t.sky = loop.sky
+        // A given take develops under its own lights and sky.
+        if given == nil {
+            t.lighting = lighting
+            t.sky = loop.sky
+        }
         movieDone = done
         if kind == .preview { t.save(folder.appendingPathComponent("take.json")) }
         startMovie(t, folder: folder, kind: kind, size: kind == .preview ? (width, height) : finalSize)
@@ -2192,6 +2200,20 @@ final class Viewer: NSObject, MTKViewDelegate {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "movieFinal") }
     }
     static let finalSizes: [(w: Int, h: Int)] = [(3072, 2048), (4096, 2730)]
+
+    /// The darkroom's notes on takes: ~/Library/Logs/Vintage Click.log.
+    static func movieLog(_ line: String) {
+        print("Movie: " + line)
+        let u = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/Vintage Click.log")
+        let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withInternetDateTime])
+        let data = Data("\(stamp)  \(line)\n".utf8)
+        if let h = try? FileHandle(forWritingTo: u) {
+            h.seekToEndOfFile(); h.write(data); try? h.close()
+        } else {
+            try? data.write(to: u)
+        }
+    }
     var finalSize: (w: Int, h: Int) {
         Self.finalSizes[min(Self.finalSizes.count - 1, max(0, UserDefaults.standard.integer(forKey: "movieSize")))]
     }
@@ -2209,8 +2231,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         if t.sky != loop.sky { loop.setSky(t.sky) }
         movieBody = b
         movieInFlight = 0
+        movieJobs = []
+        movieNote = nil
+        movieStarted = CACurrentMediaTime()
         rolling = nil
-        print("Movie: take \(t.takeNumber), \(t.frameCount) frames at \(t.frameRate) fps, \(kind.name), \(size.w)x\(size.h)")
+        Self.movieLog("take \(t.takeNumber): \(t.frameCount) frames at \(t.frameRate) fps, \(kind.name), \(size.w)x\(size.h), \(kind == .preview ? min(8, cellsPerExposure) : cellsPerExposure) lens samples, \(t.lighting.lights.count) lamps → \(folder.path)")
         feedMovie()
     }
 
@@ -2219,8 +2244,13 @@ final class Viewer: NSObject, MTKViewDelegate {
     private func feedMovie() {
         guard let m = movie else { return }
         while movieInFlight < 2, let f = m.takeFrame() {
-            guard let job = movieJob(m, frame: f) else { m.cancel(); break }
+            guard let job = movieJob(m, frame: f) else {
+                Self.movieLog("take \(m.take.takeNumber): frame \(f + 1) couldn't be set up (no keys, or no memory for a \(m.width)x\(m.height) frame)")
+                m.cancel()
+                break
+            }
             movieInFlight += 1
+            movieJobs.append(job)
             loop.expose(job)
         }
         if movieInFlight == 0 && m.done { endMovie(m) }
@@ -2245,11 +2275,22 @@ final class Viewer: NSObject, MTKViewDelegate {
         job.filterThreshold = filterThreshold
         job.flare = photoFlare(body: b, camera: k.camera, plot: t.lighting)
         let (w, h) = (m.width, m.height)
-        job.sink = { [weak self] buf in
+        job.sink = { [weak self, weak job] buf in
             m.append(buf, w: w, h: h, frame: f)
             DispatchQueue.main.async {
                 guard let self, self.movie === m else { return }
+                self.movieJobs.removeAll { $0 === job }
                 self.movieInFlight -= 1
+                self.feedMovie()
+            }
+        }
+        job.failed = { [weak self, weak job] why in
+            Self.movieLog("take \(t.takeNumber): frame \(f + 1) failed: \(why)")
+            DispatchQueue.main.async {
+                guard let self, self.movie === m else { return }
+                self.movieJobs.removeAll { $0 === job }
+                self.movieInFlight -= 1
+                m.cancel()
                 self.feedMovie()
             }
         }
@@ -2258,14 +2299,20 @@ final class Viewer: NSObject, MTKViewDelegate {
 
     private func endMovie(_ m: MovieDeveloper) {
         movie = nil
+        movieJobs = []
+        let minutes = (CACurrentMediaTime() - movieStarted) / 60
         m.finish { [weak self] ok in
             DispatchQueue.main.async {
                 guard let self else { return }
                 let what = m.kind == .preview ? "PREVIEW" : m.kind.name.uppercased()
-                let msg = !ok ? "TAKE \(m.take.takeNumber) \(what) FAILED"
+                let msg = m.written == 0 ? "TAKE \(m.take.takeNumber) \(what) STOPPED BEFORE ITS FIRST FRAME"
+                    : !ok ? "TAKE \(m.take.takeNumber) \(what) FAILED"
                     : m.cancelled ? "TAKE \(m.take.takeNumber) \(what) STOPPED AT \(m.written) OF \(m.total) FRAMES"
                     : "TAKE \(m.take.takeNumber) \(what) DEVELOPED · ON THE LIGHT TABLE"
-                print("Movie: \(msg.lowercased()) → \(m.url.path)")
+                // An empty clip is no use to anyone.
+                if m.written == 0 { try? FileManager.default.removeItem(at: m.url) }
+                Self.movieLog(String(format: "%@ after %.1f min → %@", msg.lowercased(), minutes, m.url.path))
+                self.movieNote = (msg, CACurrentMediaTime() + 20)
                 self.hud?.flash(msg)
                 self.sheet?.enlargerStatus = msg
                 if m.kind == .preview && ok { self.newestOnTable = m.folder }
@@ -2297,6 +2344,25 @@ final class Viewer: NSObject, MTKViewDelegate {
         player = nil
     }
 
+    /// A take in the darkroom: what to say, and how far it has got (0...1).
+    private func movieProgress() -> (String, CGFloat)? {
+        guard let mv = movie else { return nil }
+        // Within a frame too: a final's frame can take a minute or more.
+        let partial = movieJobs.first.map { Double($0.next) / Double(max(1, $0.cells.count)) } ?? 0
+        let done = (Double(mv.written) + partial) / Double(max(1, mv.total))
+        let elapsed = CACurrentMediaTime() - movieStarted
+        var left = "TIMING THE FIRST FRAME"
+        if done > 0.002 && elapsed > 5 {
+            let s = elapsed * (1 - done) / done
+            left = s < 90 ? String(format: "ABOUT %.0f S LEFT", s)
+                : s < 5400 ? String(format: "ABOUT %.0f MIN LEFT", s / 60)
+                : String(format: "ABOUT %.1f H LEFT", s / 3600)
+        }
+        return (String(format: "DEVELOPING TAKE %d %@ · FRAME %d OF %d (%.0f%%) · %@", mv.take.takeNumber,
+                              mv.kind == .preview ? "PREVIEW" : mv.kind.name.uppercased(),
+                              min(mv.total, mv.written + 1), mv.total, partial * 100, left), CGFloat(done))
+    }
+
     /// What the timeline strip shows.
     private func motionInfo() -> ViewfinderHUD.Motion? {
         guard body.model.isMotion, pov == nil else { return nil }
@@ -2318,10 +2384,11 @@ final class Viewer: NSObject, MTKViewDelegate {
         } else {
             m.hint = "scroll or F / C focus  ·  K set key (focus too)  ·  ⇧K delete  ·  I / O previous / next key  ·  Z / X step (⇧ a second)  ·  P roll  ·  G preview  ·  ⇧G final"
         }
-        if let mv = movie {
-            m.developing = String(format: "DEVELOPING TAKE %d %@ · %d / %d", mv.take.takeNumber,
-                                  mv.kind == .preview ? "PREVIEW" : mv.kind.name.uppercased(), mv.written, mv.total)
-            m.progress = CGFloat(mv.written) / CGFloat(max(1, mv.total))
+        if let (text, done) = movieProgress() {
+            m.developing = text
+            m.progress = done
+        } else if let n = movieNote, CACurrentMediaTime() < n.until {
+            m.developing = n.text
         }
         return m
     }
