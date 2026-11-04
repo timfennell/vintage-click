@@ -47,6 +47,22 @@ final class ViewfinderHUD: NSView {
         var beam: (hot: CGFloat, edge: CGFloat, falloff: CGFloat)?
         var title = ""                  // big label: which light you are flying
         var measure: Measure?
+        /// The movie camera's timeline (nil on a still camera).
+        var motion: Motion?
+    }
+
+    /// The movie camera's timeline: keys and the playhead as fractions of the take.
+    struct Motion {
+        var timecode = ""
+        var rate = ""
+        var length = ""
+        var keys: [CGFloat] = []
+        var current: Int?
+        var playhead: CGFloat = 0
+        var rolling = false
+        var developing = ""
+        var progress: CGFloat = 0
+        var hint = ""
     }
     var info = Info() { didSet { needsDisplay = true } }
 
@@ -174,6 +190,85 @@ final class ViewfinderHUD: NSView {
         if info.rangefinder { drawRangefinderReadouts(img, u: u) }
         else if info.windowReadout { drawWindow(img, u: u) } else { drawLEDs(img, u: u) }
         if let m = info.measure { drawMeasure(m, in: img, u: u) }
+        if let m = info.motion, !mirrorUp { drawMotion(m, in: img, u: u) }
+    }
+
+    // MARK: the movie camera
+
+    /// The ground glass's markings (the 1.85 extraction inside the 8-perf
+    /// frame), and the timeline along the bottom of the image: projected light.
+    private func drawMotion(_ m: Motion, in img: NSRect, u: CGFloat) {
+        let lit = NSColor(calibratedRed: 0.93, green: 0.96, blue: 1.0, alpha: 0.5)
+        let warm = NSColor(calibratedRed: 1, green: 0.9, blue: 0.78, alpha: 0.85)
+        let red = NSColor(calibratedRed: 0.95, green: 0.15, blue: 0.08, alpha: 0.95)
+        let ctx = NSGraphicsContext.current?.cgContext
+        ctx?.saveGState()
+        ctx?.setShadow(offset: .zero, blur: 0.35 * u, color: lit.withAlphaComponent(0.3).cgColor)
+        // 1.85:1 inside 1.5:1: corner marks top and bottom, and a centre cross.
+        let h85 = img.width / 1.85
+        let r = NSRect(x: img.minX + 0.6 * u, y: img.midY - h85 / 2, width: img.width - 1.2 * u, height: h85)
+        let k = 2.2 * u
+        let marks = NSBezierPath()
+        for (x, y, dx, dy) in [(r.minX, r.minY, 1.0, 1.0), (r.maxX, r.minY, -1.0, 1.0), (r.minX, r.maxY, 1.0, -1.0), (r.maxX, r.maxY, -1.0, -1.0)] {
+            marks.move(to: NSPoint(x: x + CGFloat(dx) * k, y: y)); marks.line(to: NSPoint(x: x, y: y))
+            marks.line(to: NSPoint(x: x, y: y + CGFloat(dy) * k))
+        }
+        marks.move(to: NSPoint(x: img.midX - 0.8 * u, y: img.midY)); marks.line(to: NSPoint(x: img.midX + 0.8 * u, y: img.midY))
+        marks.move(to: NSPoint(x: img.midX, y: img.midY - 0.8 * u)); marks.line(to: NSPoint(x: img.midX, y: img.midY + 0.8 * u))
+        marks.lineWidth = 0.12 * u
+        lit.setStroke()
+        marks.stroke()
+        text("1.85", at: NSPoint(x: r.minX + 0.4 * u, y: r.minY + 0.3 * u), size: 0.7 * u, color: lit, projected: true)
+
+        // The timeline: a rule, key diamonds (the one under the playhead filled),
+        // the playhead (red while rolling), and the timecode over it.
+        let x0 = img.minX + 4 * u, x1 = img.maxX - 4 * u, y = img.maxY - 2.6 * u
+        let rule = NSBezierPath()
+        rule.move(to: NSPoint(x: x0, y: y)); rule.line(to: NSPoint(x: x1, y: y))
+        for i in 0...10 {
+            let x = x0 + (x1 - x0) * CGFloat(i) / 10
+            rule.move(to: NSPoint(x: x, y: y - 0.25 * u)); rule.line(to: NSPoint(x: x, y: y + 0.25 * u))
+        }
+        rule.lineWidth = 0.1 * u
+        warm.withAlphaComponent(0.6).setStroke()
+        rule.stroke()
+        if m.progress > 0 {
+            let bar = NSRect(x: x0, y: y - 0.15 * u, width: (x1 - x0) * m.progress, height: 0.3 * u)
+            warm.withAlphaComponent(0.7).setFill()
+            bar.fill()
+        }
+        for (i, f) in m.keys.enumerated() {
+            let c = NSPoint(x: x0 + (x1 - x0) * min(1, max(0, f)), y: y)
+            let d = NSBezierPath()
+            let s = 0.45 * u
+            d.move(to: NSPoint(x: c.x, y: c.y - s)); d.line(to: NSPoint(x: c.x + s, y: c.y))
+            d.line(to: NSPoint(x: c.x, y: c.y + s)); d.line(to: NSPoint(x: c.x - s, y: c.y)); d.close()
+            d.lineWidth = 0.1 * u
+            if i == m.current { warm.setFill(); d.fill() }
+            warm.setStroke()
+            d.stroke()
+        }
+        let px = x0 + (x1 - x0) * min(1, max(0, m.playhead))
+        let head = NSBezierPath()
+        head.move(to: NSPoint(x: px, y: y - 0.9 * u)); head.line(to: NSPoint(x: px, y: y + 0.9 * u))
+        head.lineWidth = 0.16 * u
+        (m.rolling ? red : warm).setStroke()
+        head.stroke()
+        text(m.timecode, at: NSPoint(x: x0, y: y - 2.0 * u), size: 0.9 * u, color: warm, projected: true)
+        text(m.developing.isEmpty ? "\(m.rate)  ·  \(m.length)" : m.developing, at: NSPoint(x: x1, y: y - 2.0 * u),
+             size: 0.9 * u, color: warm, align: .right, width: img.width * 0.6, projected: true)
+        // The controls, faint under the rule.
+        if !m.hint.isEmpty && !m.rolling {
+            text(m.hint, at: NSPoint(x: img.midX, y: y + 0.8 * u), size: 0.68 * u, color: warm.withAlphaComponent(0.45),
+                 align: .center, width: img.width * 0.96, projected: true)
+        }
+        // Rolling: the tally.
+        if m.rolling {
+            red.setFill()
+            NSBezierPath(ovalIn: NSRect(x: img.minX + 2 * u, y: img.minY + 2 * u, width: 1.1 * u, height: 1.1 * u)).fill()
+            text("REC", at: NSPoint(x: img.minX + 3.5 * u, y: img.minY + 1.85 * u), size: 0.9 * u, color: red, projected: true)
+        }
+        ctx?.restoreGState()
     }
 
     // MARK: setting the scale

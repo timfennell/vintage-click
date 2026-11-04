@@ -22,6 +22,10 @@ func option(_ name: String) -> String? {
 let res = (option("--res") ?? "1620x1080").split(separator: "x").compactMap { Int($0) }
 let bench = Int(option("--bench") ?? "0") ?? 0
 let shootPath = option("--shoot")
+// --movie FOLDER [--take take.json] [--final prores|hevc] [--seconds S] [--angle DEG] [--frame-rate FPS]
+let movieFolder = option("--movie"), movieTake = option("--take"), movieFinal = option("--final")
+let movieSeconds = option("--seconds").flatMap(Double.init), movieAngle = option("--angle").flatMap(Float.init)
+let movieRate = option("--frame-rate").flatMap(Float.init)
 let sceneRadius = option("--scene-radius").flatMap { Float($0) }
 // --inside: the scan is a place to stand in (start in the middle, eye height).
 var inside = args.contains("--inside")
@@ -248,7 +252,7 @@ func configureSession() {
     if let t = tiltChoice { viewer.body.tilt = t }
     if let t = shiftChoice { viewer.body.shift = t }
     if let i = filterChoice, lensFilters.indices.contains(i) { viewer.body.filterIndex = i }
-    if let b = option("--body"), let m = CameraModel.all.first(where: { $0.model.lowercased() == b.lowercased() || $0.make.lowercased().hasPrefix(b.lowercased()) }) {
+    if let b = option("--body"), let m = CameraModel.every.first(where: { $0.model.lowercased() == b.lowercased() || $0.make.lowercased().hasPrefix(b.lowercased()) }) {
         viewer.body.chooseBody(m)
     }
     if let g = gelChoice, gels.indices.contains(g) {
@@ -374,6 +378,22 @@ func configureSession() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             viewer.enlarge([u])
             viewer.feedEnlarger()
+        }
+    }
+    // --movie FOLDER: develop a take (--take take.json, else a demo arc of
+    // --seconds) as a preview, or a final with --final prores|hevc.
+    if let folder = movieFolder {
+        viewer.scripted = true
+        viewer.loop.developOnlyWhenStill = false
+        let kind = movieFinal.flatMap { MovieDeveloper.Kind(rawValue: $0) } ?? .preview
+        let given = movieTake.flatMap { MotionTake.load(URL(fileURLWithPath: $0)) }
+        let seconds = movieSeconds ?? 2
+        DispatchQueue.main.asyncAfter(deadline: .now() + meterWait) {
+            if let a = movieAngle { viewer.body.shutterAngle = a }
+            if let r = movieRate { viewer.body.frameRate = r }
+            viewer.developScripted(given, folder: URL(fileURLWithPath: folder), kind: kind, seconds: seconds) { ok in
+                quit(ok ? 0 : 1)
+            }
         }
     }
     if let p = shootPath {

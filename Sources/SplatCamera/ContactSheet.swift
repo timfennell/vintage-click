@@ -15,6 +15,9 @@ final class ContactSheetView: NSView {
         var frames: [URL]
         /// Which day and sitting it is from ("2026-10-17 · 09.14 Skate park"), if filed so.
         var session: String
+        /// A movie camera's take ("Take 03 - stock"): its frames are poster
+        /// frames from the preview clip, every MovieDeveloper.posterEvery.
+        var isTake = false
     }
 
     var rolls: [Roll] = []
@@ -63,12 +66,14 @@ final class ContactSheetView: NSView {
         }
         func roll(_ d: URL, session: String) -> Roll? {
             let name = d.lastPathComponent
-            guard name.hasPrefix("Roll "), let n = Int(name.dropFirst(5).prefix(2)) else { return nil }
+            let take = name.hasPrefix("Take ")
+            guard name.hasPrefix("Roll ") || take, let n = Int(name.dropFirst(5).prefix(2)) else { return nil }
             let stock = name.components(separatedBy: " - ").dropFirst().joined(separator: " - ")
             let frames = ((try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil)) ?? [])
-                .filter { $0.pathExtension == "png" && $0.lastPathComponent.hasPrefix("frame-") }
+                .filter { $0.pathExtension == "png" && $0.lastPathComponent.hasPrefix(take ? "poster-" : "frame-") }
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
-            return Roll(number: n, stock: stock, dir: d, frames: frames, session: session)
+            if take && frames.isEmpty { return nil }
+            return Roll(number: n, stock: stock, dir: d, frames: frames, session: session, isTake: take)
         }
         var rolls: [Roll] = []
         for top in children(root) {
@@ -190,7 +195,15 @@ final class ContactSheetView: NSView {
     func enlargeCandidates() -> [URL] {
         let marked = sessionRolls.flatMap { i in (marks[rolls[i].dir] ?? []).sorted().compactMap {
             rolls[i].frames.indices.contains($0) ? rolls[i].frames[$0] : nil } }
-        return marked.isEmpty ? sessionRolls.flatMap { rolls[$0].frames } : marked
+        return marked.isEmpty ? sessionRolls.filter { !rolls[$0].isTake }.flatMap { rolls[$0].frames } : marked
+    }
+
+    /// The take the chosen frame belongs to, if it is one.
+    var selectedTake: Roll? {
+        let cells = tableLayout().cells
+        guard cells.indices.contains(selected) else { return nil }
+        let r = rolls[cells[selected].roll]
+        return r.isTake ? r : nil
     }
 
     /// Red grease pencil round the chosen frame: a keeper (or not any more).
@@ -360,11 +373,13 @@ final class ContactSheetView: NSView {
             let top = strip.minY + 0.35 * mm, bottom = strip.maxY - 1.75 * mm
             var nx = strip.minX + 3 * mm
             repeat {
-                filmPrint("\(stockName)  SAFETY FILM", at: NSPoint(x: nx, y: top), mm: mm, color: edge)
+                filmPrint(roll.isTake ? "\(stockName)  TAKE \(roll.number)  8-PERF" : "\(stockName)  SAFETY FILM",
+                          at: NSPoint(x: nx, y: top), mm: mm, color: edge)
                 nx += 115 * mm
             } while nx < strip.maxX - 50 * mm
             for (j, fr) in cut.frames.enumerated() {
-                let n = cut.first + j + 1
+                // A take's posters stand for every 12th frame of the clip.
+                let n = roll.isTake ? (cut.first + j) * MovieDeveloper.posterEvery + 1 : cut.first + j + 1
                 filmPrint("\(n)", at: NSPoint(x: fr.minX + 2 * mm, y: bottom), mm: mm, color: edge)
                 filmPrint("▸ \(n)A", at: NSPoint(x: fr.midX + 1 * mm, y: bottom), mm: mm, color: edge)
                 if !bw {
@@ -475,7 +490,8 @@ final class ContactSheetView: NSView {
         var chosen = ""
         if L.cells.indices.contains(selected) {
             let c = L.cells[selected]
-            chosen = " · roll \(rolls[c.roll].number) frame \(c.frame + 1)"
+            let r = rolls[c.roll]
+            chosen = r.isTake ? " · take \(r.number) (A: play it · Y: develop the final)" : " · roll \(r.number) frame \(c.frame + 1)"
         }
         let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×%@     sticks: loupe  L2/R2: power  d-pad: frame  A: mark  Y / P: enlarge %@  X / G: print wall  L1/R1: session  B: back",
                           when.isEmpty ? "" : when + " · ", rollsHere.count, rollsHere.count == 1 ? "roll" : "rolls",

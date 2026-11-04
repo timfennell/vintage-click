@@ -49,6 +49,21 @@ final class ExposureJob {
     var record: ShotRecord?
     /// The effect filter's threshold in the finder's (unexposed) light.
     var filterThreshold: Float = 1
+    /// A movie frame: where the camera is through the shutter's opening (0
+    /// open ... 1 closed). Each sub-pupil is also a moment, so the frame
+    /// blurs with the move as the film would.
+    var cameraAt: ((Float) -> FlyCamera)?
+    /// A movie frame's print, half floats (rgba), handed over on the render
+    /// thread instead of an image.
+    var sink: ((MTLBuffer) -> Void)?
+
+    /// The moment through the shutter's opening sub-pupil `k` stands for:
+    /// spread evenly over it, in an order unrelated to the lens rings.
+    func shutterTime(_ k: Int) -> Float {
+        let v = Float(k) * 0.618034 + 0.5 / Float(cells.count)
+        return v - v.rounded(.down)
+    }
+    func camera(forCell k: Int) -> FlyCamera { cameraAt?(shutterTime(k)) ?? camera }
 
     init(camera: FlyCamera, body: CameraBody, lighting: LightingPlot, frameNumber: Int,
          cells: [SIMD2<Float>], accum: MTLBuffer, size: (w: Int, h: Int), wantsNegative: Bool) {
@@ -325,6 +340,7 @@ final class RenderLoop {
     private let queue: MTLCommandQueue
     private let accumulatePSO: MTLComputePipelineState
     private let developPSO: MTLComputePipelineState
+    private let develop16PSO: MTLComputePipelineState
     private let relightPSO: MTLComputePipelineState
     private let negativePSO: MTLComputePipelineState
     private let streakPSO: MTLComputePipelineState
@@ -416,6 +432,7 @@ final class RenderLoop {
         dofTilesPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_tiles")!)
         dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
+        develop16PSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop16")!)
         relightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "relight")!)
         negativePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "negative")!)
         streakPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "streak")!)
@@ -765,7 +782,8 @@ final class RenderLoop {
         let n = b.takingAperture
         let fx = b.focalPixels(width: w, height: h)
         let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
-        relight(e.lighting, eye: e.camera.position, body: b, quality: .photo)
+        let cam = e.camera(forCell: e.next)
+        relight(e.lighting, eye: cam.position, body: b, quality: .photo)
         // Axial colour: with it, each sub-pupil carries one channel, focused
         // where that colour focuses (red a little beyond green, blue short).
         // Splitting the samples by colour needs enough of them: with fewer, each
@@ -788,7 +806,7 @@ final class RenderLoop {
         // The lens point, in scene units (an oval stop narrows it across).
         let d = SIMD2(c.x * b.lens.squeeze, c.y) * radiusUnits
         let axis = SIMD2(Float(w), Float(h)) / 2 + b.axisOffset(width: w)
-        var vm = e.camera.viewMatrix
+        var vm = cam.viewMatrix
         vm[3] -= d.x
         vm[7] -= d.y
         var o = photoOptics(e, fx: fx)
@@ -844,7 +862,7 @@ final class RenderLoop {
         let done = e.next == e.cells.count
         var print: MTLBuffer?
         var negBuf: MTLBuffer?
-        if done, let out = device.makeBuffer(length: w * h * 4, options: .storageModeShared) {
+        if done, let out = device.makeBuffer(length: w * h * (e.sink == nil ? 4 : 8), options: .storageModeShared) {
             print = out
             // Light through the unclipped centre of the frame sets the scale, per channel.
             var full = SIMD3<Float>(repeating: 0)
@@ -880,7 +898,7 @@ final class RenderLoop {
                 ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             }
             var f = b.developed.packed
-            ce.setComputePipelineState(developPSO)
+            ce.setComputePipelineState(e.sink == nil ? developPSO : develop16PSO)
             ce.setBuffer(e.accum, offset: 0, index: 0)
             ce.setBytes(&o, length: o.count * 16, index: 1)
             ce.setBytes(&f, length: f.count * 16, index: 2)
@@ -912,7 +930,9 @@ final class RenderLoop {
         if done {
             finish(e)
             if let negBuf { e.negative = Data(bytes: negBuf.contents(), count: negBuf.length) }
-            if let print, let image = makeImage(print, w, h) {
+            if let print, let sink = e.sink {
+                sink(print)
+            } else if let print, let image = makeImage(print, w, h) {
                 let seconds = CACurrentMediaTime() - e.started
                 DispatchQueue.main.async { [weak self] in self?.onDeveloped?(e, image, seconds) }
             }

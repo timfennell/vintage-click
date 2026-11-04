@@ -1216,13 +1216,9 @@ float3 fisheye_rim(float3 lin, device const float4* acc, float2 pc, float2 c, fl
 }
 
 // Develops the exposure into a print. D = per-channel 1 / pupil weight of the full aperture.
-kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
-                    constant float4* F [[buffer(2)]], constant float4& D [[buffer(3)]],
-                    device uchar4* out [[buffer(4)]], device const float4* streaks [[buffer(5)]],
-                    device const float4* fx [[buffer(6)]], constant float4* FL [[buffer(7)]],
-                    uint2 p [[thread_position_in_grid]]) {
+static float3 develop_px(device const float4* acc, constant float4* O, constant float4* F, constant float4& D,
+                         device const float4* streaks, device const float4* fx, constant float4* FL, uint2 p) {
     uint W = uint(O[0].x), H = uint(O[0].y);
-    if (p.x >= W || p.y >= H) return;
     float expo = exp2(O[5].w);
     float2 pc = float2(p) + 0.5, c = O[1].xy;
     float2 q = field(pc, O);
@@ -1251,8 +1247,28 @@ kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [
         halo /= 32;
     }
     if (O[6].z > 0) lin = fisheye_rim(lin, acc, pc, c, D.rgb * expo, O);
-    float3 col = film_look(lin, halo, pc, uint(O[5].z), O[0].y, F);
+    return film_look(lin, halo, pc, uint(O[5].z), O[0].y, F);
+}
+
+kernel void develop(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
+                    constant float4* F [[buffer(2)]], constant float4& D [[buffer(3)]],
+                    device uchar4* out [[buffer(4)]], device const float4* streaks [[buffer(5)]],
+                    device const float4* fx [[buffer(6)]], constant float4* FL [[buffer(7)]],
+                    uint2 p [[thread_position_in_grid]]) {
+    if (p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    float3 col = develop_px(acc, O, F, D, streaks, fx, FL, p);
     out[idx(p, O)] = uchar4(uchar3(round(col * 255)), 255);
+}
+
+// The same print for a movie frame, kept in half floats (display-referred,
+// 0...1) so a 10-bit codec gets more than 8 bits of it.
+kernel void develop16(device const float4* acc [[buffer(0)]], constant float4* O [[buffer(1)]],
+                      constant float4* F [[buffer(2)]], constant float4& D [[buffer(3)]],
+                      device half4* out [[buffer(4)]], device const float4* streaks [[buffer(5)]],
+                      device const float4* fx [[buffer(6)]], constant float4* FL [[buffer(7)]],
+                      uint2 p [[thread_position_in_grid]]) {
+    if (p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    out[idx(p, O)] = half4(half3(saturate(develop_px(acc, O, F, D, streaks, fx, FL, p))), 1);
 }
 
 // The digital negative: the same exposure as `develop` reads (lens fall-off,

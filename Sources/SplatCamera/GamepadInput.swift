@@ -10,8 +10,10 @@ import simd
 /// Keyboard and mouse (click in the window to take the mouse, Esc to let go):
 ///   mouse look · WASD walk · Shift run · Space / Ctrl rise / sink (also E / Q)
 ///   left click shutter · right button (hold) depth-of-field preview
-///   wheel focus ring · [ ] aperture · - = shutter speed · 1-8 lens from the bag
+///   wheel (or hold F / C) focus ring · [ ] aperture · - = shutter speed · 1-8 lens from the bag
 ///   R new roll (reload) · L lighting · Tab light table · H reset view · U up axis
+///   movie camera: K set a key (Shift: delete) · I / O previous / next key ·
+///   Z / X a frame back / on (Shift: a second) · P roll · G develop a preview (Shift: the final)
 /// Lighting: 1-9 fly that light (its own view; the same keys move and aim it),
 ///   0 or ` back to the camera's view · F add a light · Backspace remove ·
 ///   T change head · [ ] previous / next light · - = dimmer · wheel flood / spot ·
@@ -37,6 +39,7 @@ final class GamepadInput {
         var erase = 0                       // backspaces typed (entry mode)
         var movement = SIMD2<Float>(0, 0)   // M + arrows, or Y + right stick: tilt or shift the lens
         var centreMovement = false          // N, or Y + R3: lens back square and centred
+        var focusKeys: Float = 0            // F held farther, C held closer (camera)
     }
     enum KeyMode { case camera, lighting, sheet, menu, entry }
     /// Which layout the keyboard is in (set by the viewer).
@@ -46,6 +49,13 @@ final class GamepadInput {
     enum Button: Hashable {
         case a, b, x, y, left, right, up, down, l1, r1, menu, view, l3, r3, cycleUp, removeLight, slower, faster, flare
         case filters, gels, modifiers, patternFocus
+        /// The menu's W (also up): the camera bag's hidden body.
+        case keyW
+        /// The movie camera's timeline: set a key, the previous / next key,
+        /// a frame back / on (Shift: a second), roll (play the move).
+        case setKey, prevKey, nextKey, stepBack, stepForward, roll
+        /// The movie camera: develop the take (a preview; Shift: the final).
+        case develop
     }
 
     private var held: Set<Button> = []
@@ -195,6 +205,7 @@ final class GamepadInput {
                 s.look += arrows * 0.6
             }
             if keyMode == .camera && k(.keyN) > 0 { s.centreMovement = true }
+            if keyMode == .camera { s.focusKeys = k(.keyF) - k(.keyC) }
             s.shoulders += k(.spacebar) + k(.keyE) - k(.leftControl) - k(.keyQ)
             s.run = k(.leftShift) + k(.rightShift) > 0
             if rightHeld { s.bHeld = true }
@@ -210,14 +221,16 @@ final class GamepadInput {
                 s.look = .zero
                 s.shoulders = 0
             case .menu:
-                keys = [(.upArrow, .up), (.downArrow, .down), (.keyW, .up), (.keyS, .down),
+                keys = [(.upArrow, .up), (.downArrow, .down), (.keyW, .up), (.keyW, .keyW), (.keyS, .down),
                         (.leftArrow, .left), (.rightArrow, .right), (.keyA, .left), (.keyD, .right),
                         (.returnOrEnter, .a), (.spacebar, .a), (.escape, .b), (.deleteOrBackspace, .b)]
                 s.move = .zero
                 s.look = .zero
                 s.shoulders = 0
             case .camera:
-                keys += [(.keyR, .y), (.keyB, .x), (.keyV, .filters), (.escape, .menu), (.comma, .slower), (.period, .faster)]
+                keys += [(.keyR, .y), (.keyB, .x), (.keyV, .filters), (.escape, .menu), (.comma, .slower), (.period, .faster),
+                         (.keyK, .setKey), (.keyI, .prevKey), (.keyO, .nextKey), (.keyZ, .stepBack), (.keyX, .stepForward),
+                         (.keyP, .roll), (.keyG, .develop)]
             case .lighting:
                 keys += [(.keyF, .x), (.keyT, .y), (.deleteOrBackspace, .removeLight), (.keyG, .l3), (.keyC, .gels), (.keyM, .modifiers), (.keyK, .patternFocus), (.keyP, .flare), (.escape, .menu),
                          (.comma, .slower), (.period, .faster)]

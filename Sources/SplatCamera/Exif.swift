@@ -18,9 +18,18 @@ struct CameraModel: Codable {
     /// Inspired by the early-1970s Leica M5: a rangefinder, its own small lenses.
     static let lahntalR5 = CameraModel(make: "Lahntal", model: "R5", serial: "1287415", year: 1971)
 
+    /// Inspired by the Wilcam W-11: an 8-perf horizontal 35 mm motion picture
+    /// camera (the wide-gate frame is the still frame on its side, so every
+    /// lens in the bag covers it, on adapters). Hidden: not in the bag's cycle.
+    static let wilmontW11 = CameraModel(make: "Wilmont", model: "W11", serial: "0110457", year: 1955)
+
     /// The bodies in the bag.
     static let all: [CameraModel] = [ohiKorS2, kwanonEF, lahntalR5]
+    /// The bag's and the hidden ones (found by name: --body, saved shots).
+    static let every: [CameraModel] = all + [wilmontW11]
     var rangefinder: Bool { make == "Lahntal" }
+    /// A movie camera: frame rate and shutter angle, not a speed dial.
+    var isMotion: Bool { make == "Wilmont" }
 
     /// How each one works (looked up by model, so saved shots keep only the name).
     var shutterPriority: Bool { make == "Kwanon" && model == "EF" }
@@ -29,6 +38,7 @@ struct CameraModel: Codable {
         shutterPriority || rangefinder ? (shutterSpeeds.firstIndex { $0.label == "1000" } ?? shutterSpeeds.count - 1) : shutterSpeeds.count - 1
     }
     var about: String {
+        if isMotion { return "1955 · 8-perf horizontal motion picture, reflex finder, frame rate and shutter angle" }
         if rangefinder { return "1971 · rangefinder: bright frames, a focusing patch, its own lenses, 1 s to 1/1000" }
         return shutterPriority ? "1973 · shutter-priority auto, needle on an aperture scale, 1 s to 1/1000"
                                : "1974 · manual, needle on a speed scale, LED readouts, 1 s to 1/4000"

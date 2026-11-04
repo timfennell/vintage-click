@@ -75,10 +75,40 @@ struct CameraBody: Codable {
     var rollName: String {
         push == 0 ? stock.name : String(format: "%@ at EI %.0f (%@%d)", stock.name, ratedEI, push > 0 ? "push +" : "pull ", push)
     }
-    var takingAperture: Float { lens.apertureStops[min(apertureIndex, lens.apertureStops.count - 1)] }
+    var takingAperture: Float { stopBetween ?? lens.apertureStops[min(apertureIndex, lens.apertureStops.count - 1)] }
+    /// A stop between the clicks: a take pulling the iris from one key's to the next's.
+    var stopBetween: Float?
     /// What the finder shows: wide open, unless the preview lever is held.
     var viewingAperture: Float { dofPreview ? takingAperture : lens.maxAperture }
-    var shutter: (label: String, seconds: Float) { shutterSpeeds[shutterIndex] }
+    var shutter: (label: String, seconds: Float) {
+        guard model.isMotion else { return shutterSpeeds[shutterIndex] }
+        // A movie camera's rotating shutter: open for its angle of each turn,
+        // one turn a frame (180° at 24 fps is 1/48 s).
+        let a = shutterAngle
+        return (String(format: a == a.rounded() ? "%.0f°" : "%.1f°", a), a / 360 / frameRate)
+    }
+
+    // MARK: a movie camera (the Wilmont)
+
+    static let frameRates: [Float] = [24, 25, 30, 48]
+    static let shutterAngles: [Float] = [180, 172.8, 144, 90, 45, 22.5]
+    /// Optional so shots saved before the movie camera still load.
+    private var motionRate: Float?
+    private var motionAngle: Float?
+    var frameRate: Float {
+        get { motionRate ?? 24 }
+        set { motionRate = newValue }
+    }
+    /// Degrees: any angle (a take eases between its keys'), set by the dial in steps.
+    var shutterAngle: Float {
+        get { motionAngle ?? 180 }
+        set { motionAngle = newValue }
+    }
+    /// The dial's nearest step.
+    var shutterAngleIndex: Int {
+        get { Self.shutterAngles.indices.min { abs(Self.shutterAngles[$0] - shutterAngle) < abs(Self.shutterAngles[$1] - shutterAngle) } ?? 0 }
+        set { shutterAngle = Self.shutterAngles[max(0, min(Self.shutterAngles.count - 1, newValue))] }
+    }
     var framesLeft: Int { stock.exposures - framesShot }
 
     /// The scan calibrated against mid grey: stops that bring its own middle
@@ -135,6 +165,8 @@ struct CameraBody: Codable {
 
     /// Sets the shutter speed that best matches the meter reading.
     mutating func meterShutter(sceneLuminance lum: Float) {
+        // A movie camera keeps its angle: the operator sets the stop.
+        guard !model.isMotion else { return }
         let best = (0...model.fastestShutter).min { a, b in
             var x = self, y = self
             x.shutterIndex = a
@@ -148,6 +180,11 @@ struct CameraBody: Codable {
         apertureIndex = max(0, min(lens.apertureStops.count - 1, apertureIndex + d))
     }
     mutating func changeShutter(_ d: Int) {
+        if model.isMotion {
+            // Faster (+) is a narrower angle.
+            shutterAngleIndex += d
+            return
+        }
         shutterIndex = max(0, min(model.fastestShutter, shutterIndex + d))
     }
 
@@ -176,7 +213,8 @@ struct CameraBody: Codable {
             if let i = lensBag.firstIndex(where: { $0.name == want }) { chooseLens(i) }
         }
     }
-    func fits(_ l: Lens) -> Bool { model.rangefinder ? l.forRangefinder : l.forReflex }
+    /// The movie camera takes every lens in the bag, on adapters.
+    func fits(_ l: Lens) -> Bool { model.isMotion || (model.rangefinder ? l.forRangefinder : l.forReflex) }
     mutating func turnFocus(_ rate: Float, dt: Float) {
         focusM = max(lens.minFocusM, min(200, focusM * exp(rate * dt * 1.1)))
     }

@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import AVKit
 import CSpirula
 import Foundation
 import MetalKit
@@ -51,7 +53,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var meterLum: Float = 0.18
     private var lastFinderKey = ""
     /// Which page of the game menu is showing.
-    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder }
+    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder, motion }
     private var menuPage = MenuPage.main
     /// A refined frame eases in over the shells frame it replaces: that frame, held, and when the fade began.
     private var fadeFrom: (buf: MTLBuffer, off: Int, slot: Int)?
@@ -328,6 +330,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let dt = Float(min(0.1, now - lastTime))
         lastTime = now
         if benchFrames > 0 { benchOrbit() } else if !scripted { handleInput(dt: dt) }
+        advanceRoll()
 
         // Looking at prints: the finder rests and the darkroom gets the GPU.
         if mode == .sheet {
@@ -379,7 +382,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         // Render only a view that changed (or once a second, in case something
         // outside this key did): a still camera leaves the GPU to the darkroom.
         let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)"
-        if key != lastFinderKey || now - lastFinderAsk > 1 {
+        // A take in the darkroom: the finder rests (the last frame stays up)
+        // and the render thread exposes its frames back to back.
+        if movie == nil && (key != lastFinderKey || now - lastFinderAsk > 1) {
             job.refresh = key == lastFinderKey
             loop.requestFinder(job)
             lastFinderKey = key
@@ -533,6 +538,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         // the patch's second image, every display frame, without a new render.
         // O[13].z: the Kwanon's screen, the split alone.
         o.append(SIMD4(1 / max((rf ? body : b).focusM, 0.05), rf ? 1 : 0, b.model.shutterPriority ? 1 : 0, 0))
+        // The movie camera's finder: a plain ground glass, no focusing aids.
+        if b.model.isMotion { o[5].x = 0 }
         if job.fromLight != nil {
             o.replaceSubrange(9...11, with: lensFilters[0].optics(threshold: 1))     // no filter on a light's view
             o[5].x = 0          // no focusing aids
@@ -752,6 +759,18 @@ final class Viewer: NSObject, MTKViewDelegate {
             menuInput(s)
             return
         }
+        if player != nil {
+            if !p.isDisjoint(with: [.a, .b, .menu, .view]) { closePlayer() }
+            return
+        }
+        // A take in the darkroom has the camera: Esc (or Start) stops it.
+        if movie != nil && mode == .camera {
+            if p.contains(.menu) || p.contains(.b) {
+                movie?.cancel()
+                hud?.flash("STOPPING: FINISHING THE FRAMES IN THE DARKROOM")
+            }
+            return
+        }
         if p.contains(.menu) {
             openMenu()
             return
@@ -772,25 +791,38 @@ final class Viewer: NSObject, MTKViewDelegate {
                 body.autoExposure = false
                 hud?.flash("MANUAL EXPOSURE")
             }
-            if p.contains(.left) { body.changeAperture(-1) }
-            if p.contains(.right) { body.changeAperture(1) }
+            // On a movie camera, B held turns the d-pad to the timeline's keys.
+            let timeline = body.model.isMotion && s.bHeld && input.controllerName != nil
+            if !timeline && (p.contains(.left) || p.contains(.right)) { body.stopBetween = nil }
+            if !timeline && p.contains(.left) { body.changeAperture(-1) }
+            if !timeline && p.contains(.right) { body.changeAperture(1) }
             if body.apertureIndex != stop { Sounds.shared.play(.aperture, volume: 0.6) }
             let speed = body.shutterIndex
-            if p.contains(.up) { body.changeShutter(1) }
-            if p.contains(.down) { body.changeShutter(-1) }
+            if !timeline && p.contains(.up) { body.changeShutter(1) }
+            if !timeline && p.contains(.down) { body.changeShutter(-1) }
             if body.shutterIndex != speed { Sounds.shared.play(.shutterDial, volume: 0.7) }
             if p.contains(.x) { openLenses() }
             if p.contains(.filters) { openFilters() }
-            if p.contains(.y) { openFilm() }
+            if body.model.isMotion {
+                motionInput(s)
+            } else if p.contains(.y) {
+                openFilm()
+            }
             if p.contains(.l3) { changeGait(gait == Self.gaits.count - 1 ? -gait : 1) }
-            body.dofPreview = s.bHeld
+            body.dofPreview = s.bHeld && !timeline
             let wasFocus = body.focusM
-            body.turnFocus(s.triggers, dt: dt)
+            body.turnFocus(s.triggers + s.focusKeys * 0.6, dt: dt)
             // The wheel is the focus ring: away from you focuses farther.
             if s.wheel != 0 { body.focusM = max(body.lens.minFocusM, min(200, body.focusM * exp(s.wheel * 0.03))) }
             // The ring's grease and detents: a soft tick every so far of turn.
             focusTurned += abs(log(body.focusM / wasFocus))
             if focusTurned > 0.12 { focusTurned = 0; Sounds.shared.play(.focus, volume: 0.35) }
+            if body.focusM != wasFocus && body.model.isMotion {
+                // No prism on the ground glass: the distance, as the focus puller calls it.
+                hud?.flash(body.focusM >= 100 ? "FOCUS ∞" : String(format: "FOCUS %.2f M", body.focusM))
+                // Turning the ring while rolling: you pull focus for the rest of the roll.
+                if rolling != nil { pullingFocus = true }
+            }
             // M + arrows tilt or shift a lens that can; N squares it up again.
             if s.movement != .zero {
                 if body.move(s.movement * dt) {
@@ -822,7 +854,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         if p.contains(.slower) { changeGait(-1) }
         // The controls drive whichever you are looking through: the camera or a light,
         // at the chosen pace in real metres per second (Shift: three times that).
-        let input = FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0)
+        // Holding B on the movie camera, L1 / R1 step the timeline, not rise and sink.
+        let stepping = mode == .camera && body.model.isMotion && s.bHeld && self.input.controllerName != nil
+        let input = FlyInput(move: s.move, look: s.look, rise: stepping ? 0 : s.shoulders, zoom: 0)
         let pace = Self.gaits[gait].metres / body.metresPerUnit * (s.run ? 3 : 1)
         camera.moveSpeed = pace
         lightCam.moveSpeed = pace
@@ -1253,8 +1287,8 @@ final class Viewer: NSObject, MTKViewDelegate {
                 .init(title: "Camera body: " + body.model.fullName, detail: body.model.about + " (select to change)") { [weak self] in
                     guard let self else { return }
                     let all = CameraModel.all
-                    let i = all.firstIndex { $0.fullName == self.body.model.fullName } ?? 0
-                    self.body.chooseBody(all[(i + 1) % all.count])
+                    let i = all.firstIndex { $0.fullName == self.body.model.fullName }
+                    self.body.chooseBody(i.map { all[($0 + 1) % all.count] } ?? all[0])
                     Sounds.shared.play(.lensChange)
                     self.reopenMenu() },
             ]
@@ -1266,6 +1300,11 @@ final class Viewer: NSObject, MTKViewDelegate {
                     self.body.autoExposure = !self.body.autoOn
                     self.reopenMenu() })
             }
+            if body.model.isMotion {
+                bagItems.append(.init(title: "Motion…", detail: String(format: "%.0f fps, %@ shutter, a %.0f s take: keys, rolling, developing",
+                                                                         body.frameRate, body.shutter.label, workingTake.duration)) {
+                    [weak self] in self?.go(.motion) })
+            }
             return bagItems + [
                 .init(title: "Change lens…", detail: "now: \(body.lens.name) (\(body.lens.collection))") { [weak self] in
                     self?.openLenses() },
@@ -1273,6 +1312,55 @@ final class Viewer: NSObject, MTKViewDelegate {
                     self?.openFilters() },
                 .init(title: "Load film…", detail: "now: \(body.rollName), frame \(body.framesShot + 1) of \(body.stock.exposures)") {
                     [weak self] in self?.openFilm() },
+            ]
+        case .motion:
+            let t = workingTake
+            return [
+                back(to: .bag, "Back to the camera bag"),
+                .init(title: String(format: "Frame rate: %.0f fps", body.frameRate),
+                      detail: "frames a second, on film and on the screen (select to change)") { [weak self] in
+                    guard let self else { return }
+                    let r = CameraBody.frameRates
+                    self.body.frameRate = r[((r.firstIndex(of: self.body.frameRate) ?? 0) + 1) % r.count]
+                    var t = self.workingTake
+                    t.frameRate = self.body.frameRate
+                    self.workingTake = t
+                    self.reopenMenu() },
+                .init(title: "Shutter angle: " + body.shutter.label + String(format: " (1/%.0f s)", 1 / body.shutter.seconds),
+                      detail: "how long each frame is open, and how much a move blurs (- = in the camera)") { [weak self] in
+                    guard let self else { return }
+                    self.body.shutterAngleIndex = (self.body.shutterAngleIndex + 1) % CameraBody.shutterAngles.count
+                    self.reopenMenu() },
+                .init(title: String(format: "Take length: %.0f s", t.duration),
+                      detail: "\(t.keys.count) key\(t.keys.count == 1 ? "" : "s") · K sets one, I / O between them, Z / X a frame (Shift: a second), P or the button rolls") { [weak self] in
+                    guard let self else { return }
+                    var t = self.workingTake
+                    let l = MotionTake.lengths
+                    t.duration = l[((l.firstIndex(of: t.duration) ?? 0) + 1) % l.count]
+                    self.workingTake = t
+                    self.reopenMenu() },
+                .init(title: "Develop a preview", detail: "the take at the finder's size, quickly, onto the light table (G)") { [weak self] in
+                    self?.closeMenu(); self?.developPreview() },
+                .init(title: "Develop the final", detail: "\(finalKind.name) at \(finalSize.w) × \(finalSize.h): slow, full quality (Shift-G)") { [weak self] in
+                    guard let self else { return }
+                    self.closeMenu(); self.developTake(kind: self.finalKind) },
+                .init(title: "Final: " + finalKind.name, detail: "what Y on a take at the light table develops (select to change)") { [weak self] in
+                    guard let self else { return }
+                    self.finalKind = self.finalKind == .prores ? .hevc : .prores
+                    self.reopenMenu() },
+                .init(title: "Final size: \(finalSize.w) × \(finalSize.h)", detail: "8-perf's 1.5:1 (select to change)") { [weak self] in
+                    guard let self else { return }
+                    let i = Self.finalSizes.firstIndex { $0 == self.finalSize } ?? 0
+                    UserDefaults.standard.set((i + 1) % Self.finalSizes.count, forKey: "movieSize")
+                    self.reopenMenu() },
+                .init(title: "Clear all keys", detail: "start the take again") { [weak self] in
+                    guard let self else { return }
+                    var t = self.workingTake
+                    t.keys = []
+                    self.workingTake = t
+                    self.playhead = 0
+                    self.hud?.flash("KEYS CLEARED")
+                    self.reopenMenu() },
             ]
         case .lights:
             var items: [Item] = [back(to: .main)]
@@ -1612,6 +1700,14 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.b) || p.contains(.menu) { menu.showingFilm = false }
             return
         }
+        // W on the camera bag's body row: the movie camera (hidden), and back.
+        if p.contains(.keyW) && menuPage == .bag && menu.selected == 1 {
+            body.chooseBody(body.model.isMotion ? .ohiKorS2 : .wilmontW11)
+            if body.model.isMotion { body.frameRate = workingTake.frameRate }
+            Sounds.shared.play(.lensChange)
+            reopenMenu()
+            return
+        }
         // A stick steps once per push, like the d-pad.
         let y = s.move.y + s.look.y
         if abs(y) > 0.5 && abs(menuStick) <= 0.5 { menu.move(y > 0 ? -1 : 1) }
@@ -1624,6 +1720,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             switch menuPage {
             case .main: closeMenu()
             case .finder: go(.settings)
+            case .motion: go(.bag)
             default: go(.main)
             }
         }
@@ -1635,11 +1732,15 @@ final class Viewer: NSObject, MTKViewDelegate {
     func openSheet() {
         guard let sheet else { return }
         mode = .sheet
-        sheet.reload(showRoll: rollFolder(body))
+        // Open on what came out of the darkroom last: a take, or the roll in the camera.
+        sheet.reload(showRoll: newestOnTable ?? rollFolder(body))
         sheet.pending = (rollFolder(body), loop.pendingFrames(roll: body.rollNumber))
         sheet.isHidden = false
         hud?.isHidden = true
     }
+
+    /// The roll or take developed most recently (the light table opens on it).
+    private var newestOnTable: URL?
 
     private func closeSheet() {
         wall?.isHidden = true
@@ -1668,12 +1769,22 @@ final class Viewer: NSObject, MTKViewDelegate {
         if dx != 0 || dy != 0 { sheet.move(dx: dx, dy: dy) }
         if p.contains(.l1) { sheet.changeRoll(-1) }
         if p.contains(.r1) { sheet.changeRoll(1) }
-        if p.contains(.a) { sheet.toggleMark() }
-        if p.contains(.y) { enlarge(sheet.enlargeCandidates()) }
+        if let t = sheet.selectedTake {
+            // A take: A plays its preview, Y develops its final (again: stops it).
+            if p.contains(.a) { playTake(t.dir) }
+            if p.contains(.y) { developFinal(takeFolder: t.dir) }
+        } else {
+            if p.contains(.a) { sheet.toggleMark() }
+            if p.contains(.y) { enlarge(sheet.enlargeCandidates()) }
+        }
         feedEnlarger()
         let printing = enlargeQueue.count + loop.pendingExposures
         if printing == 0 { enlargeTotal = 0; enlargeDone = 0 }
-        sheet.enlargerStatus = enlargeTotal == 0 ? "" : "ENLARGING \(enlargeDone) of \(enlargeTotal)"
+        if let mv = movie {
+            sheet.enlargerStatus = "DEVELOPING TAKE \(mv.take.takeNumber) \(mv.kind == .preview ? "PREVIEW" : mv.kind.name.uppercased()) \(mv.written) of \(mv.total)"
+        } else if enlargeTotal > 0 || sheet.enlargerStatus.hasPrefix("ENLARGING") {
+            sheet.enlargerStatus = enlargeTotal == 0 ? "" : "ENLARGING \(enlargeDone) of \(enlargeTotal)"
+        }
         if p.contains(.b) || p.contains(.view) { closeSheet() }
         if loop.pendingFrames(roll: body.rollNumber) != sheet.pending.frames { sheet.reload(showRoll: nil) }
     }
@@ -1747,10 +1858,10 @@ final class Viewer: NSObject, MTKViewDelegate {
 
     /// The flare as the photo takes it: the lights as the finder last saw
     /// them (how much of each was visible), through the taking aperture.
-    private func photoFlare(body b: CameraBody, camera c: FlyCamera) -> [SIMD4<Float>] {
+    private func photoFlare(body b: CameraBody, camera c: FlyCamera, plot: LightingPlot? = nil) -> [SIMD4<Float>] {
         let fx = b.focalPixels(width: width, height: height)
         let axis = SIMD2(Float(width), Float(height)) / 2 + b.axisOffset(width: width)
-        let s = Flare.sources(plot: lighting, view: c.viewMatrix, position: c.position, fx: fx, axis: axis,
+        let s = Flare.sources(plot: plot ?? lighting, view: c.viewMatrix, position: c.position, fx: fx, axis: axis,
                               width: width, height: height, fisheye: b.lens.isFisheye, body: b, fNumber: b.takingAperture)
         guard !s.isEmpty else { return [] }
         return Flare.uniforms(s, visibility: flareVis.count == s.count ? flareVis : [Float](repeating: 1, count: s.count),
@@ -1812,6 +1923,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// Fires: the mirror swings up for the exposure, the film advances, and
     /// the frame is exposed and developed in the background.
     func releaseShutter() {
+        // The movie camera's button runs it: the move, from the top.
+        if body.model.isMotion { roll(fromTop: rolling == nil); return }
         guard body.framesLeft > 0 else {
             hud?.flash("END OF ROLL — load a new one")
             return
@@ -1877,6 +1990,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let negative = job.negative
         let (nw, nh) = job.size
         job.record?.save(for: url)
+        if job.outputPath == nil { newestOnTable = url.deletingLastPathComponent() }
         // Writing a big PNG takes a moment: off the main thread.
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let description = "\(b.rollName), frame \(job.frameNumber)"
@@ -1895,6 +2009,321 @@ final class Viewer: NSObject, MTKViewDelegate {
                 if self?.mode == .sheet { self?.sheet?.reload(showRoll: nil) }
             }
         }
+    }
+
+    // MARK: the movie camera
+
+    /// The working take on the movie camera's timeline (this scan's), kept on disk.
+    private var take: MotionTake?
+    private(set) var playhead: Double = 0
+    /// Rolling: the move playing in the finder in real time (when it began, and from where).
+    private var rolling: (start: Double, from: Double)?
+    /// A take in the darkroom, its frames out (at most two at once), and the body it is shot with.
+    private var movie: MovieDeveloper?
+    private var movieInFlight = 0
+    private var movieBody = CameraBody()
+    /// Where the take's poster frames are, for the light table once it is done.
+    private var movieDone: ((Bool) -> Void)?
+
+    /// The working take, loaded for this scan the first time it is wanted.
+    private var workingTake: MotionTake {
+        get {
+            if let t = take, t.scene == (scenePath ?? "") { return t }
+            let scene = scenePath ?? ""
+            let t = MotionTake.load(MotionTake.workingURL(scene: scene)).flatMap { $0.scene == scene ? $0 : nil }
+                ?? MotionTake(scene: scene, frameRate: body.frameRate)
+            take = t
+            return t
+        }
+        set {
+            take = newValue
+            newValue.save(MotionTake.workingURL(scene: newValue.scene))
+        }
+    }
+
+    /// Puts the camera where the take has it at `t`, set as it is there.
+    /// The operator has the focus ring for the rest of this roll.
+    private var pullingFocus = false
+
+    private func pose(at t: Double) {
+        playhead = max(0, min(workingTake.duration, t))
+        guard let k = workingTake.sample(at: playhead) else { return }
+        camera.position = k.camera.position
+        camera.yaw = k.camera.yaw
+        camera.pitch = k.camera.pitch
+        if !(rolling != nil && pullingFocus) { body.focusM = k.focusM }
+        body.shutterAngle = k.shutterAngle
+        let stops = body.lens.apertureStops
+        body.apertureIndex = stops.indices.min { abs(stops[$0] - k.fNumber) < abs(stops[$1] - k.fNumber) } ?? 0
+        body.stopBetween = abs(body.lens.apertureStops[body.apertureIndex] - k.fNumber) < 0.01 ? nil : k.fNumber
+    }
+
+    /// The timeline's keys and pad (the movie camera only).
+    private func motionInput(_ s: GamepadInput.State) {
+        let p = s.pressed
+        var t = workingTake
+        let step = s.run ? 1 : t.frameTime
+        // The pad: Y sets a key; hold B (the preview lever) and the d-pad
+        // jumps between keys (◀ ▶), deletes this one (▼) or develops a
+        // preview (▲); L1 / R1 step a second.
+        let padKeys = s.bHeld && input.controllerName != nil
+        if p.contains(.setKey) || (p.contains(.y) && !s.run) {
+            if s.run && p.contains(.setKey) {
+                hud?.flash(t.deleteKey(near: playhead) ? "KEY DELETED" : "NO KEY HERE")
+            } else {
+                t.setKey(MotionKey(time: playhead, camera: camera, focusM: body.focusM, fNumber: body.takingAperture,
+                                   shutterAngle: body.shutterAngle))
+                hud?.flash("KEY \(t.keyNumber(at: playhead) ?? 0) OF \(t.keys.count) AT " + MotionTake.timecode(playhead, fps: t.frameRate))
+                Sounds.shared.play(.shutterDial, volume: 0.5)
+            }
+            workingTake = t
+        }
+        if padKeys && p.contains(.down) { hud?.flash(t.deleteKey(near: playhead) ? "KEY DELETED" : "NO KEY HERE"); workingTake = t }
+        let prev = p.contains(.prevKey) || (padKeys && p.contains(.left))
+        let next = p.contains(.nextKey) || (padKeys && p.contains(.right))
+        if prev, let k = t.keys.last(where: { $0.time < playhead - t.frameTime / 2 }) { pose(at: k.time) }
+        if next, let k = t.keys.first(where: { $0.time > playhead + t.frameTime / 2 }) { pose(at: k.time) }
+        if p.contains(.stepBack) { pose(at: playhead - step) }
+        if p.contains(.stepForward) { pose(at: playhead + step) }
+        if padKeys && p.contains(.l1) { pose(at: playhead - 1) }
+        if padKeys && p.contains(.r1) { pose(at: playhead + 1) }
+        if p.contains(.roll) { roll(fromTop: false) }
+        if p.contains(.develop) { s.run ? developTake(kind: finalKind) : developPreview() }
+        if padKeys && p.contains(.up) { developPreview() }
+    }
+
+    /// Plays the move in the finder in real time (again: stops it).
+    private func roll(fromTop: Bool) {
+        if rolling != nil {
+            rolling = nil
+            hud?.flash("CUT")
+            return
+        }
+        guard !workingTake.keys.isEmpty else {
+            hud?.flash("NO KEYS: SET ONE WITH K (Y ON A PAD), MOVE ON WITH X, SET ANOTHER")
+            return
+        }
+        let from = fromTop || playhead >= workingTake.duration - workingTake.frameTime ? 0 : playhead
+        rolling = (CACurrentMediaTime(), from)
+        pullingFocus = false
+        pose(at: from)
+        Sounds.shared.play(.advance, volume: 0.4)
+    }
+
+    /// The finder follows the take while rolling; the end of it is a cut.
+    private func advanceRoll() {
+        guard let r = rolling else { return }
+        let t = r.from + CACurrentMediaTime() - r.start
+        pose(at: t)
+        if t >= workingTake.duration { rolling = nil; hud?.flash("CUT") }
+    }
+
+    /// Sends the working take to the darkroom as a preview: the finder's size,
+    /// a proof's few sub-pupils, onto the light table as a strip of posters.
+    func developPreview() { developTake(kind: .preview) }
+
+    /// The working take to the darkroom: a preview (the finder's size, onto
+    /// the light table) or straight to the final (posters too, so it lies there as well).
+    func developTake(kind: MovieDeveloper.Kind) {
+        var t = workingTake
+        guard !t.keys.isEmpty else { hud?.flash("NO KEYS TO DEVELOP"); return }
+        guard movie == nil, let scene = scenePath else { hud?.flash("A TAKE IS ALREADY IN THE DARKROOM"); return }
+        let (dir, n) = MovieDeveloper.newTakeFolder(session: sessionFolder, stock: body.rollName)
+        t.scene = scene
+        t.frameRate = body.frameRate
+        t.body = body
+        t.lighting = lighting
+        t.sky = loop.sky
+        t.takeNumber = n
+        startMovie(t, folder: dir, kind: kind, size: kind == .preview ? (width, height) : finalSize)
+    }
+
+    /// Scripted checks: a take straight to the darkroom, into `folder`. With no
+    /// take given, a demo: a slow arc round the subject with a focus pull.
+    func developScripted(_ given: MotionTake?, folder: URL, kind: MovieDeveloper.Kind, seconds: Double,
+                         done: @escaping (Bool) -> Void) {
+        body.chooseBody(.wilmontW11)
+        // The operator sets the stop from the meter (the angle stays).
+        body.meterAperture(sceneLuminance: meterLum)
+        var t = given ?? MotionTake(scene: scenePath ?? "")
+        if given == nil {
+            t.duration = seconds
+            let dist = simd_distance(home.position, center)
+            for (k, a) in [Float(-0.35), 0, 0.35].enumerated() {
+                var c = camera
+                let a0 = home.forward, b0 = simd_cross(camera.up, a0)
+                let around: SIMD3<Float> = cos(a) * -a0 + sin(a) * b0
+                let reach: Float = dist * (1 - 0.15 * Float(k))
+                let lift: SIMD3<Float> = camera.up * (radius * 0.25)
+                let eye: SIMD3<Float> = center + around * reach + lift
+                c.lookAt(center, from: eye)
+                // Focus pulls from just behind the subject to its middle.
+                let d = simd_distance(eye, center) * body.metresPerUnit
+                t.setKey(MotionKey(time: seconds * Double(k) / 2, camera: c, focusM: k == 0 ? d * 1.4 : d,
+                                   fNumber: body.takingAperture, shutterAngle: body.shutterAngle))
+            }
+        }
+        t.scene = scenePath ?? ""
+        t.frameRate = body.frameRate
+        if t.body == nil { t.body = body }
+        t.lighting = lighting
+        t.sky = loop.sky
+        movieDone = done
+        if kind == .preview { t.save(folder.appendingPathComponent("take.json")) }
+        startMovie(t, folder: folder, kind: kind, size: kind == .preview ? (width, height) : finalSize)
+    }
+
+    /// Develops a take's final from its take.json (the light table's enlarger).
+    func developFinal(takeFolder dir: URL) {
+        if let m = movie, m.folder.standardizedFileURL == dir.standardizedFileURL {
+            m.cancel()
+            hud?.flash("STOPPED")
+            return
+        }
+        guard movie == nil else { sheet?.enlargerStatus = "A TAKE IS ALREADY IN THE DARKROOM"; return }
+        guard let t = MotionTake.load(dir.appendingPathComponent("take.json")) else { return }
+        guard t.scene == scenePath else { sheet?.enlargerStatus = "THAT TAKE IS FROM ANOTHER SCAN: OPEN IT TO DEVELOP IT"; return }
+        startMovie(t, folder: dir, kind: finalKind, size: finalSize)
+    }
+
+    /// The final's codec and size (the Motion menu).
+    var finalKind: MovieDeveloper.Kind {
+        get { MovieDeveloper.Kind(rawValue: UserDefaults.standard.string(forKey: "movieFinal") ?? "") ?? .prores }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "movieFinal") }
+    }
+    static let finalSizes: [(w: Int, h: Int)] = [(3072, 2048), (4096, 2730)]
+    var finalSize: (w: Int, h: Int) {
+        Self.finalSizes[min(Self.finalSizes.count - 1, max(0, UserDefaults.standard.integer(forKey: "movieSize")))]
+    }
+
+    private func startMovie(_ t: MotionTake, folder: URL, kind: MovieDeveloper.Kind, size: (w: Int, h: Int)) {
+        guard let b = t.body else { return }
+        do {
+            movie = try MovieDeveloper(take: t, folder: folder, kind: kind, width: size.w, height: size.h)
+        } catch {
+            hud?.flash("CAN'T DEVELOP: \(error.localizedDescription)")
+            return
+        }
+        let record = folder.appendingPathComponent("take.json")
+        if !FileManager.default.fileExists(atPath: record.path) { t.save(record) }
+        if t.sky != loop.sky { loop.setSky(t.sky) }
+        movieBody = b
+        movieInFlight = 0
+        rolling = nil
+        print("Movie: take \(t.takeNumber), \(t.frameCount) frames at \(t.frameRate) fps, \(kind.name), \(size.w)x\(size.h)")
+        feedMovie()
+    }
+
+    /// Keeps two frames of a take in the darkroom (in order: the render
+    /// thread takes exposures first in, first out).
+    private func feedMovie() {
+        guard let m = movie else { return }
+        while movieInFlight < 2, let f = m.takeFrame() {
+            guard let job = movieJob(m, frame: f) else { m.cancel(); break }
+            movieInFlight += 1
+            loop.expose(job)
+        }
+        if movieInFlight == 0 && m.done { endMovie(m) }
+    }
+
+    private func movieJob(_ m: MovieDeveloper, frame f: Int) -> ExposureJob? {
+        let t = m.take
+        let t0 = Double(f) / Double(t.frameRate)
+        guard let k = t.sample(at: t0), let accum = loop.makeAccumulator(m.width, m.height) else { return nil }
+        var b = movieBody
+        b.focusM = k.focusM
+        b.stopBetween = k.fNumber
+        b.shutterAngle = k.shutterAngle
+        b.frameRate = t.frameRate
+        let cells = m.kind == .preview ? min(8, cellsPerExposure) : cellsPerExposure
+        let job = ExposureJob(camera: k.camera, body: b, lighting: t.lighting, frameNumber: f + 1,
+                              cells: b.lens.isFisheye ? [.zero] : b.cellCentres(cells),
+                              accum: accum, size: (m.width, m.height), wantsNegative: false)
+        // The shutter is open for its angle of the frame: the camera moves on meanwhile.
+        let open = Double(b.shutter.seconds)
+        job.cameraAt = { u in t.sample(at: t0 + Double(u) * open)?.camera ?? k.camera }
+        job.filterThreshold = filterThreshold
+        job.flare = photoFlare(body: b, camera: k.camera, plot: t.lighting)
+        let (w, h) = (m.width, m.height)
+        job.sink = { [weak self] buf in
+            m.append(buf, w: w, h: h, frame: f)
+            DispatchQueue.main.async {
+                guard let self, self.movie === m else { return }
+                self.movieInFlight -= 1
+                self.feedMovie()
+            }
+        }
+        return job
+    }
+
+    private func endMovie(_ m: MovieDeveloper) {
+        movie = nil
+        m.finish { [weak self] ok in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let what = m.kind == .preview ? "PREVIEW" : m.kind.name.uppercased()
+                let msg = !ok ? "TAKE \(m.take.takeNumber) \(what) FAILED"
+                    : m.cancelled ? "TAKE \(m.take.takeNumber) \(what) STOPPED AT \(m.written) OF \(m.total) FRAMES"
+                    : "TAKE \(m.take.takeNumber) \(what) DEVELOPED · ON THE LIGHT TABLE"
+                print("Movie: \(msg.lowercased()) → \(m.url.path)")
+                self.hud?.flash(msg)
+                self.sheet?.enlargerStatus = msg
+                if m.kind == .preview && ok { self.newestOnTable = m.folder }
+                if self.mode == .sheet { self.sheet?.reload(showRoll: m.kind == .preview ? m.folder : nil) }
+                self.onSaved?(m.url.path)
+                self.movieDone?(ok)
+            }
+        }
+    }
+
+    /// Playing a take's preview over the light table.
+    private var player: AVPlayerView?
+
+    func playTake(_ dir: URL) {
+        let u = dir.appendingPathComponent(MovieDeveloper.Kind.preview.fileName)
+        guard FileManager.default.fileExists(atPath: u.path), let host = sheet else { return }
+        let v = AVPlayerView(frame: host.bounds.insetBy(dx: host.bounds.width * 0.08, dy: host.bounds.height * 0.08))
+        v.autoresizingMask = [.width, .height]
+        v.controlsStyle = .floating
+        v.player = AVPlayer(url: u)
+        host.addSubview(v)
+        v.player?.play()
+        player = v
+    }
+
+    private func closePlayer() {
+        player?.player?.pause()
+        player?.removeFromSuperview()
+        player = nil
+    }
+
+    /// What the timeline strip shows.
+    private func motionInfo() -> ViewfinderHUD.Motion? {
+        guard body.model.isMotion, pov == nil else { return nil }
+        let t = workingTake
+        var m = ViewfinderHUD.Motion()
+        m.timecode = MotionTake.timecode(playhead, fps: t.frameRate)
+        m.rate = String(format: "%.0f FPS · %@", body.frameRate, body.shutter.label)
+        m.keys = t.keys.map { CGFloat($0.time / t.duration) }
+        m.current = t.keyNumber(at: playhead).map { $0 - 1 }
+        m.playhead = CGFloat(playhead / t.duration)
+        m.length = String(format: "%.0f S", t.duration)
+        m.rolling = rolling != nil
+        // The controls, faint along the bottom of the ground glass.
+        let pad = input.controllerName != nil
+        if movie != nil {
+            m.hint = pad ? "B or Start: stop developing (the frames so far are kept)" : "Esc: stop developing (the frames so far are kept)"
+        } else if pad {
+            m.hint = "L2 / R2 focus  ·  Y set key  ·  hold B: ◀ ▶ keys, L1 / R1 step a second, ▼ delete key, ▲ develop preview  ·  A roll  ·  final: Menu › Camera bag › Motion"
+        } else {
+            m.hint = "scroll or F / C focus  ·  K set key (focus too)  ·  ⇧K delete  ·  I / O previous / next key  ·  Z / X step (⇧ a second)  ·  P roll  ·  G preview  ·  ⇧G final"
+        }
+        if let mv = movie {
+            m.developing = String(format: "DEVELOPING TAKE %d %@ · %d / %d", mv.take.takeNumber,
+                                  mv.kind == .preview ? "PREVIEW" : mv.kind.name.uppercased(), mv.written, mv.total)
+            m.progress = CGFloat(mv.written) / CGFloat(max(1, mv.total))
+        }
+        return m
     }
 
     // MARK: HUD and stats
@@ -1942,6 +2371,15 @@ final class Viewer: NSObject, MTKViewDelegate {
         if Self.showStats { i.stats = statsLine }
         i.mirrorUp = mirrorUp
         i.measure = measureInfo()
+        i.motion = motionInfo()
+        if b.model.isMotion {
+            // The stop on the meter: a movie camera holds its speed.
+            i.meterLabels = b.lens.apertureStops.map { $0 < 10 ? String(format: "%.1f", $0) : String(format: "%.0f", $0) }
+            i.meterSet = b.apertureIndex
+            i.meterRight = true
+            i.windowReadout = true
+            i.counter = MotionTake.timecode(playhead, fps: workingTake.frameRate)
+        }
         if mode == .lighting {
             var lines = lighting.lights.enumerated().map { k, l -> String in
                 let mark = k == pov ? "◉" : " "
