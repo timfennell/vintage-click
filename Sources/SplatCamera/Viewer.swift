@@ -2024,6 +2024,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// The movie's frames in the darkroom now (the oldest is being exposed).
     private var movieJobs: [ExposureJob] = []
     private var movieStarted = 0.0
+    /// Tries since the darkroom last found memory for a frame.
+    private var movieMemoryWaits = 0
     /// How the last take ended, kept up on the strip a while.
     private var movieNote: (text: String, until: Double)?
     private var movieBody = CameraBody()
@@ -2232,6 +2234,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         movieBody = b
         movieInFlight = 0
         movieJobs = []
+        movieMemoryWaits = 0
         movieNote = nil
         movieStarted = CACurrentMediaTime()
         rolling = nil
@@ -2245,9 +2248,30 @@ final class Viewer: NSObject, MTKViewDelegate {
         guard let m = movie else { return }
         while movieInFlight < 2, let f = m.takeFrame() {
             guard let job = movieJob(m, frame: f) else {
-                Self.movieLog("take \(m.take.takeNumber): frame \(f + 1) couldn't be set up (no keys, or no memory for a \(m.width)x\(m.height) frame)")
-                m.cancel()
+                // Most likely the GPU is short of memory (other apps): wait for
+                // it to free up rather than give up, a minute or two at most.
+                m.putBack(f)
+                movieMemoryWaits += 1
+                if movieMemoryWaits > 24 {
+                    Self.movieLog("take \(m.take.takeNumber): gave up on frame \(f + 1), no memory for a \(m.width)x\(m.height) frame")
+                    movieNote = ("NOT ENOUGH MEMORY: CLOSE SOME APPS OR CHOOSE A SMALLER FINAL", CACurrentMediaTime() + 30)
+                    m.cancel()
+                    break
+                }
+                if movieMemoryWaits == 1 {
+                    Self.movieLog("take \(m.take.takeNumber): no memory for frame \(f + 1) yet, waiting")
+                }
+                if movieInFlight == 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                        guard let self, self.movie === m else { return }
+                        self.feedMovie()
+                    }
+                }
                 break
+            }
+            if movieMemoryWaits > 0 {
+                Self.movieLog("take \(m.take.takeNumber): memory free again, going on with frame \(f + 1)")
+                movieMemoryWaits = 0
             }
             movieInFlight += 1
             movieJobs.append(job)
@@ -2351,8 +2375,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         let partial = movieJobs.first.map { Double($0.next) / Double(max(1, $0.cells.count)) } ?? 0
         let done = (Double(mv.written) + partial) / Double(max(1, mv.total))
         let elapsed = CACurrentMediaTime() - movieStarted
-        var left = "TIMING THE FIRST FRAME"
-        if done > 0.002 && elapsed > 5 {
+        var left = movieMemoryWaits > 0 ? "WAITING FOR MEMORY: CLOSE SOME APPS" : "TIMING THE FIRST FRAME"
+        if movieMemoryWaits == 0 && done > 0.002 && elapsed > 5 {
             let s = elapsed * (1 - done) / done
             left = s < 90 ? String(format: "ABOUT %.0f S LEFT", s)
                 : s < 5400 ? String(format: "ABOUT %.0f MIN LEFT", s / 60)

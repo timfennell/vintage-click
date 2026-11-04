@@ -123,6 +123,11 @@ final class MovieDeveloper {
         return next - 1
     }
 
+    /// Hands back the frame just taken (it couldn't be exposed yet: tried again later).
+    func putBack(_ frame: Int) {
+        if frame == next - 1 { next = frame }
+    }
+
     /// Appends a developed frame: `print` is rgba half floats, the render's own
     /// size (`w` x `h`, cropped to the movie's even size). Any thread.
     func append(_ print: MTLBuffer, w: Int, h: Int, frame: Int) {
