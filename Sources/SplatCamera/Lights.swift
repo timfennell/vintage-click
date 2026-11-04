@@ -245,6 +245,10 @@ struct LightingPlot: Codable {
     var carrying = false
     var kitChoice = 1               // what the next light added will be
     var up = SIMD3<Float>(0, -1, 0)     // the world's up, for the heads' yokes
+    /// The scene's fog, lit by the house lights (a .vcscene's).
+    var fog: SceneFog? = nil
+    /// The fog's light: the house lights on a white surface, as the frame shows it.
+    var fogLight: SIMD3<Float> { ambientTint * ambient * 0.75 }
 
     /// The scan's own light, from full day down to moonlight, as a share of
     /// the light it was captured in (sun at EV 15 is ~80,000 lux): twilight

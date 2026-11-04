@@ -63,6 +63,21 @@ struct SceneFile: Codable {
     var sounds: [Sound]?
     var ambience: [Bed]?
     var bounds: [Bound]?
+    struct Fog: Codable {
+        var visibilityM: Float?
+        var colour: [Float]?
+        var heightFalloffM: Float?
+        var base: [Float]?
+    }
+    struct FogVolume: Codable {
+        var shape: String
+        var matrix: [Float]
+        var visibilityM: Float?
+        var colour: [Float]?
+        var softness: Float?
+    }
+    var fog: Fog?
+    var fogVolumes: [FogVolume]?
 }
 
 /// A .vcscene unpacked (once per version of the file) into the caches.
@@ -196,6 +211,40 @@ struct SceneBundle {
                                       silentBeyondM: s.silentBeyondM ?? 50)
         }
     }
+    /// A row-major 4x4 from the file, as simd (nil if malformed or flat).
+    static func matrix(_ m: [Float]) -> simd_float4x4? {
+        guard m.count == 16 else { return nil }
+        let M = simd_float4x4(columns: (SIMD4(m[0], m[4], m[8], m[12]), SIMD4(m[1], m[5], m[9], m[13]),
+                                        SIMD4(m[2], m[6], m[10], m[14]), SIMD4(m[3], m[7], m[11], m[15])))
+        return abs(M.determinant) > 1e-12 ? M : nil
+    }
+
+    /// The scene's fog: its haze and its patches (nil: clear air).
+    var sceneFog: SceneFog? {
+        var f = SceneFog()
+        if let a = file.fog, let v = a.visibilityM, v > 0 {
+            f.visibilityM = v
+            if let c = Self.vec(a.colour) { f.tint = c }
+            f.heightFalloffM = max(0, a.heightFalloffM ?? 0)
+            f.base = Self.vec(a.base) ?? .zero
+        }
+        for v in (file.fogVolumes ?? []).prefix(SceneFog.maxPatches) {
+            guard let M = Self.matrix(v.matrix), let vis = v.visibilityM, vis > 0 else { continue }
+            let shape: SceneFog.Patch.Shape
+            switch v.shape.lowercased() {
+            case "box": shape = .box
+            case "sphere": shape = .sphere
+            case "cylinder": shape = .cylinder
+            default: print("Scene: unknown fog shape \(v.shape)"); continue
+            }
+            let inv = M.inverse.transpose        // rows of the inverse, as columns
+            f.patches.append(SceneFog.Patch(shape: shape, toUnit: [inv.columns.0, inv.columns.1, inv.columns.2],
+                                            visibilityM: vis, tint: Self.vec(v.colour) ?? SIMD3(1, 1, 1),
+                                            softness: v.softness ?? 0.4))
+        }
+        return f.isEmpty ? nil : f
+    }
+
     /// Where the camera may go (nil: anywhere).
     var movementBounds: MovementBounds? {
         let vols: [MovementBounds.Volume] = (file.bounds ?? []).compactMap { b in

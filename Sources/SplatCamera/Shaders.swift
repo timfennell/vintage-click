@@ -1048,14 +1048,119 @@ float3 sky_at(texture2d<float> sky, float3 d, float mip, constant float4* K) {
     float3 lin = sky.sample(s, float2(fract(0.5 + az / (2 * M_PI_F)), 0.5 - el / M_PI_F), level(mip)).rgb * K[6].x;
     return float3(lin_to_srgb(lin.x), lin_to_srgb(lin.y), lin_to_srgb(lin.z));
 }
+// Fog along a ray from the eye (G[2]) in direction d (unit, scene units), out
+// to distance `tmax`: its optical depth, and the light it adds per unit of
+// that depth (the haze's and each patch's colour, weighted by their share).
+//   G: see SceneFog.rows (Fog.swift).
+float fog_shape_r(float3 q, int shape) {
+    if (shape == 0) return max(max(abs(q.x), abs(q.y)), abs(q.z));
+    if (shape == 1) return length(q);
+    return max(length(q.xy), abs(q.z));
+}
+// The ray's span inside the unit shape (slab tests; sphere and cylinder by quadratics).
+bool fog_span(float3 o, float3 d, int shape, thread float& t0, thread float& t1) {
+    t0 = -1e30; t1 = 1e30;
+    if (shape == 1) {
+        float a = dot(d, d), b = dot(o, d), c = dot(o, o) - 1, disc = b * b - a * c;
+        if (disc <= 0 || a < 1e-12) return false;
+        float sq = sqrt(disc);
+        t0 = (-b - sq) / a; t1 = (-b + sq) / a;
+        return true;
+    }
+    if (shape == 2) {
+        float a = dot(d.xy, d.xy), b = dot(o.xy, d.xy), c = dot(o.xy, o.xy) - 1;
+        if (a < 1e-12) { if (c > 0) return false; }
+        else {
+            float disc = b * b - a * c;
+            if (disc <= 0) return false;
+            float sq = sqrt(disc);
+            t0 = (-b - sq) / a; t1 = (-b + sq) / a;
+        }
+        // and between its caps
+        if (abs(d.z) < 1e-12) { if (abs(o.z) > 1) return false; }
+        else {
+            float za = (-1 - o.z) / d.z, zb = (1 - o.z) / d.z;
+            t0 = max(t0, min(za, zb)); t1 = min(t1, max(za, zb));
+        }
+        return t1 > t0;
+    }
+    for (int k = 0; k < 3; k++) {
+        if (abs(d[k]) < 1e-12) { if (abs(o[k]) > 1) return false; continue; }
+        float a = (-1 - o[k]) / d[k], b = (1 - o[k]) / d[k];
+        t0 = max(t0, min(a, b)); t1 = min(t1, max(a, b));
+    }
+    return t1 > t0;
+}
+float fog_depth(float3 d, float tmax, constant float4* G, thread float3& light) {
+    float3 eye = G[2].xyz, up = G[3].xyz;
+    float tau = 0;
+    float3 lit = 0;
+    // The haze: even, or thinning by e every G[0].z units above its base
+    // (full below it: the ground keeps its fog).
+    float sa = G[0].y;
+    if (sa > 0) {
+        float Hh = G[0].z, ta;
+        if (Hh <= 0) ta = sa * tmax;
+        else {
+            float u0 = dot(eye, up) - G[0].w, s = dot(d, up);
+            // split at the base: below it full density, above it the fall-off
+            float tc = abs(s) > 1e-6 ? -u0 / s : -1;
+            float a = 0, b = tmax;
+            ta = 0;
+            float segs[3] = { 0, (tc > 0 && tc < tmax) ? tc : tmax, tmax };
+            for (int k = 0; k < 2; k++) {
+                a = segs[k]; b = segs[k + 1];
+                if (b <= a) continue;
+                float um = u0 + s * (a + b) * 0.5;
+                if (um <= 0) ta += sa * (b - a);
+                else if (abs(s) < 1e-6) ta += sa * exp(-u0 / Hh) * (b - a);
+                else ta += sa * Hh / s * (exp(-(u0 + s * a) / Hh) - exp(-min((u0 + s * b) / Hh, 80.0)));
+            }
+        }
+        tau += ta;
+        lit += ta * G[1].rgb;
+    }
+    // The patches: through each the ray's span inside, density fading over its edge.
+    int np = int(G[0].x);
+    for (int k = 0; k < np; k++) {
+        constant float4* P = G + 4 + 5 * k;
+        float3 o = float3(dot(P[0].xyz, eye) + P[0].w, dot(P[1].xyz, eye) + P[1].w, dot(P[2].xyz, eye) + P[2].w);
+        float3 dd = float3(dot(P[0].xyz, d), dot(P[1].xyz, d), dot(P[2].xyz, d));
+        int shape = int(P[3].z);
+        float t0, t1;
+        if (!fog_span(o, dd, shape, t0, t1)) continue;
+        t0 = max(t0, 0.0); t1 = min(t1, tmax);
+        if (t1 <= t0) continue;
+        float soft = P[3].y, sum = 0;
+        for (int j = 0; j < 8; j++) {
+            float tt = mix(t0, t1, (float(j) + 0.5) / 8);
+            float r = fog_shape_r(o + dd * tt, shape);
+            sum += smoothstep(1.0, 1.0 - soft, r);
+        }
+        float tp = P[3].x * (t1 - t0) * sum / 8;
+        tau += tp;
+        lit += tp * P[4].rgb;
+    }
+    light = tau > 1e-6 ? lit / tau : float3(0);
+    return tau;
+}
+// Display colour `c` seen through fog of depth tau with light L, both display-referred.
+float3 through_fog(float3 c, float tau, float3 L) {
+    float tr = exp(-tau);
+    float3 lin = to_lin(c) * tr + L * (1 - tr);
+    return float3(lin_to_srgb(lin.r), lin_to_srgb(lin.g), lin_to_srgb(lin.b));
+}
+
 kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
+                            constant float4* G [[buffer(2)]],
                             texture2d<float> sky [[texture(0)]], texture2d<float> shellCol [[texture(1)]],
                             texture2d<float> shellDep [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
     uint W = uint(K[0].x), H = uint(K[0].y);
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
     float t = f[3 * n + i];
-    if (t < 1e-3) return;
+    bool foggy = G[0].y > 0 || G[0].x > 0;
+    if (t < 1e-3 && !foggy) return;
     float2 q = (float2(p) + 0.5 - K[1].xy) / K[0].zw;
     float3 dc;
     if (K[1].z > 0.5) {                    // equidistant fisheye: radius = angle
@@ -1066,6 +1171,7 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     }
     float3 d = normalize(K[2].xyz * dc.x + K[3].xyz * dc.y + K[4].xyz * dc.z);
     float3 back = K[6].z > 0.5 ? sky_at(sky, d, K[1].w, K) : K[7].rgb;
+    float backDist = G[1].w;                 // the sky: as far as fog goes
     if (K[6].w > 0.5) {
         // The shells, blurred as the live render blurs a splat at that depth:
         // a Gaussian with the pupil's spread (its table at this place in the
@@ -1118,8 +1224,24 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
         // The focusing aids read depth: where the live render found little,
         // the shell's distance along the view axis.
         if (t > 0.5 && c0.a > 0.5) f[4 * n + i] = dist;
+        if (c0.a > 0.5) backDist = dist;
     }
     float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+    if (foggy) {
+        // The scan's colour (premultiplied by its cover 1 - t) at its depth, the
+        // background beyond: each seen through the fog in front of it.
+        float3 L;
+        if (t > 1e-3) {
+            float tb = fog_depth(d, backDist, G, L);
+            back = through_fog(back, tb, L);
+        }
+        float zs = f[4 * n + i];
+        if (t < 0.999 && zs > 0) {
+            float a = 1 - t;
+            float ts = fog_depth(d, zs, G, L);
+            c = through_fog(c / a, ts, L) * a;
+        }
+    }
     float3 o3;
     if (K[6].y > 0.5) {                    // a place: renormalise the leak, the background where empty
         float keep = smoothstep(0.85, 0.97, t);

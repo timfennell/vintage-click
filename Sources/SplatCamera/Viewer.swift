@@ -130,6 +130,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let lights = b.placedLights(defaultFlare: newLightsFlare)
         if !lights.isEmpty { lighting.lights = lights; lighting.selected = 0 }
         bounds = b.movementBounds
+        lighting.fog = b.sceneFog
         let s = Soundscape(emitters: b.emitters, beds: b.beds)
         soundscape = s.isEmpty ? nil : s
         print("Scene: \(b.name): \(lights.count) lights, \(b.emitters.count) sounds, \(b.beds.count) beds, \(b.file.bounds?.count ?? 0) bounds, sky \(b.skySetting?.name ?? "none")")

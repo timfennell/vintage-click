@@ -112,8 +112,8 @@ final class RenderLoop {
     /// the background, in `enc`.
     private func encodeBackground(_ enc: MTLComputeCommandEncoder, frame: MTLBuffer, offset: Int, w: Int, h: Int,
                                   view V: [Float], fx: Float, cx: Float, cy: Float, fisheye: Bool, up: SIMD3<Float>,
-                                  level mip: Float, shells: ShellView? = nil) {
-        guard skyTex != nil || shells != nil else { return }
+                                  level mip: Float, shells: ShellView? = nil, fog: [SIMD4<Float>]? = nil) {
+        guard skyTex != nil || shells != nil || fog != nil else { return }
         let s = sky
         var k: [SIMD4<Float>] = [
             SIMD4(Float(w), Float(h), fx, fx), SIMD4(cx, cy, fisheye ? 1 : 0, mip),
@@ -136,6 +136,9 @@ final class RenderLoop {
         enc.setComputePipelineState(skyPSO)
         enc.setBuffer(frame, offset: offset, index: 0)
         enc.setBytes(&k, length: k.count * 16, index: 1)
+        // The fog (G[0].y and G[0].x zero: none).
+        var g = fog ?? [SIMD4<Float>](repeating: .zero, count: 4)
+        enc.setBytes(&g, length: g.count * 16, index: 2)
         enc.setTexture(skyTex?.texture ?? dummy2D, index: 0)
         enc.setTexture(shells != nil ? shellCol : dummyArray, index: 1)
         enc.setTexture(shells != nil ? shellDep : dummyArray, index: 2)
@@ -744,7 +747,10 @@ final class RenderLoop {
         lastFinderJob = job
         let wantBake = needsBake(job)
         cond.lock(); bakeWanted = wantBake; refineWanted = shells != nil && !dof && !Self.noRefine; cond.unlock()
-        if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof,
+        let fogRows = job.lighting.fog.map {
+            $0.rows(eye: job.position, up: job.lighting.up, metresPerUnit: metresPerUnit, light: job.lighting.fogLight)
+        }
+        if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof || fogRows != nil,
            let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:
             // a smaller copy, by the blur circle's size in the sky's texels.
@@ -752,7 +758,8 @@ final class RenderLoop {
             let texels = f * Float(skyTex?.texture.width ?? 1) / (2 * .pi * job.body.viewingAperture * (s - f))
             encodeBackground(enc, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, w: finderSize.w, h: finderSize.h,
                       view: job.view, fx: job.fx, cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
-                      fisheye: job.fisheye, up: job.lighting.up, level: dof ? 0 : log2(max(1, texels)), shells: shells)
+                      fisheye: job.fisheye, up: job.lighting.up, level: dof ? 0 : log2(max(1, texels)), shells: shells,
+                      fog: fogRows)
             enc.endEncoding()
             if dof, let lens = job.lens {
                 encodeDOF(cb, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, lens: lens, fx: job.fx,
@@ -872,6 +879,9 @@ final class RenderLoop {
         // The lamps' faces go onto the film with the scan, behind what hides them.
         var faceRows = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
         let (tw, th) = finderSize
+        let fogRows = e.lighting.fog.map {
+            $0.rows(eye: cam.position, up: e.lighting.up, metresPerUnit: metresPerUnit, light: e.lighting.fogLight)
+        }
         // The photo in finder-sized tiles: each a render with the principal
         // point moved so it sees its part of the frame.
         for y0 in stride(from: 0, to: h, by: th) {
@@ -892,7 +902,7 @@ final class RenderLoop {
                 }
                 encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
                           cx: axis.x + fx * d.x * invFocus - Float(x0), cy: axis.y + fx * d.y * invFocus - Float(y0),
-                          fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0)
+                          fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows)
                 let first = e.next == 0 ? Float(1) : 0
                 var l = [SIMD4<Float>(c.x, c.y, 1, first), mask,
                          SIMD4<Float>(Float(x0), Float(y0), Float(tw), Float(th))]

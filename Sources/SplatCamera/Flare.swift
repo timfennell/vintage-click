@@ -115,7 +115,9 @@ enum Flare {
             let colour = SIMD3(pk.head[2].x, pk.head[2].y, pk.head[2].z)
             let cd = light.beam.intensity(theta: theta, phi: phi)
             let dm = max(dist * b.metresPerUnit, 0.05)
-            let e = cd * pk.head[1].w / (dm * dm) * colour * fade
+            // Fog between the lamp and the lens dims its face and all it throws into the lens.
+            let mist = plot.fog?.transmittance(from: position, to: light.position, up: plot.up, metresPerUnit: b.metresPerUnit) ?? 1
+            let e = cd * pk.head[1].w / (dm * dm) * colour * fade * mist
             // The lit face: a Fresnel's or an ellipsoidal's lens, a softlight's panel.
             let k = light.kit, s = k.size
             let round = k.kind != .softlight
@@ -124,7 +126,7 @@ enum Flare {
             let area = round ? Float.pi * fw * fh / 4 : fw * fh
             // Its brightness: the candela over the face seen at this angle, as the
             // frame shows a white surface under the scan's own light (pi L / E_ref).
-            let face = cd / max(area * ct, 1e-6) * .pi * pk.head[1].w * colour
+            let face = cd / max(area * ct, 1e-6) * .pi * pk.head[1].w * colour * mist
             let units = 1 / b.metresPerUnit
             let pa = project(light.position + r * (fw / 2 * units)) ?? px
             let pb = project(light.position + u * (fh / 2 * units)) ?? px
