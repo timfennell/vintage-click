@@ -71,14 +71,17 @@ enum Flare {
         let diag = simd_length(SIMD2(Float(W), Float(H)))
         // The frame's solid angle: all the source's light spread evenly over it.
         let omega = (Float(W) / fx) * (Float(H) / fx)
-        func project(_ q: SIMD3<Float>) -> SIMD2<Float>? {
+        // A fisheye maps any angle off its axis (equidistant), short of straight
+        // behind; the light itself only counts out to a little past its circle.
+        let fisheyeReach: Float = 1.95
+        func project(_ q: SIMD3<Float>, reach: Float = .pi - 0.05) -> SIMD2<Float>? {
             let rel = q - position
             let xc = V[0] * rel.x + V[1] * rel.y + V[2] * rel.z
             let yc = V[4] * rel.x + V[5] * rel.y + V[6] * rel.z
             let zc = V[8] * rel.x + V[9] * rel.y + V[10] * rel.z
             if fisheye {
                 let d = simd_length(rel), th = acos(max(-1, min(1, zc / max(d, 1e-9)))), r = simd_length(SIMD2(xc, yc))
-                guard th < 1.6 else { return nil }
+                guard th < reach else { return nil }
                 return axis + (r > 1e-9 ? SIMD2(xc, yc) / r : .zero) * (fx * th)
             }
             guard zc > 1e-6 else { return nil }
@@ -88,9 +91,19 @@ enum Flare {
         for light in plot.lights {
             let rel = light.position - position
             let dist = simd_length(rel)
-            guard dist > 1e-6, let px = project(light.position) else { continue }
+            guard dist > 1e-6, let px = project(light.position, reach: fisheyeReach) else { continue }
             let uv = px / SIMD2(Float(W), Float(H))
             guard uv.x > -0.6, uv.x < 1.6, uv.y > -0.6, uv.y < 1.6 else { continue }
+            // A light leaving the picture still reaches the front glass a while:
+            // its ghosts and glare fade out as it goes, rather than stopping at a line.
+            let beyond = max(max(-uv.x, uv.x - 1), max(-uv.y, uv.y - 1))
+            var fade = 1 - smoothstep(0.2, 0.6, beyond)
+            if fisheye {
+                // Past the image circle's edge (a quarter turn off the axis).
+                let zc = (V[8] * rel.x + V[9] * rel.y + V[10] * rel.z) / dist
+                fade = min(fade, 1 - smoothstep(.pi / 2, fisheyeReach, acos(max(-1, min(1, zc)))))
+            }
+            guard fade > 0 else { continue }
             // Its beam toward the camera; seen from behind, nothing.
             let (f, r, u) = light.frame(up: plot.up)
             let toCam = -rel / dist
@@ -101,7 +114,7 @@ enum Flare {
             let colour = SIMD3(pk.head[2].x, pk.head[2].y, pk.head[2].z)
             let cd = light.beam.intensity(theta: theta, phi: phi)
             let dm = max(dist * b.metresPerUnit, 0.05)
-            let e = cd * pk.head[1].w / (dm * dm) * colour
+            let e = cd * pk.head[1].w / (dm * dm) * colour * fade
             // The lit face: a Fresnel's or an ellipsoidal's lens, a softlight's panel.
             let k = light.kit, s = k.size
             let round = k.kind != .softlight
@@ -155,4 +168,10 @@ enum Flare {
     static func probes(_ s: [Source], diag: Float) -> [SIMD4<Float>] {
         s.map { SIMD4($0.px.x, $0.px.y, $0.distance, max(2, $0.radius * diag)) }
     }
+}
+
+/// 0 below `a`, 1 above `b`, an S between.
+private func smoothstep(_ a: Float, _ b: Float, _ x: Float) -> Float {
+    let t = max(0, min(1, (x - a) / (b - a)))
+    return t * t * (3 - 2 * t)
 }
