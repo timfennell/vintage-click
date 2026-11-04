@@ -1151,10 +1151,149 @@ float3 through_fog(float3 c, float tau, float3 L) {
     return float3(lin_to_srgb(lin.r), lin_to_srgb(lin.g), lin_to_srgb(lin.b));
 }
 
+// ---- lamps in the fog --------------------------------------------------------
+// Light from the lamps scattered toward the eye by the fog along the view ray:
+// at each step, each lamp's light there (its traced beam, its doors and
+// pattern, its shadow map: what stands in the light cuts a shaft out of the
+// beam, and the fog it came through), times the fog's density there and its
+// phase (fog throws light mostly onward: brightest looking toward a lamp),
+// dimmed by the fog between there and the eye. In frame light, like a white
+// surface under the lamp (relight's units; pi x radiance).
+//   LP = (lamps, shadows on, phase g, dither seed)   LT/BT as relight's
+//   SV = per slot the shadow map's view (shadow_vis's S rows)
+
+// Fog density (per unit) at a point: the haze at its height and the patches.
+float fog_density_at(float3 x, constant float4* G) {
+    float sg = 0;
+    if (G[0].y > 0) {
+        float u = dot(x, G[3].xyz) - G[0].w;
+        sg += G[0].z > 0 && u > 0 ? G[0].y * exp(-u / G[0].z) : G[0].y;
+    }
+    int np = int(G[0].x);
+    for (int k = 0; k < np; k++) {
+        constant float4* P = G + 4 + 5 * k;
+        float3 q = float3(dot(P[0].xyz, x) + P[0].w, dot(P[1].xyz, x) + P[1].w, dot(P[2].xyz, x) + P[2].w);
+        float r = fog_shape_r(q, int(P[3].z));
+        if (r < 1) sg += P[3].x * smoothstep(1.0, 1.0 - P[3].y, r);
+    }
+    return sg;
+}
+
+float2 shadow_tap(device const float* map, int2 t, uint res);   // below, with the shadows
+
+// How much of a lamp reaches x past what stands in its light (its shadow map).
+float lamp_shadow(float3 x, constant float4* S, device const float* map) {
+    float3 pc = float3(dot(S[0].xyz, x) + S[0].w, dot(S[1].xyz, x) + S[1].w, dot(S[2].xyz, x) + S[2].w);
+    float fx = S[3].x, res = S[3].y;
+    if (pc.z <= 0 || res < 1) return 1;
+    float2 uv = float2(fx * pc.x / pc.z, fx * pc.y / pc.z) + res * 0.5;
+    if (any(uv < 0) || any(uv >= res)) return 1;
+    float dr = length(pc);
+    float bias = 0.01 * dr + 2 * dr / fx;
+    float lit = 0;
+    for (uint k = 0; k < 4; k++) {
+        float2 tp = shadow_tap(map, int2(uv + vogel(k, 4) * 1.5), uint(res));
+        float occl = (tp.x < 0.97 && tp.y > 0 && tp.y < dr - bias) ? 1 - tp.x : 0;
+        lit += 1 - occl;
+    }
+    return lit / 4;
+}
+
+// A lamp's light arriving at x (rgb, frame light on a white surface facing it).
+float3 lamp_at(float3 x, constant float4* L, device const float4* B, texture2d_array<float> patterns) {
+    constexpr sampler pat(filter::linear, mip_filter::linear, address::clamp_to_edge);
+    float3 d = L[0].xyz - x;
+    float len = length(d);
+    float dist_m = max(len * L[3].w, 0.05);
+    float3 w = -d / max(len, 1e-9), aim = L[1].xyz, right = L[3].xyz, upl = cross(right, aim);
+    float ct = dot(w, aim);
+    if (ct <= 0) return 0;
+    float th = acos(min(ct, 1.0));
+    float ph = atan2(abs(dot(w, upl)), abs(dot(w, right)));
+    float tb = clamp(pow(th / (M_PI_F / 2), 1 / 1.3) * 32.0 - 0.5, 0.0, 31.0);
+    float pb = clamp(ph / (M_PI_F / 2) * 8.0 - 0.5, 0.0, 7.0);
+    int t0 = min(int(tb), 30), p0 = min(int(pb), 6);
+    float ft = tb - t0, fp = pb - p0;
+    float3 cd = mix(mix(B[t0 * 8 + p0].rgb, B[t0 * 8 + p0 + 1].rgb, fp),
+                    mix(B[(t0 + 1) * 8 + p0].rgb, B[(t0 + 1) * 8 + p0 + 1].rgb, fp), ft);
+    float3 e3 = cd * L[1].w / (dist_m * dist_m);
+    float2 xy = float2(dot(w, right), dot(w, upl)) / max(ct, 1e-3);
+    float soft = 0.025;
+    e3 *= smoothstep(L[5].x - soft, L[5].x + soft, xy.x) * (1 - smoothstep(L[5].y - soft, L[5].y + soft, xy.x))
+        * smoothstep(L[5].z - soft, L[5].z + soft, xy.y) * (1 - smoothstep(L[5].w - soft, L[5].w + soft, xy.y));
+    if (L[4].x >= 0) {
+        float2 uv = 0.5 + 0.5 * float2(xy.x, -xy.y) / L[4].y;
+        float m = patterns.sample(pat, uv, uint(L[4].x), level(L[4].z)).r;
+        float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+        e3 *= mix(L[4].w, m, inside);
+    }
+    return e3 * L[2].rgb;
+}
+
+float3 fog_lamps(float3 d, float tmax, float2 px, constant float4* G, constant float4& LP,
+                 constant float4* LT, device const float4* BT, constant float4* SV,
+                 device const float* m0, device const float* m1, device const float* m2, device const float* m3,
+                 device const float* m4, device const float* m5, device const float* m6, device const float* m7,
+                 texture2d_array<float> patterns) {
+    int nl = int(LP.x);
+    if (nl <= 0) return 0;
+    float3 eye = G[2].xyz;
+    // March only as far as the lamps can matter: past the farthest, a little.
+    float reach = 0;
+    for (int l = 0; l < nl; l++) reach = max(reach, length(LT[6 * l].xyz - eye));
+    float tEnd = min(tmax, reach * 2.5 + 10 / max(LT[3].w, 1e-6));
+    if (tEnd <= 0) return 0;
+    const int N = 32;
+    float dt = tEnd / float(N);
+    // Dither the steps (fixed in the finder, a new offset each lens sample).
+    float jit = fract(52.9829189 * fract(dot(px, float2(0.06711056, 0.00583715))) + LP.w);
+    float g = LP.z, g2 = g * g;
+    float3 acc = 0;
+    float tau = 0;
+    for (int k = 0; k < N; k++) {
+        float t = (float(k) + jit) * dt;
+        float3 x = eye + d * t;
+        float sg = fog_density_at(x, G);
+        if (sg > 1e-7) {
+            float3 lit = 0;
+            for (int l = 0; l < nl; l++) {
+                constant float4* L = LT + 6 * l;
+                float3 e = lamp_at(x, L, BT + l * 256, patterns);
+                if (!any(e > 0)) continue;
+                if (LP.y > 0.5) {
+                    constant float4* S = SV + 5 * l;
+                    device const float* m = l == 0 ? m0 : l == 1 ? m1 : l == 2 ? m2 : l == 3 ? m3
+                                          : l == 4 ? m4 : l == 5 ? m5 : l == 6 ? m6 : m7;
+                    e *= lamp_shadow(x, S, m);
+                }
+                // The fog between the lamp and here (at this point's density).
+                float3 tl = L[0].xyz - x;
+                float dl = length(tl);
+                e *= exp(-sg * dl);
+                // Henyey-Greenstein: the light's way on (lamp -> x) against the way to the eye (-d).
+                float c = dot(-tl / max(dl, 1e-9), -d);
+                float ph = (1 - g2) / (4 * M_PI_F * pow(max(1 + g2 - 2 * g * c, 1e-4), 1.5));
+                lit += e * ph;
+            }
+            acc += exp(-tau) * sg * M_PI_F * lit * dt;
+        }
+        tau += sg * dt;
+    }
+    return acc;
+}
+
 kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
                             constant float4* G [[buffer(2)]],
+                            constant float4* LT [[buffer(3)]], device const float4* BT [[buffer(4)]],
+                            constant float4* SV [[buffer(5)]],
+                            device const float* m0 [[buffer(6)]], device const float* m1 [[buffer(7)]],
+                            device const float* m2 [[buffer(8)]], device const float* m3 [[buffer(9)]],
+                            device const float* m4 [[buffer(10)]], device const float* m5 [[buffer(11)]],
+                            device const float* m6 [[buffer(12)]], device const float* m7 [[buffer(13)]],
+                            constant float4& LP [[buffer(14)]],
                             texture2d<float> sky [[texture(0)]], texture2d<float> shellCol [[texture(1)]],
-                            texture2d<float> shellDep [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
+                            texture2d<float> shellDep [[texture(2)]], texture2d_array<float> patterns [[texture(3)]],
+                            uint2 p [[thread_position_in_grid]]) {
     uint W = uint(K[0].x), H = uint(K[0].y);
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
@@ -1240,6 +1379,18 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
             float a = 1 - t;
             float ts = fog_depth(d, zs, G, L);
             c = through_fog(c / a, ts, L) * a;
+        }
+        // The lamps' light in the fog in front of what this pixel shows.
+        if (LP.x > 0) {
+            float tm = t < 0.5 && zs > 0 ? zs : backDist;
+            float3 beams = fog_lamps(d, tm, float2(p) + K[1].xy, G, LP, LT, BT, SV, m0, m1, m2, m3, m4, m5, m6, m7, patterns);
+            if (any(beams > 0)) {
+                float a = 1 - t;
+                if (a > 1e-3) c = float3(lin_to_srgb(srgb_to_lin(c.r / a) + beams.r), lin_to_srgb(srgb_to_lin(c.g / a) + beams.g),
+                                         lin_to_srgb(srgb_to_lin(c.b / a) + beams.b)) * a;
+                back = float3(lin_to_srgb(srgb_to_lin(back.r) + beams.r), lin_to_srgb(srgb_to_lin(back.g) + beams.g),
+                              lin_to_srgb(srgb_to_lin(back.b) + beams.b));
+            }
         }
     }
     float3 o3;

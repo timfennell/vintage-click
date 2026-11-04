@@ -139,6 +139,24 @@ final class RenderLoop {
         // The fog (G[0].y and G[0].x zero: none).
         var g = fog ?? [SIMD4<Float>](repeating: .zero, count: 4)
         enc.setBytes(&g, length: g.count * 16, index: 2)
+        // The lamps it scatters (their rows, beam tables, shadow maps and views):
+        // beams and shafts in the fog, cut by what stands in the light.
+        let nLamps = fog == nil || lampTable == nil ? 0 : min(lampRows.count / 6, Self.maxLights)
+        var lp = SIMD4<Float>(Float(nLamps), lampShadows ? 1 : 0, 0.55, fogSeed)
+        enc.setBytes(&lp, length: 16, index: 14)
+        var rows = nLamps > 0 ? lampRows : [SIMD4<Float>](repeating: .zero, count: 6)
+        enc.setBytes(&rows, length: rows.count * 16, index: 3)
+        enc.setBuffer(lampTable ?? dummyBuf, offset: 0, index: 4)
+        let views = shadowViews[lampQuality] ?? [], maps = shadowMaps[lampQuality] ?? []
+        var sv: [SIMD4<Float>] = (0..<Self.maxLights).flatMap { k in
+            k < views.count && views[k].count == 5 && k < maps.count ? views[k] : [SIMD4<Float>](repeating: .zero, count: 5)
+        }
+        enc.setBytes(&sv, length: sv.count * 16, index: 5)
+        for k in 0..<Self.maxLights {
+            if k < maps.count { enc.setBuffer(maps[k].buf, offset: maps[k].off, index: 6 + k) }
+            else { enc.setBuffer(dummyBuf, offset: 0, index: 6 + k) }
+        }
+        enc.setTexture(patterns ?? dummyArray, index: 3)
         enc.setTexture(skyTex?.texture ?? dummy2D, index: 0)
         enc.setTexture(shells != nil ? shellCol : dummyArray, index: 1)
         enc.setTexture(shells != nil ? shellDep : dummyArray, index: 2)
@@ -374,8 +392,19 @@ final class RenderLoop {
     /// The scan was lit by the sun or a room, not from the camera: relight from base colour.
     var daylightScan = false
     private let shadowPSO: MTLComputePipelineState
+    /// Dither for the fog's march: fixed in the finder (no crawl), new each lens sample in a photo.
+    var fogSeed: Float = 0
     private var shadowMaps: [ShadowQuality: [(buf: MTLBuffer, off: Int, index: Int32)]] = [:]
     private var shadowKeys: [ShadowQuality: [[SIMD4<Float>]]] = [:]
+    /// Each shadow map's view (shadow_vis's S rows), by slot: the fog reads the maps too.
+    private var shadowViews: [ShadowQuality: [[SIMD4<Float>]]] = [:]
+    /// The lamps as the last relight packed them, for the fog to scatter:
+    /// their rows, beam tables, which shadow maps, and whether shadows are on.
+    private var lampRows: [SIMD4<Float>] = []
+    private var lampTable: MTLBuffer?
+    private var lampQuality = ShadowQuality.finder
+    private var lampShadows = false
+    private lazy var dummyBuf: MTLBuffer = device.makeBuffer(length: 256, options: .storageModeShared)!
     private var visibility: [ShadowQuality: MTLBuffer] = [:]
     private var shadowVersion = 0
     private var finderSlots: [(buf: MTLBuffer, off: Int, index: Int32)] = []
@@ -660,6 +689,10 @@ final class RenderLoop {
                 SIMD4(fx, Float(res), body.metresPerUnit, source),
                 SIMD4(q.taps, Float(slot)),
             ]
+            var views = shadowViews[q] ?? []
+            while views.count <= slot { views.append([]) }
+            views[slot] = S
+            shadowViews[q] = views
             var n = UInt32(count)
             guard let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return nil }
             ce.setComputePipelineState(shadowPSO)
@@ -698,12 +731,16 @@ final class RenderLoop {
         var key: [SIMD4<Float>] = g
         key.append(contentsOf: lt)
         key.append(SIMD4<Float>(spots, 0, 0, 0))
+        lampRows = lt
+        lampQuality = quality
+        lampShadows = vis != nil
         if key == lastRelight { return }
         lastRelight = key
         if lt.isEmpty { lt = [SIMD4<Float>](repeating: .zero, count: 6) }
         let tableBuf = tables.isEmpty
             ? device.makeBuffer(length: 16, options: .storageModeShared)
             : tables.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }
+        lampTable = tables.isEmpty ? nil : tableBuf
         guard let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return }
         ce.setComputePipelineState(relightPSO)
         ce.setBuffer(means, offset: 0, index: 0)
@@ -750,6 +787,7 @@ final class RenderLoop {
         let fogRows = job.lighting.fog.map {
             $0.rows(eye: job.position, up: job.lighting.up, metresPerUnit: metresPerUnit, light: job.lighting.fogLight)
         }
+        fogSeed = 0
         if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof || fogRows != nil,
            let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:
@@ -882,6 +920,7 @@ final class RenderLoop {
         let fogRows = e.lighting.fog.map {
             $0.rows(eye: cam.position, up: e.lighting.up, metresPerUnit: metresPerUnit, light: e.lighting.fogLight)
         }
+        fogSeed = Float(e.next) * 0.618034
         // The photo in finder-sized tiles: each a render with the principal
         // point moved so it sees its part of the frame.
         for y0 in stride(from: 0, to: h, by: th) {
