@@ -110,8 +110,12 @@ enum LoupeArt {
     /// A mask drawn with AppKit (engraving, scratches), read back per pixel.
     static func mask(_ w: Int, _ h: Int, _ draw: (NSGraphicsContext) -> Void) -> [UInt8] {
         var m = [UInt8](repeating: 0, count: w * h)
-        guard let ctx = CGContext(data: &m, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
-                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return m }
+        // The context keeps its own pixels (a pointer to `m` would dangle once
+        // the call that made it returns); they are copied out at the end.
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue),
+              let out = ctx.data else { return m }
+        memset(out, 0, w * h)
         ctx.translateBy(x: 0, y: CGFloat(h))
         ctx.scaleBy(x: 1, y: -1)
         NSGraphicsContext.saveGraphicsState()
@@ -119,14 +123,16 @@ enum LoupeArt {
         NSGraphicsContext.current = g
         draw(g)
         NSGraphicsContext.restoreGraphicsState()
+        m.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, out, w * h) }
         return m
     }
 
     static func image(_ px: [UInt8], _ w: Int, _ h: Int) -> CGImage? {
-        var data = px
-        guard let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let out = ctx.data else { return nil }
+        px.withUnsafeBytes { _ = memcpy(out, $0.baseAddress!, min($0.count, w * h * 4)) }
         return ctx.makeImage()
     }
 

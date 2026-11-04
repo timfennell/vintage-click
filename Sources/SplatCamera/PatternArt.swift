@@ -21,9 +21,9 @@ enum PatternArt {
         d.usage = [.shaderRead]
         guard let tex = device.makeTexture(descriptor: d) else { return nil }
         for (i, draw) in layers.enumerated() {
-            var px = [UInt8](repeating: 0, count: size * size)
-            guard let ctx = CGContext(data: &px, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size,
-                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+            guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue),
+                  let px = ctx.data
             else { continue }
             ctx.setFillColor(gray: 0, alpha: 1)
             ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))

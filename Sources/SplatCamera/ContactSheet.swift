@@ -633,9 +633,11 @@ final class ContactSheetView: NSView {
                 px[i + 2] = UInt8(max(0, min(255, (lum - warm + 0.03) * 255)))
             }
         }
-        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let out = ctx.data else { return nil }
+        px.withUnsafeBytes { _ = memcpy(out, $0.baseAddress!, min($0.count, w * h * 4)) }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
         for _ in 0..<260 {
@@ -874,8 +876,9 @@ final class ContactSheetView: NSView {
                 px[i + 2] = UInt8(max(0, min(255, v * 255 - (1 - v) * 14)))
             }
         }
-        let ctx = CGContext(data: &px, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+        let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
                             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        px.withUnsafeBytes { _ = memcpy(ctx.data!, $0.baseAddress!, min($0.count, side * side * 4)) }
         let img = ctx.makeImage()!
         falloffCache = (side, img)
         return img
