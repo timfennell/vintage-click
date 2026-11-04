@@ -540,41 +540,49 @@ final class RenderLoop {
     var developOnlyWhenStill = true
 
     private func run() {
+        // Each pass in its own autorelease pool: Metal's command buffers are
+        // autoreleased and hold every buffer they used (a movie frame's
+        // accumulator and print, hundreds of MB), so on a thread that never
+        // returns to a run loop they would pile up until the app ran out of memory.
         while true {
-            cond.lock()
-            while finderRequest == nil && exposures.isEmpty && !bakeWanted && !refineWanted && !stopping { cond.wait() }
-            if stopping {
-                cond.unlock()
-                stopped.signal()
-                return
-            }
-            let finder = finderRequest
-            finderRequest = nil
-            // Photos develop while the view holds still: a moving finder has the
-            // GPU to itself, and the next step waits until it settles.
-            // The distant shells are baked the same way, before any photo.
-            var exposure: ExposureJob?
-            var bakeFor: FinderJob?, refineFor: FinderJob?
-            if finder == nil, bakeWanted || refineWanted || !exposures.isEmpty {
-                let still = CACurrentMediaTime() - lastFinderAt
-                if still >= Self.settle {
-                    if refineWanted { refineFor = lastFinderJob; refineWanted = false }
-                    else if bakeWanted { bakeFor = lastFinderJob; bakeWanted = false }
-                    else { exposure = exposures.first }
-                } else if !bakeWanted && !refineWanted && !developOnlyWhenStill {
-                    exposure = exposures.first
-                } else {
-                    _ = cond.wait(until: Date().addingTimeInterval(Self.settle - still))
+            let goOn = autoreleasepool { () -> Bool in
+                cond.lock()
+                while finderRequest == nil && exposures.isEmpty && !bakeWanted && !refineWanted && !stopping { cond.wait() }
+                if stopping {
+                    cond.unlock()
+                    stopped.signal()
+                    return false
                 }
+                let finder = finderRequest
+                finderRequest = nil
+                // Photos develop while the view holds still: a moving finder has the
+                // GPU to itself, and the next step waits until it settles.
+                // The distant shells are baked the same way, before any photo.
+                var exposure: ExposureJob?
+                var bakeFor: FinderJob?, refineFor: FinderJob?
+                if finder == nil, bakeWanted || refineWanted || !exposures.isEmpty {
+                    let still = CACurrentMediaTime() - lastFinderAt
+                    if still >= Self.settle {
+                        if refineWanted { refineFor = lastFinderJob; refineWanted = false }
+                        else if bakeWanted { bakeFor = lastFinderJob; bakeWanted = false }
+                        else { exposure = exposures.first }
+                    } else if !bakeWanted && !refineWanted && !developOnlyWhenStill {
+                        exposure = exposures.first
+                    } else {
+                        _ = cond.wait(until: Date().addingTimeInterval(Self.settle - still))
+                    }
+                }
+                cond.unlock()
+                if let finder {
+                    renderFinder(finder, full: finder.refresh && !Self.noRefine)
+                    if !finder.refresh { lastFinderAt = CACurrentMediaTime() }
+                }
+                if let refineFor { var j = refineFor; j.refined = true; renderFinder(j, full: true) }
+                if let bakeFor { bake(bakeFor) }
+                if let exposure { step(exposure) }
+                return true
             }
-            cond.unlock()
-            if let finder {
-                renderFinder(finder, full: finder.refresh && !Self.noRefine)
-                if !finder.refresh { lastFinderAt = CACurrentMediaTime() }
-            }
-            if let refineFor { var j = refineFor; j.refined = true; renderFinder(j, full: true) }
-            if let bakeFor { bake(bakeFor) }
-            if let exposure { step(exposure) }
+            if !goOn { return }
         }
     }
 
