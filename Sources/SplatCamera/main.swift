@@ -83,6 +83,12 @@ let filmFPS = bench > 0 ? 0 : Double(option("--fps") ?? "24") ?? 24
 // macOS adds -psn_... when launched from Finder; only real paths count.
 let cliPath = args.first(where: { !$0.hasPrefix("-") })
 
+// --export-kit FILE: the kit as JSON for the Scene Builder add-on, quit.
+if let i = args.firstIndex(of: "--export-kit"), i + 1 < args.count {
+    do { try exportKit(to: args[i + 1]); print("Wrote \(args[i + 1])"); exit(0) }
+    catch { print("Cannot write the kit: \(error)"); exit(1) }
+}
+
 // --guess FILE: print what the chooser would guess for a scan, quit.
 if let i = args.firstIndex(of: "--guess"), i + 1 < args.count {
     let k = SceneKind.guess(args[i + 1])
@@ -181,6 +187,8 @@ func makeViewer(_ plyPath: String) -> Viewer {
 
 var viewer: Viewer!
 var window: NSWindow!
+/// The .vcscene being shown, if the scene came as one.
+var sceneBundle: SceneBundle?
 
 /// Opens the window with a loading note, loads the scan off the main thread,
 /// then puts the camera in your hands.
@@ -189,7 +197,9 @@ func startSession(_ plyPath: String) {
     let fit = min(1, min(screen.width * 0.9 / CGFloat(res[0]), screen.height * 0.9 / CGFloat(res[1])))
     window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: CGFloat(res[0]) * fit, height: CGFloat(res[1]) * fit),
                       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-    window.title = "Vintage Click — \((plyPath as NSString).deletingLastPathComponent.split(separator: "/").last ?? "")/\((plyPath as NSString).lastPathComponent)"
+    window.title = SceneBundle.isBundle(plyPath)
+        ? "Vintage Click — \(((plyPath as NSString).lastPathComponent as NSString).deletingPathExtension)"
+        : "Vintage Click — \((plyPath as NSString).deletingLastPathComponent.split(separator: "/").last ?? "")/\((plyPath as NSString).lastPathComponent)"
     window.contentAspectRatio = NSSize(width: res[0], height: res[1])
     window.backgroundColor = .black
     let note = NSTextField(labelWithString: "Loading the scan…  (a big place takes a minute)")
@@ -210,7 +220,28 @@ func startSession(_ plyPath: String) {
     window.center()
     window.makeKeyAndOrderFront(nil)
     DispatchQueue.global(qos: .userInitiated).async {
-        let v = makeViewer(plyPath)
+        var scan = plyPath
+        if SceneBundle.isBundle(plyPath) {
+            // A scene from the Scene Builder: unpacked (once), then its scan.
+            do {
+                let b = try SceneBundle.open(plyPath)
+                sceneBundle = b
+                scan = b.plyPath
+                // Its own size and kind, unless the command line (or a relaunch) says otherwise.
+                sceneScale = sceneScale ?? b.file.metresPerUnit
+                if currentScene == nil { inside = inside || b.place }
+                sceneEV = sceneEV ?? b.ev
+            } catch {
+                DispatchQueue.main.sync {
+                    let a = NSAlert()
+                    a.messageText = "Cannot open \((plyPath as NSString).lastPathComponent)"
+                    a.informativeText = error.localizedDescription
+                    a.runModal()
+                }
+                exit(1)
+            }
+        }
+        let v = makeViewer(scan)
         DispatchQueue.main.async {
             viewer = v
             configureSession()
@@ -232,6 +263,21 @@ func configureSession() {
     }
     if let i = filmChoice { viewer.body.stockIndex = i % filmStocks.count }
     if pinhole { viewer.setBenchLens(false) }
+    // A Scene Builder scene: where to stand, its lights, house lights, bounds, sounds.
+    if let b = sceneBundle { viewer.apply(b) }
+    // --sound-gains: each sound's gain walking from the start to the first sound, for checks.
+    if args.contains("--sound-gains"), let sc = viewer.soundscape, let first = sceneBundle?.emitters.first {
+        let from = viewer.camera.position
+        for k in 0...8 {
+            let p = from + (first.position - from) * Float(k) / 8
+            let row = sc.gains(at: p, metresPerUnit: viewer.body.metresPerUnit)
+                .map { String(format: "%@ %.1f m gain %.3f", $0.0, $0.1, $0.2) }.joined(separator: " | ")
+            print("sound \(k)/8: \(row)")
+        }
+        if let bounds = viewer.bounds {
+            print("bounds: start inside \(bounds.contains(from)), first sound inside \(bounds.contains(first.position))")
+        }
+    }
     // Focus first: the demo lights aim where the camera is focused.
     if let m = focusChoice { viewer.body.focusM = m }
     if demoLights { viewer.demoLights() }
@@ -323,11 +369,14 @@ func configureSession() {
     if let i = args.firstIndex(of: "--sky"), i + 1 < args.count {
         viewer.loop.setSky(SkySetting(path: args[i + 1],
                                       yawDegrees: Float(option("--sky-turn") ?? "0") ?? 0, stops: Float(option("--sky-stops") ?? "0") ?? 0))
+    } else if let b = sceneBundle {
+        // The scene's own sky, as it was composed.
+        viewer.loop.setSky(b.skySetting)
     } else if let scene = viewer.scenePath {
         viewer.loop.setSky(SkySetting.remembered(scene: scene))
     }
-    viewer.sceneName = ["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
-        ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem
+    viewer.sceneName = sceneBundle?.name ?? (["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
+        ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem)
     viewer.onScaleSet = { scale in
         // Remember it with the file, so it opens this size next time.
         let path = currentScene?.path ?? cliPath
@@ -510,11 +559,11 @@ struct SceneKind {
 }
 
 /// The light a scan was made in, as a photographer would judge it (EV at ISO 100).
-let sceneLightChoices: [(String, Float)] = [
+var sceneLightChoices: [(String, Float)] { [
     ("Indoors, room light (EV 9)", 9), ("Indoors by big windows (EV 10)", 10), ("Deep shade or dusk (EV 11)", 11), ("Open shade or overcast (EV 12)", 12),
     ("Bright overcast, dappled shade (EV 13)", 13), ("Hazy sun (EV 14)", 14), ("Bright sun (EV 15)", 15),
-]
-private let evChoices = sceneLightChoices
+] }
+private var evChoices: [(String, Float)] { sceneLightChoices }
 
 /// The two questions, as popups for a panel or an alert.
 /// The popups, how to read them, and how to set them (for a newly chosen file).
@@ -558,12 +607,20 @@ func begin(_ path: String, _ k: SceneKind) {
     startSession(path)
 }
 
+/// A .vcscene says what it is itself (opened afresh: as it was last saved from Blender).
+func beginBundle(_ path: String) {
+    let f = SceneBundle.peek(path)
+    let place = f?.place ?? false
+    begin(path, SceneKind(place: place, ev: f?.ev ?? (place ? 13 : 12), scale: f?.metresPerUnit))
+}
+
 /// From Finder: pick a .ply (and say what it is).
 func chooseScene() {
     let panel = NSOpenPanel()
     panel.title = "Choose a 3DGS scan"
-    panel.message = "A Gaussian splat .ply (as trained, with or without SH)"
-    panel.allowedContentTypes = [UTType(filenameExtension: "ply") ?? .data]
+    panel.message = "A Gaussian splat .ply (as trained, with or without SH), or a .vcscene from the Scene Builder"
+    panel.allowedContentTypes = [UTType(filenameExtension: "ply") ?? .data,
+                                 UTType(filenameExtension: SceneBundle.fileExtension) ?? .data]
     if let last = UserDefaults.standard.string(forKey: "lastScene") {
         panel.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent()
     }
@@ -574,11 +631,13 @@ func chooseScene() {
     let watcher = PanelWatcher { url in set(SceneKind.remembered(url.path) ?? SceneKind.guess(url.path)) }
     panel.delegate = watcher
     guard panel.runModal() == .OK, let url = panel.url else { exit(0) }
+    if SceneBundle.isBundle(url.path) { beginBundle(url.path); return }
     begin(url.path, read())
 }
 
 /// A .ply dropped on the app or double-clicked: ask only if it is new.
 func open(_ path: String) {
+    if SceneBundle.isBundle(path) { beginBundle(path); return }
     if let k = SceneKind.remembered(path) { begin(path, k); return }
     let alert = NSAlert()
     alert.messageText = "What is \((path as NSString).lastPathComponent)?"

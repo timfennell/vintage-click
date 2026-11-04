@@ -96,6 +96,44 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// light table included) puts you back behind the camera, focusing aids and all.
     private(set) var mode = Mode.camera { didSet { if mode != .lighting { pov = nil } } }
     var lighting = LightingPlot()
+    /// Where the camera may go (a .vcscene's bounds), and the scene's own sound.
+    var bounds: MovementBounds?
+    var soundscape: Soundscape?
+
+    /// Keeps the camera inside the scene's bounds after a move from `was`.
+    private func fence(from was: SIMD3<Float>) {
+        guard let bounds else { return }
+        camera.position = bounds.confine(from: was, to: camera.position)
+    }
+
+    /// A scene composed in Blender: its up, where to stand, its lights, house
+    /// lights, sky, bounds and sounds.
+    func apply(_ b: SceneBundle) {
+        if let up = b.up {
+            camera.up = up
+            lighting.up = up
+        }
+        if let st = b.file.start, let pos = SceneBundle.vec(st.position), let fwd = SceneBundle.vec(st.forward),
+           simd_length(fwd) > 1e-6 {
+            if let f = st.focalMM {
+                // The lens in the bag nearest the start camera's (not a fisheye unless asked for).
+                let fits = lensBag.indices.filter { body.fits(lensBag[$0]) && (f < 12 || !lensBag[$0].isFisheye) }
+                if let i = fits.min(by: { abs(lensBag[$0].focalMM - f) < abs(lensBag[$1].focalMM - f) }) {
+                    body.chooseLens(i)
+                }
+            }
+            camera.focalMM = body.lens.focalMM
+            camera.lookAt(pos + simd_normalize(fwd), from: pos)
+            home = camera
+        }
+        if let h = b.file.houseLights { lighting.setHouseLights(h) }
+        let lights = b.placedLights(defaultFlare: newLightsFlare)
+        if !lights.isEmpty { lighting.lights = lights; lighting.selected = 0 }
+        bounds = b.movementBounds
+        let s = Soundscape(emitters: b.emitters, beds: b.beds)
+        soundscape = s.isEmpty ? nil : s
+        print("Scene: \(b.name): \(lights.count) lights, \(b.emitters.count) sounds, \(b.beds.count) beds, \(b.file.bounds?.count ?? 0) bounds, sky \(b.skySetting?.name ?? "none")")
+    }
     /// The light being flown (seen from), if any, and the view from its lens.
     private(set) var pov: Int?
     private var lightCam = FlyCamera()
@@ -331,6 +369,12 @@ final class Viewer: NSObject, MTKViewDelegate {
         lastTime = now
         if benchFrames > 0 { benchOrbit() } else if !scripted { handleInput(dt: dt) }
         advanceRoll()
+        if let sc = soundscape {
+            // The ears go with the camera (not with a light being flown); quiet in the
+            // background and while a take develops.
+            sc.update(position: camera.position, forward: camera.forward, up: -camera.down,
+                      metresPerUnit: body.metresPerUnit, audible: NSApp.isActive && movie == nil)
+        }
 
         // Looking at prints: the finder rests and the darkroom gets the GPU.
         if mode == .sheet {
@@ -869,7 +913,9 @@ final class Viewer: NSObject, MTKViewDelegate {
             lighting.lights[i].aim = lightCam.forward
         } else {
             camera.turn(s.mouseLook)
+            let was = camera.position
             camera.update(input, dt: dt)
+            fence(from: was)
         }
         camera.focalMM = body.lens.focalMM
         if mode == .camera && p.contains(.a) { releaseShutter() }
@@ -1094,7 +1140,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         case .first, .second:
             // Walk and look as usual to aim the crosshair.
             camera.turn(s.mouseLook)
+            let was = camera.position
             camera.update(FlyInput(move: s.move, look: s.look, rise: s.shoulders, zoom: 0), dt: dt)
+            fence(from: was)
             if p.contains(.b) { measure = nil; return }
             guard p.contains(.a) else { return }
             guard let hit = crosshairHit else {
@@ -1478,6 +1526,15 @@ final class Viewer: NSObject, MTKViewDelegate {
                       detail: "shutter, film advance, lens and dial: a real Nikon (select to turn \(Sounds.shared.enabled ? "off" : "on"))") {
                     [weak self] in
                     Sounds.shared.enabled.toggle()
+                    self?.reopenMenu() },
+                .init(title: "Scene sound: " + (Soundscape.on ? String(format: "%.0f%%", Soundscape.level * 100) : "off"),
+                      detail: soundscape == nil ? "this scene has no sounds of its own (a .vcscene can bring some)"
+                        : "the scene's own sounds: select to step the level (off, 25, 50, 75, 100%)") {
+                    [weak self] in
+                    // off -> 25 -> 50 -> 75 -> 100 -> off
+                    if !Soundscape.on { Soundscape.on = true; Soundscape.level = 0.25 }
+                    else if Soundscape.level >= 0.99 { Soundscape.on = false }
+                    else { Soundscape.level = min(1, (Soundscape.level * 4).rounded(.down) / 4 + 0.25) }
                     self?.reopenMenu() },
                 .init(title: "Haptics: " + (Haptics.shared.enabled ? "on" : "off"),
                       detail: "shutter, film advance and lens felt on the trackpad and controller (select to turn \(Haptics.shared.enabled ? "off" : "on"))") {
