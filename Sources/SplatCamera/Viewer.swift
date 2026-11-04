@@ -901,7 +901,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         if p.contains(.x) && plot.lights.count < RenderLoop.maxLights {
             // A new head where you are looking from, aimed the same way.
             let from = pov.map { _ in lightCam } ?? camera
-            plot.lights.append(PlacedLight(head: plot.kitChoice, position: from.position, aim: from.forward))
+            var l = PlacedLight(head: plot.kitChoice, position: from.position, aim: from.forward)
+            l.flare = newLightsFlare
+            plot.lights.append(l)
             lighting = plot
             fly(plot.lights.count - 1)
             plot = lighting
@@ -1364,9 +1366,16 @@ final class Viewer: NSObject, MTKViewDelegate {
             ]
         case .lights:
             var items: [Item] = [back(to: .main)]
+            let newFlare = Item(title: "Lens flare on new lights: \(newLightsFlare ? "on" : "off")",
+                                detail: "whether a light you add flares when it shines into the lens (each light can still be switched)") { [weak self] in
+                guard let self else { return }
+                self.newLightsFlare.toggle()
+                self.reopenMenu()
+            }
             guard let k else {
                 items.append(.init(title: "No lights yet", detail: "add one in lighting mode (F / X)") { [weak self] in
                     self?.closeMenu(); self?.switchTo(.lighting) })
+                items.append(newFlare)
                 return items
             }
             let l = lighting.lights[k]
@@ -1381,6 +1390,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                     guard let self else { return }
                     self.lighting.lights[k].flare = !self.lighting.lights[k].flareOn
                     self.reopenMenu() },
+                newFlare,
             ]
             if mode == .lighting, let i = pov {
                 items.append(.init(title: "Remove light \(i + 1)", detail: "the one you are flying") { [weak self] in
@@ -2201,6 +2211,12 @@ final class Viewer: NSObject, MTKViewDelegate {
         get { MovieDeveloper.Kind(rawValue: UserDefaults.standard.string(forKey: "movieFinal") ?? "") ?? .prores }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "movieFinal") }
     }
+    /// New lights flare unless this is turned off (Menu › Lights).
+    var newLightsFlare: Bool {
+        get { UserDefaults.standard.object(forKey: "newLightsFlare") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "newLightsFlare") }
+    }
+
     static let finalSizes: [(w: Int, h: Int)] = [(3072, 2048), (4096, 2730)]
 
     /// The darkroom's notes on takes: ~/Library/Logs/Vintage Click.log.
