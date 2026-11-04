@@ -1747,6 +1747,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         sheet.pending = (rollFolder(body), loop.pendingFrames(roll: body.rollNumber))
         sheet.isHidden = false
         hud?.isHidden = true
+        placeMonitor()
     }
 
     /// The roll or take developed most recently (the light table opens on it).
@@ -1757,6 +1758,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         mode = .camera
         sheet?.isHidden = true
         hud?.isHidden = false
+        placeMonitor()
     }
 
     private func sheetInput(_ s: GamepadInput.State, dt: Float) {
@@ -2033,6 +2035,13 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var movieInFlight = 0
     /// The movie's frames in the darkroom now (the oldest is being exposed).
     private var movieJobs: [ExposureJob] = []
+    /// The frame developed last, in the corner while the rest develop.
+    private let monitor = DarkroomMonitor()
+
+    private func placeMonitor() {
+        guard let host: NSView = mode == .sheet ? sheet : hud else { return }
+        monitor.place(in: host)
+    }
     private var movieStarted = 0.0
     /// Tries since the darkroom last found memory for a frame.
     private var movieMemoryWaits = 0
@@ -2254,6 +2263,15 @@ final class Viewer: NSObject, MTKViewDelegate {
         movieNote = nil
         movieStarted = CACurrentMediaTime()
         rolling = nil
+        monitor.clear()
+        let m = movie!
+        m.onFrame = { [weak self] image, f in
+            DispatchQueue.main.async {
+                guard let self, self.movie === m else { return }
+                self.monitor.show(image, caption: "LAST DEVELOPED: FRAME \(f + 1) OF \(m.total)")
+                self.placeMonitor()
+            }
+        }
         Self.movieLog("take \(t.takeNumber): \(t.frameCount) frames at \(t.frameRate) fps, \(kind.name), \(size.w)x\(size.h), \(kind == .preview ? min(8, cellsPerExposure) : cellsPerExposure) lens samples, \(t.lighting.lights.count) lamps → \(folder.path)")
         feedMovie()
     }
@@ -2353,6 +2371,10 @@ final class Viewer: NSObject, MTKViewDelegate {
                 if m.written == 0 { try? FileManager.default.removeItem(at: m.url) }
                 Self.movieLog(String(format: "%@ after %.1f min → %@", msg.lowercased(), minutes, m.url.path))
                 self.movieNote = (msg, CACurrentMediaTime() + 20)
+                // The monitor stays up with the note, then goes.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                    if self?.movie == nil { self?.monitor.clear() }
+                }
                 self.hud?.flash(msg)
                 self.sheet?.enlargerStatus = msg
                 if m.kind == .preview && ok { self.newestOnTable = m.folder }

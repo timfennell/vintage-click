@@ -46,6 +46,9 @@ final class MovieDeveloper {
     /// A preview's posters are already beside this final.
     private let postersKept: Bool
     var url: URL { folder.appendingPathComponent(kind.fileName) }
+    /// Each frame as it goes into the file, small (for the darkroom's monitor). Called on the render thread.
+    var onFrame: ((CGImage, Int) -> Void)?
+    private let ci = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
     var total: Int { take.frameCount }
     var done: Bool { written >= total || cancelled }
 
@@ -159,13 +162,22 @@ final class MovieDeveloper {
         // Posters for the light table (a final made straight from the camera
         // lays its own, when there is no preview's to keep).
         if frame % Self.posterEvery == 0 && (kind == .preview || !postersKept) { poster(rgb, frame: frame) }
+        if let onFrame, let small = thumbnail(rgb, width: 720) { onFrame(small, frame) }
+    }
+
+    /// The frame scaled down to `width`, as 8-bit sRGB.
+    private func thumbnail(_ rgb: CVPixelBuffer, width: CGFloat) -> CGImage? {
+        let image = CIImage(cvPixelBuffer: rgb)
+        let s = min(1, width / image.extent.width)
+        let small = image.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        return ci.createCGImage(small, from: small.extent.integral, format: .RGBA8,
+                                colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
     }
 
     /// A frame as a PNG beside the clip (the light table's strip).
     private func poster(_ rgb: CVPixelBuffer, frame: Int) {
         let image = CIImage(cvPixelBuffer: rgb)
-        let ctx = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
-        guard let cg = ctx.createCGImage(image, from: image.extent, format: .RGBA8,
+        guard let cg = ci.createCGImage(image, from: image.extent, format: .RGBA8,
                                          colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) else { return }
         let u = folder.appendingPathComponent(String(format: "poster-%04d.png", frame))
         guard let d = CGImageDestinationCreateWithURL(u as CFURL, "public.png" as CFString, 1, nil) else { return }
