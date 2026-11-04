@@ -491,9 +491,9 @@ final class ContactSheetView: NSView {
         if L.cells.indices.contains(selected) {
             let c = L.cells[selected]
             let r = rolls[c.roll]
-            chosen = r.isTake ? " · take \(r.number) (A: play it · Y: develop the final)" : " · roll \(r.number) frame \(c.frame + 1)"
+            chosen = r.isTake ? " · take \(r.number) (" + (MovieDeveloper.finalClip(in: r.dir) != nil ? "Return / A: play the final · P / Y: develop it again" : "Return / A: play the preview · P / Y: develop the final") + ")" : " · roll \(r.number) frame \(c.frame + 1)"
         }
-        let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×%@     sticks: loupe  L2/R2: power  d-pad: frame  A: mark  Y / P: enlarge %@  X / G: print wall  L1/R1: session  B: back",
+        let hint = String(format: "%@%d %@ (session %d of %d)%@ · loupe %.0f×%@     sticks: loupe  L2/R2: power  d-pad: frame  A / Return: mark  Y / P: enlarge %@  X / G: print wall  Q / E (L1 / R1): session  Esc (B): back",
                           when.isEmpty ? "" : when + " · ", rollsHere.count, rollsHere.count == 1 ? "roll" : "rolls",
                           sessionIndex + 1, sessions.count, chosen, loupePower,
                           enlargerStatus.isEmpty ? "" : " · " + enlargerStatus,

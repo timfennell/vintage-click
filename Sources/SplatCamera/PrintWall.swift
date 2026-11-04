@@ -351,8 +351,8 @@ final class PrintWallView: NSView {
         // The rail of hints, as on the light table.
         let name = sessions.indices.contains(sessionIndex) ? sessions[sessionIndex].name : ""
         let hint = prints.isEmpty
-            ? "No enlarged prints in this session yet: mark frames on the light table and press Y / P to enlarge them     B: back"
-            : "\(name) · \(prints.count) print\(prints.count == 1 ? "" : "s") (session \(sessionIndex + 1) of \(sessions.count))     sticks / WASD: walk  triggers / wheel: closer  d-pad: next print  A: look closely  L1/R1: session  B: back"
+            ? "No enlarged prints in this session yet: mark frames on the light table and press Y / P to enlarge them     Q / E (L1 / R1): other sessions  Esc (B): back"
+            : "\(name) · \(prints.count) print\(prints.count == 1 ? "" : "s") (session \(sessionIndex + 1) of \(sessions.count))     WASD / sticks: walk  wheel / triggers: closer  arrows / d-pad: next print  Return (A): look closely  Q / E (L1 / R1): session  Esc (B): back"
         let bar = CGRect(x: 0, y: b.maxY - 34, width: b.width, height: 34)
         ctx.setFillColor(NSColor(calibratedWhite: 0.06, alpha: 0.92).cgColor)
         ctx.fill(bar)

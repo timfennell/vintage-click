@@ -2367,7 +2367,8 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var player: AVPlayerView?
 
     func playTake(_ dir: URL) {
-        let u = dir.appendingPathComponent(MovieDeveloper.Kind.preview.fileName)
+        // The final when there is one (full size, as developed), else the preview.
+        let u = MovieDeveloper.finalClip(in: dir) ?? dir.appendingPathComponent(MovieDeveloper.Kind.preview.fileName)
         guard FileManager.default.fileExists(atPath: u.path), let host = sheet else { return }
         let v = AVPlayerView(frame: host.bounds.insetBy(dx: host.bounds.width * 0.08, dy: host.bounds.height * 0.08))
         v.autoresizingMask = [.width, .height]

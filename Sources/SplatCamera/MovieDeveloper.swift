@@ -188,6 +188,17 @@ final class MovieDeveloper {
 
     // MARK: takes on disk
 
+    /// A take's finished final, the newest if there are both kinds (nil before one is done).
+    static func finalClip(in dir: URL) -> URL? {
+        [Kind.prores, .hevc].map { dir.appendingPathComponent($0.fileName) }
+            .filter { (try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0 > 0 }
+            .max { a, b in
+                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return da < db
+            }
+    }
+
     /// The next free take in a sitting: "Take NN - stock", beside its rolls.
     static func newTakeFolder(session: URL, stock: String) -> (URL, Int) {
         let used = (try? FileManager.default.contentsOfDirectory(atPath: session.path)) ?? []
