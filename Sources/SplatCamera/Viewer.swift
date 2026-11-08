@@ -1294,6 +1294,14 @@ final class Viewer: NSObject, MTKViewDelegate {
         menu.isHidden = false
     }
 
+    /// For checks and screenshots: a page of the menu by name (main, bag, lights,
+    /// scene, photos, settings, finder).
+    func openMenu(page name: String) {
+        let pages: [String: MenuPage] = ["main": .main, "bag": .bag, "lights": .lights, "scene": .scene,
+                                         "photos": .photos, "settings": .settings, "finder": .finder]
+        go(pages[name] ?? .main)
+    }
+
     /// Opens a page of the menu (on its first item after Back).
     private func go(_ page: MenuPage) {
         menuPage = page

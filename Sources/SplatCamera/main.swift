@@ -69,6 +69,8 @@ args.removeAll { $0 == "--no-shadows" }
 let startMenu = args.contains("--menu"), startControls = args.contains("--controls")
 let startFilm = args.contains("--film-menu"), startLenses = args.contains("--lens-menu")
 let startFilters = args.contains("--filter-menu")
+// --menu-page NAME: open on that page of the game menu (for checks and screenshots).
+let menuPageChoice = option("--menu-page")
 let measureDemo = args.contains("--measure-demo")
 args.removeAll { $0 == "--measure-demo" }
 args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" || $0 == "--lens-menu" || $0 == "--filter-menu" }
@@ -311,6 +313,7 @@ func configureSession() {
     }
     DispatchQueue.main.async {
         if startMenu { viewer.openMenu() }
+        if let pg = menuPageChoice { viewer.openMenu(page: pg) }
         if startControls { viewer.showControls() }
         if startFilm { viewer.openFilm() }
         if startLenses { viewer.openLenses() }
