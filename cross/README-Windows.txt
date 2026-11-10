@@ -48,8 +48,7 @@ CONTROLS                    Keyboard and mouse        Game controller
 
 ALSO IN HERE (as on the Mac)
   Studio lighting (L): place and fly lamps, gels, modifiers, house lights.
-  Lens filters (V), tilt / shift lenses (hold M + arrows), three camera bodies
-  and a hidden motion picture camera (W on the camera bag's body row).
+  Lens filters (V), tilt / shift lenses (hold M + arrows), three camera bodies.
   Scene bundles (.vcscene) from the Scene Builder: fog, sounds, a start view.
   Proofs and the enlarger, EXIF in every print, DNG negatives (Menu > Photos).
   Menu > Settings > Controls lists every key and button.

@@ -43,8 +43,8 @@ Free and open source (GPL-3.0).
 ### Windows
 
 The Windows version does what the Mac version does: the same lenses, flare,
-render engine, lighting, filters, tilt/shift, motion picture camera, scene
-bundles, light table, enlarger, print wall and DNG negatives
+render engine, lighting, filters, tilt/shift, scene bundles, light table,
+enlarger, print wall and DNG negatives
 (`cross/PARITY.md` lists the few differences).
 
 1. Download `VintageClick-windows-x64.zip` from the

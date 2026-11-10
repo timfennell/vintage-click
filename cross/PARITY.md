@@ -14,7 +14,6 @@ the scan's leaks (the old CPU path rescaled them, as the finder does).
 |---|---|---|
 | `accumulate` | sum the sub-pupil renders into the exposure (pupil weight, lamp faces) | ✅ GPU |
 | `develop` | lateral colour, vignette, streaks, filter fx, flare, halation, fisheye rim, film look | ✅ GPU |
-| `develop16` | the same for movie frames, half floats | ✅ GPU (floats into a 10-bit HEVC final, P010; H.264 and previews stay 8-bit) |
 | `streak` | anamorphic wire streaks (lenses with `streak` > 0) | ✅ GPU |
 | `lens_fx` | effect filters (star, soft, mist, grating) | ✅ GPU |
 | `negative` | DNG digital negative | ✅ GPU (floats down, halved on the CPU) |
@@ -60,7 +59,7 @@ the scan's leaks (the old CPU path rescaled them, as the finder does).
 
 | Area | Mac | Windows |
 |---|---|---|
-| Menu | pages: main, camera bag, motion, lights, scene, photos, settings, viewfinder graphics | ✅ (every item the Mac has; the mouse points and clicks as on the Mac) |
+| Menu | pages: main, camera bag, lights, scene, photos, settings, viewfinder graphics | ✅ (every item the Mac has; the mouse points and clicks as on the Mac) |
 | Place / object reading, remembered per scan | ✅ | ✅ |
 | Scene light, remembered per scan | ✅ | ✅ |
 | Set the scale (measure two points; Menu › Scene; type the real length or dial it) | ✅ | ✅ |
@@ -69,7 +68,6 @@ the scan's leaks (the old CPU path rescaled them, as the finder does).
 | Camera bodies (Ohi Kor S2, Kwanon EF, Lahntal R5), shutter-priority auto, the rangefinder's window, patch, bright frames and shoe finder (`--body`) | ✅ | ✅ |
 | HUD per body (LEDs in the Mac's orange-red, the meter card's M, the R5's fine bright frame): LEDs, the Kwanon's lit window and aperture scale, the Lahntal's readout line and top needle; lighting plot and beam marks while placing lights | ✅ | ✅ |
 | Gaits: rail to run (, slower, . faster), picked for the scene's size | ✅ | ✅ |
-| Motion camera (the hidden Wilmont W11: W on the bag's body row): frame rate, shutter angle, keyed takes (K, I / O, Z / X, P, G / Shift-G; Y, A and B + d-pad on a pad), rolling with focus pulls, motion blur through the shutter, the timeline and 1.85 marks, darkroom monitor, Motion page, takes on the light table (A / Enter plays, R develops the final). Test: `--take-demo S --develop preview\|final`, `--motion-menu` | ✅ | ✅ (a movie frame's flare doesn't yet check whether the scan hides a lamp; a final developed later from the light table uses the lights as they are then) |
 | Lighting mode: place and fly lights, house lights (L / R3; F add, 1-9 fly, T head, G house lights...) | ✅ | ✅ |
 | Lights: gels, modifiers (barn doors, flags, cookies, gobos, ellipsoidal), dimmer, spot / flood | ✅ | ✅ |
 | Light wireframes in the finder (and the camera seen from a light) | ✅ | ✅ (drawn on the CPU) |
@@ -89,7 +87,6 @@ the scan's leaks (the old CPU path rescaled them, as the finder does).
 | Haptics (controller rumble; Menu › Settings) | ✅ | ✅ (a rumble per camera sound; the Mac plays hits taken from the recordings, and the trackpad too) |
 | Viewfinder graphics: smooth / classic blur, fast focus | ✅ | ✅ |
 | Viewfinder graphics: distant shells (Menu › Settings; VC_SHELLS, VC_SHELL_M) | ✅ | ✅ (used while you turn and focus; held still the finder draws everything, as the Mac's refine does. ~23% faster renders on the church) |
-| Keyboard layout (arrows look, F / C focus, number keys pick a lens of the collection, H menu, U up axis, V filters, L lighting, , . gait, the movie camera's K I O Z X P G) | ✅ | ✅ |
+| Keyboard layout (arrows look, F / C focus, number keys pick a lens of the collection, H menu, U up axis, V filters, L lighting, , . gait) | ✅ | ✅ |
 | Controls guide | ✅ | ✅ |
 | App icon | ✅ | ✅ |
-| Movie developing (Mac: preview HEVC, final ProRes 422 HQ or HEVC 10-bit, up to 4096 × 2730) | ✅ | ✅ Media Foundation: preview H.264, final H.264 or HEVC Main 10 (falls back to 8-bit HEVC, then H.264), 3072 × 2048 or 1920 × 1280, .mp4 |
