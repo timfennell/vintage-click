@@ -1,0 +1,68 @@
+#version 450
+// shadow_vis (Shaders.swift): how much of one light reaches each splat, from
+// that light's shadow map (a render from the head: transmittance and median
+// depth per texel). A blocker search finds how far in front the occluders
+// are; the penumbra widens with the head's source size times the
+// occluder-to-receiver gap; the filter averages the light let through.
+//   S[0..2] = the light's view rows   S[3] = (fx, map size, metres per unit, source radius in scene units)
+//   S[4] = (blocker taps, filter taps, largest penumbra in texels, light slot)
+// The visibility byte of light `slot` goes into vis[2 i + slot / 4].
+layout(local_size_x = 256) in;
+layout(std430, set = 0, binding = 0) readonly buffer Means { float means[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Map { float map[]; };
+layout(std430, set = 1, binding = 0) buffer Vis { uint vis[]; };
+layout(std140, set = 2, binding = 0) uniform Shadow { vec4 S[5]; };
+layout(std140, set = 2, binding = 1) uniform Count { uvec4 NC; };
+
+vec2 vogel(uint k, uint n) {
+    float r = sqrt((float(k) + 0.5) / float(n));
+    float th = float(k) * 2.39996323;
+    return r * vec2(cos(th), sin(th));
+}
+vec2 shadow_tap(ivec2 t, uint res) {
+    t = clamp(t, ivec2(0), ivec2(res) - 1);
+    uint n = res * res, j = uint(t.y) * res + uint(t.x);
+    return vec2(map[3 * n + j], map[4 * n + j]);   // transmittance, median ray depth
+}
+void put(uint i, uint slot, float lit) {
+    uint byteV = uint(clamp(lit, 0.0, 1.0) * 255.0 + 0.5);
+    uint w = i * 2u + slot / 4u, sh = 8u * (slot % 4u);
+    vis[w] = (vis[w] & ~(255u << sh)) | (byteV << sh);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= NC.x) return;
+    uint slot = uint(S[4].w);
+    vec3 m = vec3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
+    vec3 pc = vec3(dot(S[0].xyz, m) + S[0].w, dot(S[1].xyz, m) + S[1].w, dot(S[2].xyz, m) + S[2].w);
+    float fx = S[3].x, res = S[3].y;
+    if (pc.z <= 0.0) { put(i, slot, 1.0); return; }
+    vec2 uv = vec2(fx * pc.x / pc.z, fx * pc.y / pc.z) + res * 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(res)))) { put(i, slot, 1.0); return; }
+    float dr = length(pc);
+    // Self-shadowing guard: a little in front of the receiver, more far off,
+    // and a few texels' depth for surfaces the light grazes.
+    float bias = 0.012 * dr + 0.004 / S[3].z + 3.0 * dr / fx;
+    float ramp = 0.03 * dr;
+    uint nb = uint(S[4].x), nf = uint(S[4].y);
+    float search = min(S[4].z, max(2.0, S[3].w / dr * fx * 0.5));
+    float dsum = 0.0, cnt = 0.0;
+    for (uint k = 0u; k < nb; k++) {
+        vec2 o = vogel(k, nb) * search;
+        vec2 tp = shadow_tap(ivec2(uv + o), uint(res));
+        if (tp.x < 0.97 && tp.y > 0.0 && tp.y < dr - bias) { dsum += tp.y; cnt += 1.0; }
+    }
+    if (cnt == 0.0) { put(i, slot, 1.0); return; }
+    float db = dsum / cnt;
+    float pen = clamp(S[3].w * (dr - db) / max(db, 1e-6) / dr * fx, 1.0, S[4].z);
+    float lit = 0.0;
+    for (uint k = 0u; k < nf; k++) {
+        vec2 o = vogel(k, nf) * pen;
+        vec2 tp = shadow_tap(ivec2(uv + o), uint(res));
+        float occl = 0.0;
+        if (tp.x < 0.97 && tp.y > 0.0) occl = (1.0 - tp.x) * clamp((dr - bias - tp.y) / ramp, 0.0, 1.0);
+        lit += 1.0 - occl;
+    }
+    put(i, slot, lit / float(nf));
+}

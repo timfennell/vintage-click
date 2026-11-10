@@ -60,7 +60,7 @@ def f(v, default="0.0f"):
 
 # Lens arrays and collections
 arrays = {}
-for m in re.finditer(r"private let (\w+): \[Lens\] = \[", lens_src):
+for m in re.finditer(r"(?:private )?let (\w+): \[Lens\] = \[", lens_src):
     start = m.end(); depth = 1; j = start
     while depth:
         if lens_src[j] == "[": depth += 1

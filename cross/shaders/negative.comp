@@ -1,0 +1,67 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// negative (Shaders.swift): the digital negative. The same exposure as `develop`
+// reads (lens fall-off, lateral colour, streaks, the filter, the flare), as
+// linear light before any film, unclipped: three floats per pixel, for a DNG
+// (the CPU halves them). Values past 1 are highlights the print would burn out
+// but the negative keeps.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, set = 0, binding = 0) readonly buffer Acc { vec4 acc[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Streaks { vec4 streaks[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Fx { vec4 fx[]; };
+layout(std430, set = 1, binding = 0) buffer Out { float outp[]; };
+layout(std140, set = 2, binding = 0) uniform Optics { vec4 O[12]; };
+layout(std140, set = 2, binding = 1) uniform Dev { vec4 D; };
+layout(std140, set = 2, binding = 2) uniform Flare { vec4 FL[38]; };
+#include "vc.glsl"
+#include "flare.glsl"
+
+vec3 acc_at(vec2 p) {
+    vec2 t = p - 0.5;
+    ivec2 i0 = ivec2(floor(t));
+    vec2 w = t - floor(t);
+    vec3 a = acc[idx(clamp_px(i0))].rgb, b = acc[idx(clamp_px(i0 + ivec2(1, 0)))].rgb;
+    vec3 c = acc[idx(clamp_px(i0 + ivec2(0, 1)))].rgb, d = acc[idx(clamp_px(i0 + ivec2(1, 1)))].rgb;
+    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
+// A circular fisheye's disc: black beyond it but for the glow scattered past its rim (as develop).
+vec3 fisheye_rim(vec3 lin, vec2 pc, vec2 c, vec3 gain) {
+    float rr = length(pc - c), Rc = O[6].z;
+    lin *= 1.0 - smoothstep(Rc - 2.0, Rc, rr);
+    if (rr <= Rc - 2.0) return lin;
+    float outr = max(rr - Rc, 0.0);
+    float th = atan(pc.y - c.y, pc.x - c.x), spread = 0.5 + 1.5 * outr / Rc;
+    th += (hash(uvec2(pc), 41u) - 0.5) * spread / 24.0;
+    vec3 rim = vec3(0.0);
+    for (int k = 0; k < 24; k++) {
+        float a = th + (float(k) / 23.0 - 0.5) * spread;
+        float r = Rc * (0.94 - 0.05 * float(k % 3));
+        rim += acc_at(c + r * vec2(cos(a), sin(a)));
+    }
+    rim = rim / 24.0 * gain;
+    return lin + rim * (0.14 * exp(-outr / (Rc * 0.035)) + 0.04 * exp(-outr / (Rc * 0.18)));
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uint W = uint(O[0].x), H = uint(O[0].y);
+    if (p.x >= W || p.y >= H) return;
+    float expo = exp2(O[5].w);
+    vec2 pc = vec2(p) + 0.5, c = O[1].xy;
+    vec2 q = field(pc);
+    float vig = 1.0 - O[3].w * pow(clamp(O[2].z / O[2].y, 0.0, 1.0), 1.5) * dot(q, q);
+    float k = O[6].x;
+    vec3 lin;
+    lin.r = acc_at(c + (pc - c) * (1.0 - k)).r;
+    lin.g = acc_at(pc).g;
+    lin.b = acc_at(c + (pc - c) * (1.0 + k)).b;
+    lin = max(lin * D.rgb * expo * vig * O[9].rgb, 0.0);
+    if (D.w > 0.0) lin += streaks[idx(p)].rgb * expo;
+    if (O[10].x > 0.0 || O[11].x > 0.0 || O[11].y > 0.0 || O[11].z > 0.0) lin = max(lin + fx[idx(p)].rgb * vig, 0.0);
+    // Lens flare from the lights shining into the lens, through the filter.
+    lin += lens_flare((vec2(p) + 0.5) / vec2(W, H), vec2(W, H)) * expo * O[9].rgb;
+    if (O[6].z > 0.0) lin = fisheye_rim(lin, pc, c, D.rgb * expo);
+    uint i = idx(p) * 3u;
+    outp[i] = min(lin.r, 60000.0); outp[i + 1u] = min(lin.g, 60000.0); outp[i + 2u] = min(lin.b, 60000.0);
+}

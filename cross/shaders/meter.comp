@@ -1,0 +1,18 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// meter (Shaders.swift): one sample per cell of a 48 x 32 grid, linear
+// luminance, through the filter (TTL). Weighted on the CPU (centreWeighted).
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, set = 0, binding = 0) readonly buffer Frame { float f[]; };
+layout(std430, set = 1, binding = 0) buffer Out { float outv[]; };
+layout(std140, set = 2, binding = 0) uniform Optics { vec4 O[14]; };
+#include "vc.glsl"
+#include "frame.glsl"
+
+void main() {
+    uvec2 g = gl_GlobalInvocationID.xy, grid = uvec2(48, 32);
+    if (g.x >= grid.x || g.y >= grid.y) return;
+    vec2 p = (vec2(g) + 0.5) / vec2(grid) * O[0].xy;
+    vec3 c = to_lin(frame_rgb(clamp_px(ivec2(p)))) * O[9].rgb;
+    outv[g.y * grid.x + g.x] = dot(c, vec3(0.2126, 0.7152, 0.0722));
+}

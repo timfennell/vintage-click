@@ -385,6 +385,31 @@ For testing, the app takes command-line options, e.g.
 (take one frame and quit), `--bench 200` (render timings), `--stats` (render
 speed in the finder).
 
+### Windows
+
+Needs Git, CMake, Ninja, Python 3, the [Vulkan SDK](https://vulkan.lunarg.com/)
+and Visual Studio 2022 (or its Build Tools) with the C++ workload. With winget:
+
+```powershell
+winget install Git.Git Kitware.CMake Ninja-build.Ninja Python.Python.3.12 KhronosGroup.VulkanSDK
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Then, from the repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File cross\build-windows.ps1 -Package
+```
+
+It clones Spirula Studio next to the repository (`..\spirula`), applies the
+patch, builds `spirula_render.dll` (the first build takes a while), builds
+`cross\build\VintageClick.exe` with its GPU kernels (`cross\shaders`, the Mac's
+Metal translated to GLSL), and with `-Package` zips the folder a player needs
+into `cross\dist\VintageClick-windows-x64.zip`. The Windows build takes the
+same test options (`--shoot`, `--lens`, `--film`, `--aperture`, `--tilt`,
+`--shift`, `--res`, `--cells`). `cross/PARITY.md` tracks what it has of the Mac
+app.
+
 ## Credits
 
 - Rendering: [Spirula Studio](https://github.com/harry7557558/spirula-studio)

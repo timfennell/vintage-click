@@ -1,0 +1,14 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// develop16 (Shaders.swift): the same print for a movie frame, kept in floats
+// (display-referred, 0...1) so a 10-bit codec gets more than 8 bits of it.
+layout(std430, set = 1, binding = 0) buffer Out { float outp[]; };
+#include "develop_body.glsl"
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    vec3 c = clamp(develop_px(p), 0.0, 1.0);
+    uint i = idx(p) * 3u;
+    outp[i] = c.r; outp[i + 1u] = c.g; outp[i + 2u] = c.b;
+}

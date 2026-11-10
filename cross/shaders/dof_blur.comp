@@ -1,0 +1,71 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// dof_blur (Shaders.swift): each pixel gathers the Gaussians of what is
+// around it (from mip levels of the frame for large blurs); writes the blurred
+// frame back.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0) uniform sampler2D col;
+layout(set = 0, binding = 1) uniform sampler2D dep;
+layout(std430, set = 0, binding = 2) readonly buffer Tiles { float tiles[]; };
+layout(std430, set = 1, binding = 0) buffer Frame { float f[]; };
+layout(std140, set = 2, binding = 0) uniform Dof { vec4 D[48]; };
+layout(std140, set = 2, binding = 1) uniform Samples { vec4 G[48]; };
+#include "dof.glsl"
+
+const float M_PI_F = 3.14159265358979;
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uint W = uint(D[0].x), H = uint(D[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
+    vec2 pc = vec2(p) + 0.5;
+    float z0 = texelFetch(dep, ivec2(p), 0).r;
+    DofSpread s0 = dof_spread(pc, z0);
+    // How far to look: the largest blur that could reach here (3 x 3 tiles).
+    int tw = int((W + 15u) / 16u), th = int((H + 15u) / 16u);
+    ivec2 tc = ivec2(p) / 16;
+    float reach = max(s0.sr.x, s0.sr.y);
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 t = clamp(tc + ivec2(dx, dy), ivec2(0), ivec2(tw - 1, th - 1));
+            reach = max(reach, tiles[t.y * tw + t.x]);
+        }
+    if (reach < 0.75) {                                // in focus all round: as rendered, with the pupil's light
+        f[3 * i] *= s0.light; f[3 * i + 1] *= s0.light; f[3 * i + 2] *= s0.light;
+        return;
+    }
+    float R = 2.5 * reach;
+    const int N = 48;
+    float area = M_PI_F * R * R / float(N);
+    float lvl = clamp(0.5 * log2(area), 0.0, D[2].y - 1.0);
+    vec2 size = vec2(W, H);
+    vec4 acc = vec4(0.0); float wsum = 0.0;
+    // Each sample (and the pixel itself) spreads its light as its own Gaussian.
+    for (int j = -1; j < N; j++) {
+        vec2 ps; vec4 c; float zs; float A;
+        if (j < 0) { ps = pc; c = texelFetch(col, ivec2(p), 0); zs = z0; A = 1.0; }
+        else {
+            vec2 v = G[j].xy * R;
+            ps = pc + v;
+            c = textureLod(col, ps / size, lvl);
+            zs = textureLod(dep, ps / size, 0.0).r;
+            A = area;
+        }
+        DofSpread s = dof_spread(ps, zs);
+        vec2 sr = s.sr;
+        if (zs > z0 * 1.02) sr = min(sr, s0.sr);       // behind: no wider than what is in front
+        vec2 qv = (ps - D[3 + int(D[2].x) + 4].xy);
+        float ql = length(qv);
+        vec2 qd = ql > 1e-4 ? qv / ql : vec2(1.0, 0.0), qp = vec2(-qd.y, qd.x);
+        vec2 d = pc - (ps + s.shift);
+        float u = dot(d, qd) / sr.x, w2 = dot(d, qp) / sr.y;
+        float w = exp(-0.5 * (u * u + w2 * w2)) / (2.0 * M_PI_F * sr.x * sr.y) * A;
+        acc += c * vec4(vec3(s.light), 1.0) * w;
+        wsum += w;
+    }
+    if (wsum < 1e-8) return;
+    acc /= wsum;
+    f[3 * i] = acc.r; f[3 * i + 1] = acc.g; f[3 * i + 2] = acc.b;
+    f[3 * n + i] = 1.0 - acc.a;
+}

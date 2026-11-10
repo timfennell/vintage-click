@@ -1,0 +1,28 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// accumulate (Shaders.swift): one sub-pupil's tile of the photo onto the film.
+// SDL_GPU sets: 0 = read-only buffers, 1 = read-write buffers, 2 = uniforms.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, set = 0, binding = 0) readonly buffer Frame { float f[]; };
+layout(std430, set = 1, binding = 0) buffer Acc { vec4 acc[]; };
+layout(std140, set = 2, binding = 0) uniform Optics { vec4 O[12]; };
+// L[0] = (lens point x, y, weight, 1 = first sub-pupil), L[1] = channel mask, L[2] = (tile x0, y0, w, h)
+layout(std140, set = 2, binding = 1) uniform Step { vec4 L[3]; };
+layout(std140, set = 2, binding = 2) uniform Flare { vec4 FL[38]; };
+#include "vc.glsl"
+#include "flare.glsl"
+
+void main() {
+    uvec2 g = gl_GlobalInvocationID.xy;
+    uint tw = uint(L[2].z), th = uint(L[2].w);
+    uvec2 p = g + uvec2(L[2].xy);
+    if (g.x >= tw || g.y >= th || p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    uint n = tw * th, j = g.y * tw + g.x;
+    vec3 c = vec3(f[3 * j], f[3 * j + 1], f[3 * j + 2]) + f[3 * n + j] * O[4].rgb;
+    uint i = idx(p);
+    float w = pupil(L[0].xy, field(vec2(p) + 0.5), L[1].w) * L[0].z;
+    vec4 prev = L[0].w > 0.5 ? vec4(0.0) : acc[i];
+    // The lamps' own faces, behind whatever of the scan stands in front of them.
+    vec3 faces = FL[0].x > 0.0 ? flare_faces(vec2(p) + 0.5, O[0].xy, f[3 * n + j], f[4 * n + j]) : vec3(0.0);
+    acc[i] = prev + vec4((to_lin(c) + faces) * L[1].rgb * w, w);
+}

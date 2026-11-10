@@ -1,0 +1,278 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// viewfinder (Shaders.swift's fragment, as a compute pass over the window):
+// the focusing screen's image in its rounded window and black surround, lens
+// flare on it, and the meter's scale and needle seen through the eyepiece.
+// The finder frame is the window's size (O[0]); O[7] places the image in it.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, set = 0, binding = 0) readonly buffer Frame { float f[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Plate { uint plate[]; };
+layout(std430, set = 1, binding = 0) buffer Out { uint outp[]; };
+layout(std140, set = 2, binding = 0) uniform Optics { vec4 O[14]; };
+// M[0] = the scale's rect (px), M[1] = needle pivot and tip (px), M[2] = (on, u px, at the right, -),
+// M[3] = (plate width, height, -, -)
+layout(std140, set = 2, binding = 1) uniform Meter { vec4 M[4]; };
+layout(std140, set = 2, binding = 2) uniform Flare { vec4 FL[38]; };
+#include "vc.glsl"
+#include "frame.glsl"
+#include "flare.glsl"
+#include "filterfx.glsl"
+
+// What the finder's filter effects read: the frame through the filter (FrameSource).
+vec3 fx_src(vec2 q) { return to_lin(frame_rgb(clamp_px(ivec2(q)))) * O[9].rgb; }
+
+// The eyepiece is not perfect: what sits on the screen (the window's edge,
+// the meter, the wireframes) is seen with a little pincushion, a touch more
+// in red than in blue. `pos` in window pixels; returns where to look on the
+// screen for what the eye sees at `pos`. The scene's own image is the lens's
+// business and is left alone.
+const float EYEPIECE_K = 0.018, EYEPIECE_CA = 0.0035;
+vec2 eyepiece(vec2 pos, float k) {
+    vec2 c = O[0].xy * 0.5;
+    vec2 d = pos - c;
+    return c + d * (1.0 - k * dot(d, d) / dot(c, c));
+}
+
+// The lit screen glows faintly past its mask: the black surround near each
+// part of the window's edge takes a soft halo of the image just inside it (`pe`: where
+// the eye sees, in image pixels; `edge`: how far outside, px). sRGB.
+vec3 surround(vec2 pos, vec2 pe, float edge) {
+    float g = 0.022 + 0.01 * value_noise(pos / 3.0, 31u);              // the surround's black
+    vec3 lin = to_lin(vec3(g, g, g * 1.05));
+    float inset = O[7].w + 4.0;
+    vec2 q = clamp(pe, vec2(inset), O[0].xy - inset);
+    // Diffuse: gathered from a patch inside the edge that widens with distance.
+    float spread = O[0].y * 0.05 + max(edge, 0.0) * 1.2;
+    vec2 inward = normalize(O[0].xy * 0.5 - q + 1e-3);
+    vec2 centre = q + inward * spread * 0.6;
+    vec3 near = vec3(0.0);
+    for (uint k = 0u; k < 16u; k++) {
+        vec2 t = centre + vogel(k, 16u) * spread;
+        near += to_lin(frame_rgb(clamp_px(ivec2(t))));
+    }
+    near /= 16.0;
+    float h = O[0].y;
+    // Very faint: the glass itself stays clean; only the black catches a little.
+    float halo = 0.035 * exp(-max(edge, 0.0) / (h * 0.025)) + 0.01 * exp(-max(edge, 0.0) / (h * 0.11));
+    return to_srgb(lin + near * halo * O[5].y);
+}
+
+// The finder: the screen's image, a rounded-corner window in a black surround (sRGB).
+vec3 finder_base(vec2 pos) {
+    vec2 p = (pos - O[7].xy) / O[7].z;
+    vec2 halfSize = O[0].xy * 0.5;
+    // The window's edge as the eyepiece shows it.
+    vec2 pe = (eyepiece(pos, EYEPIECE_K) - O[7].xy) / O[7].z;
+    vec2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
+    float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;   // < 0 inside
+    // Mirror up (O[8].y): no image on the screen, so no glow round it either.
+    bool dark = O[8].y > 0.5;
+    if (edge > 1.0) return dark ? vec3(0.022) : surround(pos, pe, edge);
+    vec2 c = O[0].xy * 0.5;
+    float R = O[5].x;
+    float r = length(p - c);
+    vec3 col;
+    // A rangefinder's window (O[13].y): clear glass, no screen; its focusing
+    // patch in the middle shows a second image from the rangefinder's window,
+    // displaced by fx B (1/z - 1/s): it lies on the first where focused.
+    bool clearGlass = O[13].y > 0.5;
+    // The Kwanon's screen (O[13].z): the split alone, no microprism collar.
+    bool plainSplit = O[13].z > 0.5;
+    float collar = plainSplit ? 1.0 : 1.75;
+    if (clearGlass) {
+        col = to_lin(frame_rgb(clamp_px(ivec2(p))));
+        if (O[12].x > 0.5) {
+            vec2 dp = abs(p - c), ph = O[12].yz;
+            float inPatch = (1.0 - smoothstep(ph.x - 1.5, ph.x + 1.5, dp.x)) * (1.0 - smoothstep(ph.y - 1.5, ph.y + 1.5, dp.y));
+            if (inPatch > 0.0) {
+                float z = max(frame_z(clamp_px(ivec2(p))), 0.05);
+                float shift = O[12].w * (1.0 / z - O[13].x);
+                vec3 second = to_lin(frame_rgb(clamp_px(ivec2(p + vec2(shift, 0.0)))));
+                // The patch is warm and brighter (its mirror is gilded), the two images
+                // half and half.
+                vec3 patchCol = mix(col, second, 0.55) * vec3(1.45, 1.2, 0.62);
+                // Its edge: a fine bright rim where the gilded mirror ends.
+                float rim = smoothstep(2.5, 0.0, min(ph.x - dp.x, ph.y - dp.y));
+                patchCol *= 1.0 + 0.35 * rim;
+                col = mix(col, patchCol, inPatch);
+            }
+        }
+    } else if (r < R) {
+        // Split image: each half shows the image displaced by its own defocus,
+        // along the split.
+        float Rs = R;
+        vec2 along = vec2(1.0, 0.0);
+        vec2 across = vec2(-along.y, along.x);
+        float d = dot(p - c, across);
+        float side = d < 0.0 ? 1.0 : -1.0;
+        // One depth for each half, read across it: the wedge moves its half as
+        // one (per-pixel depths jump about in blur and tore seams through it).
+        float z = prism_depth(c - side * across * Rs * 0.5, Rs * 0.18);
+        // Displacement follows defocus but levels off (a wedge bends light only
+        // so far): badly out of focus the halves stay apart, not flung away.
+        float shift = clamp(coc_px(z) * 0.6, -Rs * 0.45, Rs * 0.45) * side;
+        col = prism_sample(p, shift * along, z);
+        // A prism needs a fast lens: it blacks out half when stopped down.
+        float darken = clamp((O[2].y - 4.0) / 3.0, 0.0, 1.0);
+        if (side > 0.0) col *= 1.0 - 0.85 * darken;
+        if (abs(d) < 0.6) col *= 0.4;
+    } else if (r < R * collar) {
+        // Microprisms: a fine grid of tiny prisms. Each moves as one, by the
+        // defocus at its centre, so an out-of-focus image breaks up and
+        // shimmers while a focused one sits still.
+        float cell = max(3.0, O[0].y / 300.0);
+        vec2 g = floor(p / cell);
+        // Each tiny pyramid sends its cell one of six ways (scattered, not in rows).
+        float a = (floor(hash(uvec2(g + 4096.0), 23u) * 6.0) + 0.5) * M_PI_F / 3.0;
+        vec2 centre = (g + 0.5) * cell;
+        float z = prism_depth(centre, cell * 0.5);
+        float coc = abs(coc_px(z));
+        // Each facet moves its bit of image a little way (a few facets at most):
+        // far out of focus the collar shimmers finely and dims, never scatters.
+        float shift = min(coc * 0.5, cell * 2.5);
+        col = prism_sample(p, shift * vec2(cos(a), sin(a)), z);
+        col *= 1.0 - 0.35 * smoothstep(cell * 2.0, cell * 10.0, coc);
+    } else {
+        col = frame_lin_ca(p);
+        // Fine matte: the ground glass's own tooth, still while the image moves.
+        float tooth = value_noise(p / 1.4, 7u) + 0.5 * value_noise(p / 0.7, 11u) - 0.75;
+        col *= 1.0 + 0.10 * tooth;
+    }
+    // The filter on the lens: its colour, and what an effect filter scatters.
+    col *= O[9].rgb;
+    if (O[10].x > 0.0 || O[11].x > 0.0 || O[11].y > 0.0 || O[11].z > 0.0) col = max(col + filter_fx(p, col, 16), 0.0);
+
+    if (!clearGlass) {
+        if (abs(r - R) < 0.8 || (!plainSplit && abs(r - R * collar) < 0.8)) col *= 0.55;
+        // The fresnel's grooves: faint rings centred on the axis.
+        float ring = fract(r / max(O[0].y / 70.0, 4.0));
+        col *= 1.0 - 0.035 * smoothstep(0.85, 1.0, ring);
+    }
+    // Light fall-off: the lens's own (at the aperture it is set to) and the
+    // condenser's toward the corners of the screen.
+    vec2 q = field(p);
+    float vig = clearGlass ? 1.0 : 1.0 - O[3].w * pow(clamp(O[2].z / O[2].y, 0.0, 1.0), 1.5) * dot(q, q);
+    col *= vig * (1.0 - (clearGlass ? 0.06 : 0.22) * dot(q, q)) * O[5].y;
+    // A circular fisheye's image is a disc: black beyond it, but for a soft
+    // glow of the light near its rim scattered past it inside the lens.
+    if (O[6].z > 0.0) {
+        float rr = length(p - c), Rc = O[6].z;
+        col *= 1.0 - smoothstep(Rc - 2.0, Rc, rr);
+        if (rr > Rc - 2.0) {
+            float outr = max(rr - Rc, 0.0);
+            float th = atan(p.y - c.y, p.x - c.x), spread = 0.5 + 1.5 * outr / Rc;
+            th += (hash(uvec2(p), 41u) - 0.5) * spread / 16.0;
+            vec3 rim = vec3(0.0);
+            for (int k = 0; k < 16; k++) {
+                float a = th + (float(k) / 15.0 - 0.5) * spread;
+                float rk = Rc * (0.94 - 0.05 * float(k % 3));
+                rim += frame_lin_ca(c + rk * vec2(cos(a), sin(a)));
+            }
+            rim /= 16.0;
+            col += rim * (0.14 * exp(-outr / (Rc * 0.035)) + 0.04 * exp(-outr / (Rc * 0.18))) * O[5].y;
+        }
+    }
+    // The window's edge: a soft dark lip, then the surround.
+    col *= smoothstep(0.0, O[7].w * 0.9, -edge) * 0.25 + 0.75;
+    vec3 outc = dark ? vec3(0.0) : to_srgb(col);
+    return mix(outc, dark ? vec3(0.022) : surround(pos, pe, edge), clamp(edge + 0.5, 0.0, 1.0));
+}
+
+// The meter's plate (its drawn scale), sampled as Metal's linear,
+// clamp-to-zero sampler does: a = 0...1 over the plate.
+vec3 plate_texel(ivec2 t) {
+    ivec2 sz = ivec2(M[3].xy);
+    if (t.x < 0 || t.y < 0 || t.x >= sz.x || t.y >= sz.y) return vec3(0.0);
+    uint v = plate[t.y * sz.x + t.x];
+    return vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) / 255.0;
+}
+vec3 plate_sample(vec2 a) {
+    vec2 t = a * M[3].xy - 0.5;
+    ivec2 i = ivec2(floor(t));
+    vec2 w = t - floor(t);
+    return mix(mix(plate_texel(i), plate_texel(i + ivec2(1, 0)), w.x),
+               mix(plate_texel(i + ivec2(0, 1)), plate_texel(i + ivec2(1, 1)), w.x), w.y);
+}
+
+// The meter, seen through the eyepiece. Its scale is light projected beside
+// the image (as framelines are): soft, with a faint bloom and colour
+// fringes, as bright as the light the scene sends in. The needle is lit red.
+vec3 meter_light(vec3 outc, vec2 pos) {
+    float u = M[2].y;
+    vec4 R = M[0];
+    vec3 lin = to_lin(outc);
+    vec2 lo = R.xy - 2.5 * u, hi = R.xy + R.zw + 2.5 * u;
+    if (all(greaterThan(pos, lo)) && all(lessThan(pos, hi))) {
+        // How much light reaches the scale: what the scene sends to the screen's edge.
+        float L = 0.0;
+        for (uint k = 0u; k < 6u; k++) {
+            uvec2 sp = uvec2(O[0].x * 0.08, O[0].y * (0.15 + 0.14 * float(k)));
+            L += dot(to_lin(frame_rgb(sp)), vec3(0.2126, 0.7152, 0.0722));
+        }
+        float I = min(1.6, (0.25 + 1.3 * L / 6.0) * O[5].y);
+        vec3 core = vec3(0.0), glow = vec3(0.0);
+        for (uint k = 0u; k < 12u; k++) {
+            vec2 o = vogel(k, 12u);
+            vec2 a = (pos + o * 1.4 - R.xy) / R.zw;
+            vec2 ca = vec2(0.7, 0.0) / R.zw;
+            core += vec3(plate_sample(a + ca).r, plate_sample(a).g, plate_sample(a - ca).b);
+            glow += plate_sample((pos + o * 0.9 * u - R.xy) / R.zw);
+        }
+        vec3 light = to_lin(clamp(core / 12.0, 0.0, 1.0)) + 0.35 * to_lin(clamp(glow / 12.0, 0.0, 1.0));
+        lin += light * I;
+    }
+    // The needle: lit red, as the LEDs are, a little out of focus, with a
+    // soft glow round it (it lights itself, so it shows in any light).
+    vec2 a = M[1].xy, b = M[1].zw;
+    vec2 ab = b - a;
+    float t = clamp(dot(pos - a, ab) / dot(ab, ab), 0.0, 1.0);
+    float d = length(pos - (a + t * ab));
+    float w = max(0.7, 0.11 * u);
+    float core = 1.0 - smoothstep(w - 1.2, w + 1.2, d);
+    float glow = exp(-d * d / (0.12 * u * u));
+    // Lit only inside the frame: it fades out toward the frame's edge, where
+    // it swings in from the dark surround.
+    float edgeX = O[7].x;
+    float lit = smoothstep(edgeX, edgeX + 3.5 * u, pos.x);
+    if (M[2].z > 0.5) {                     // a meter at the right: lit in from that edge
+        float edgeR = O[7].x + O[0].x * O[7].z;
+        lit = smoothstep(edgeR, edgeR - 3.5 * u, pos.x);
+    }
+    vec3 red = vec3(0.9, 0.08, 0.05);
+    lin = mix(lin, red * 0.75, core * 0.75 * lit) + red * glow * 0.03 * lit;
+    return to_srgb(lin);
+}
+
+void main() {
+    uvec2 gp = gl_GlobalInvocationID.xy;
+    if (gp.x >= uint(O[0].x) || gp.y >= uint(O[0].y)) return;
+    vec2 pos = vec2(gp) + 0.5;
+    vec3 outc = finder_base(pos);
+    // Lens flare, on the screen's image (not its surround), at the finder's brightness.
+    if (FL[0].x > 0.0) {
+        vec2 pe = (eyepiece(pos, EYEPIECE_K) - O[7].xy) / O[7].z;
+        vec2 halfSize = O[0].xy * 0.5;
+        vec2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
+        float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;
+        float inside = 1.0 - smoothstep(-1.0, 1.0, edge);
+        if (inside > 0.0) {
+            // The lamps' faces behind the scan, as the frame's depth has it here.
+            uint W = uint(O[0].x), H = uint(O[0].y), n = W * H;
+            uvec2 q = uvec2(clamp(pe, vec2(0.0), O[0].xy - 1.0));
+            uint j = q.y * W + q.x;
+            vec3 faces = flare_faces(pe, O[0].xy, f[3 * n + j], f[4 * n + j]);
+            vec3 fl = (lens_flare(pe / O[0].xy, O[0].xy) + faces) * O[5].y * O[9].rgb * inside;
+            outc = vec3(lin_to_srgb(srgb_to_lin(outc.r) + fl.r), lin_to_srgb(srgb_to_lin(outc.g) + fl.g),
+                        lin_to_srgb(srgb_to_lin(outc.b) + fl.b));
+        }
+    }
+    if (M[2].x > 0.0) {
+        // The meter through the eyepiece: each colour from its own place.
+        vec3 r = meter_light(outc, eyepiece(pos, EYEPIECE_K + EYEPIECE_CA));
+        vec3 g = meter_light(outc, eyepiece(pos, EYEPIECE_K));
+        vec3 b = meter_light(outc, eyepiece(pos, EYEPIECE_K - EYEPIECE_CA));
+        outc = vec3(r.r, g.g, b.b);
+    }
+    uvec3 c8 = uvec3(round(clamp(outc, 0.0, 1.0) * 255.0));
+    outp[gp.y * uint(O[0].x) + gp.x] = c8.r | (c8.g << 8) | (c8.b << 16) | (255u << 24);
+}

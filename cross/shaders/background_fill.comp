@@ -1,0 +1,396 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// background_fill (Shaders.swift): what lies behind the live render: distant
+// shells (the far splats, baked from where the camera stood), then the sky
+// (.hdr), then the plain background. Fills where the render is empty (as
+// frame_rgb judges it) and leaves the frame opaque, so everything after is
+// unchanged. Fog in front of the scan and the background, as SceneFog has it.
+//   K[0] = (W, H, fx, fy)  K[1] = (cx, cy, fisheye, sky mip)
+//   K[2..4] = view rows (right, down, forward)  K[5] = (world up, sky yaw)
+//   K[6] = (sky scale, place, has sky, has shells)  K[7] = (background rgb, -)
+//   K[8] = (camera - bake centre, shell radius)  K[9] = (aperture diameter m, focus m, metres per unit, -)
+//   K[10..13] the shells' window (shell_uv); K[28] blur cap etc.; K[29..60] Gaussian samples; K[61..] the lens
+//   G: the fog (SceneFog.rows in Fog.swift; G[0].x and G[0].y zero: none)
+//   LT, BT, SV, maps, patterns: the lamps, for their light scattered in the fog (fog_lamps)
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0) uniform sampler2D sky;        // repeat across, clamped top and bottom
+layout(set = 0, binding = 1) uniform sampler2D shellCol;
+layout(set = 0, binding = 2) uniform sampler2D shellDep;
+layout(set = 0, binding = 3) uniform sampler2DArray patterns;
+layout(std430, set = 0, binding = 4) readonly buffer Beams { vec4 BT[]; };
+layout(std430, set = 0, binding = 5) readonly buffer Maps { float maps[]; };
+layout(std430, set = 1, binding = 0) buffer Frame { float f[]; };
+layout(std140, set = 2, binding = 0) uniform Back { vec4 K[100]; };
+layout(std140, set = 2, binding = 1) uniform Fog { vec4 G[44]; };
+layout(std140, set = 2, binding = 2) uniform Lamps { vec4 LT[48]; };
+layout(std140, set = 2, binding = 3) uniform Shafts { vec4 SV[41]; };
+
+const float M_PI_F = 3.14159265358979;
+float srgb_to_lin(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+float lin_to_srgb(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+vec3 to_lin(vec3 c) { c = max(c, 0.0); return vec3(srgb_to_lin(c.r), srgb_to_lin(c.g), srgb_to_lin(c.b)); }
+
+// The shells' window: where direction u lands in it (false: behind it).
+bool shell_uv(vec3 u, out vec2 uv) {
+    float z = dot(u, K[12].xyz);
+    uv = vec2(dot(u, K[10].xyz) / max(z, 1e-4) * K[10].w + K[13].x,
+              dot(u, K[11].xyz) / max(z, 1e-4) * K[11].w + K[13].y);
+    return z > 1e-4;
+}
+// The shell along the ray o + t d (o from the bake centre): where it meets the
+// baked surface, found from the stored distance (two refinements).
+vec4 shell_at_level(vec3 o, vec3 d, out float dist, float lvl) {
+    float rho = K[8].w * 2.0;
+    vec3 u = d;
+    for (int it = 0; it < 3; it++) {
+        float b = dot(o, d), c = dot(o, o) - rho * rho;
+        float t = -b + sqrt(max(b * b - c, 0.0));
+        u = normalize(o + t * d);
+        if (it == 2) break;
+        vec2 uv; shell_uv(u, uv);
+        rho = max(textureLod(shellDep, uv, 0.0).r, K[8].w);
+    }
+    dist = rho;
+    vec2 uv;
+    return shell_uv(u, uv) ? textureLod(shellCol, uv, lvl) : vec4(0.0);
+}
+vec4 shell_at(vec3 o, vec3 d, out float dist) { return shell_at_level(o, d, dist, 0.0); }
+
+vec3 sky_at(vec3 d, float mip) {
+    vec3 up = K[5].xyz;
+    vec3 seed = abs(up.x) < 0.9 ? vec3(1, 0, 0) : vec3(0, 0, 1);
+    vec3 a = normalize(seed - dot(seed, up) * up), b = cross(up, a);
+    float el = asin(clamp(dot(d, up), -1.0, 1.0));
+    float az = atan(dot(d, b), dot(d, a)) + K[5].w;
+    vec3 lin = textureLod(sky, vec2(fract(0.5 + az / (2.0 * M_PI_F)), 0.5 - el / M_PI_F), mip).rgb * K[6].x;
+    return vec3(lin_to_srgb(lin.x), lin_to_srgb(lin.y), lin_to_srgb(lin.z));
+}
+
+// ---- fog (fog_shape_r ... through_fog in Shaders.swift) ----
+float fog_shape_r(vec3 q, int shape) {
+    if (shape == 0) return max(max(abs(q.x), abs(q.y)), abs(q.z));
+    if (shape == 1) return length(q);
+    return max(length(q.xy), abs(q.z));
+}
+bool fog_span(vec3 o, vec3 d, int shape, out float t0, out float t1) {
+    t0 = -1e30; t1 = 1e30;
+    if (shape == 1) {
+        float a = dot(d, d), b = dot(o, d), c = dot(o, o) - 1.0, disc = b * b - a * c;
+        if (disc <= 0.0 || a < 1e-12) return false;
+        float sq = sqrt(disc);
+        t0 = (-b - sq) / a; t1 = (-b + sq) / a;
+        return true;
+    }
+    if (shape == 2) {
+        float a = dot(d.xy, d.xy), b = dot(o.xy, d.xy), c = dot(o.xy, o.xy) - 1.0;
+        if (a < 1e-12) { if (c > 0.0) return false; }
+        else {
+            float disc = b * b - a * c;
+            if (disc <= 0.0) return false;
+            float sq = sqrt(disc);
+            t0 = (-b - sq) / a; t1 = (-b + sq) / a;
+        }
+        if (abs(d.z) < 1e-12) { if (abs(o.z) > 1.0) return false; }
+        else {
+            float za = (-1.0 - o.z) / d.z, zb = (1.0 - o.z) / d.z;
+            t0 = max(t0, min(za, zb)); t1 = min(t1, max(za, zb));
+        }
+        return t1 > t0;
+    }
+    for (int k = 0; k < 3; k++) {
+        if (abs(d[k]) < 1e-12) { if (abs(o[k]) > 1.0) return false; continue; }
+        float a = (-1.0 - o[k]) / d[k], b = (1.0 - o[k]) / d[k];
+        t0 = max(t0, min(a, b)); t1 = min(t1, max(a, b));
+    }
+    return t1 > t0;
+}
+float fog_depth(vec3 d, float tmax, out vec3 light) {
+    vec3 eye = G[2].xyz, up = G[3].xyz;
+    float tau = 0.0;
+    vec3 lit = vec3(0.0);
+    float sa = G[0].y;
+    if (sa > 0.0) {
+        float Hh = G[0].z, ta;
+        if (Hh <= 0.0) ta = sa * tmax;
+        else {
+            float u0 = dot(eye, up) - G[0].w, s = dot(d, up);
+            float tc = abs(s) > 1e-6 ? -u0 / s : -1.0;
+            float a = 0.0, b = tmax;
+            ta = 0.0;
+            float segs[3] = float[3](0.0, (tc > 0.0 && tc < tmax) ? tc : tmax, tmax);
+            for (int k = 0; k < 2; k++) {
+                a = segs[k]; b = segs[k + 1];
+                if (b <= a) continue;
+                float um = u0 + s * (a + b) * 0.5;
+                if (um <= 0.0) ta += sa * (b - a);
+                else if (abs(s) < 1e-6) ta += sa * exp(-u0 / Hh) * (b - a);
+                else ta += sa * Hh / s * (exp(-(u0 + s * a) / Hh) - exp(-min((u0 + s * b) / Hh, 80.0)));
+            }
+        }
+        tau += ta;
+        lit += ta * G[1].rgb;
+    }
+    int np = int(G[0].x);
+    for (int k = 0; k < np; k++) {
+        int P = 4 + 5 * k;
+        vec3 o = vec3(dot(G[P].xyz, eye) + G[P].w, dot(G[P + 1].xyz, eye) + G[P + 1].w, dot(G[P + 2].xyz, eye) + G[P + 2].w);
+        vec3 dd = vec3(dot(G[P].xyz, d), dot(G[P + 1].xyz, d), dot(G[P + 2].xyz, d));
+        int shape = int(G[P + 3].z);
+        float t0, t1;
+        if (!fog_span(o, dd, shape, t0, t1)) continue;
+        t0 = max(t0, 0.0); t1 = min(t1, tmax);
+        if (t1 <= t0) continue;
+        float soft = G[P + 3].y, sum = 0.0;
+        for (int j = 0; j < 8; j++) {
+            float tt = mix(t0, t1, (float(j) + 0.5) / 8.0);
+            float r = fog_shape_r(o + dd * tt, shape);
+            sum += smoothstep(1.0, 1.0 - soft, r);
+        }
+        float tp = G[P + 3].x * (t1 - t0) * sum / 8.0;
+        tau += tp;
+        lit += tp * G[P + 4].rgb;
+    }
+    light = tau > 1e-6 ? lit / tau : vec3(0.0);
+    return tau;
+}
+// ---- lamps in the fog (fog_density_at ... fog_lamps in Shaders.swift) ----
+// Light from the lamps scattered toward the eye by the fog along the view ray:
+// at each step, each lamp's light there (its traced beam, its doors and pattern,
+// its shadow map: what stands in the light cuts a shaft out of the beam, and the
+// fog it came through), times the fog's density there and its phase (fog throws
+// light mostly onward: brightest looking toward a lamp), dimmed by the fog
+// between there and the eye. In frame light, like a white surface under the lamp.
+//   LP = SV[40] = (lamps, shadows on, phase g, dither seed)   LT/BT as relight's
+//   SV[5 l ..] = lamp l's shadow map view (shadow_vis's S rows); its map is at
+//   l * 5 * res * res in `maps`.
+
+float fog_density_at(vec3 x) {
+    float sg = 0.0;
+    if (G[0].y > 0.0) {
+        float u = dot(x, G[3].xyz) - G[0].w;
+        sg += G[0].z > 0.0 && u > 0.0 ? G[0].y * exp(-u / G[0].z) : G[0].y;
+    }
+    int np = int(G[0].x);
+    for (int k = 0; k < np; k++) {
+        int P = 4 + 5 * k;
+        vec3 q = vec3(dot(G[P].xyz, x) + G[P].w, dot(G[P + 1].xyz, x) + G[P + 1].w, dot(G[P + 2].xyz, x) + G[P + 2].w);
+        float r = fog_shape_r(q, int(G[P + 3].z));
+        if (r < 1.0) sg += G[P + 3].x * smoothstep(1.0, 1.0 - G[P + 3].y, r);
+    }
+    return sg;
+}
+
+vec2 shaft_vogel(uint k, uint n) {
+    float r = sqrt((float(k) + 0.5) / float(n));
+    float th = float(k) * 2.39996323;
+    return r * vec2(cos(th), sin(th));
+}
+vec2 shaft_tap(int l, ivec2 t, uint res) {
+    t = clamp(t, ivec2(0), ivec2(res) - 1);
+    uint n = res * res, base = uint(l) * 5u * n, j = uint(t.y) * res + uint(t.x);
+    return vec2(maps[base + 3u * n + j], maps[base + 4u * n + j]);   // transmittance, median ray depth
+}
+
+// How much of lamp l reaches x past what stands in its light (its shadow map).
+float lamp_shadow(vec3 x, int l) {
+    int S = 5 * l;
+    vec3 pc = vec3(dot(SV[S].xyz, x) + SV[S].w, dot(SV[S + 1].xyz, x) + SV[S + 1].w, dot(SV[S + 2].xyz, x) + SV[S + 2].w);
+    float fx = SV[S + 3].x, res = SV[S + 3].y;
+    if (pc.z <= 0.0 || res < 1.0) return 1.0;
+    vec2 uv = vec2(fx * pc.x / pc.z, fx * pc.y / pc.z) + res * 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(res)))) return 1.0;
+    float dr = length(pc);
+    float bias = 0.01 * dr + 2.0 * dr / fx;
+    float lit = 0.0;
+    for (uint k = 0u; k < 4u; k++) {
+        vec2 tp = shaft_tap(l, ivec2(uv + shaft_vogel(k, 4u) * 1.5), uint(res));
+        float occl = (tp.x < 0.97 && tp.y > 0.0 && tp.y < dr - bias) ? 1.0 - tp.x : 0.0;
+        lit += 1.0 - occl;
+    }
+    return lit / 4.0;
+}
+
+// Lamp l's light arriving at x (rgb, frame light on a white surface facing it).
+vec3 lamp_at(vec3 x, int l) {
+    int L = 6 * l;
+    vec3 d = LT[L].xyz - x;
+    float dl = length(d);
+    float dist_m = max(dl * LT[L + 3].w, 0.05);
+    vec3 w = -d / max(dl, 1e-9), aim = LT[L + 1].xyz, right = LT[L + 3].xyz, upl = cross(right, aim);
+    float ct = dot(w, aim);
+    if (ct <= 0.0) return vec3(0.0);
+    float th = acos(min(ct, 1.0));
+    float ph = atan(abs(dot(w, upl)), abs(dot(w, right)));
+    float tb = clamp(pow(th / (M_PI_F / 2.0), 1.0 / 1.3) * 32.0 - 0.5, 0.0, 31.0);
+    float pb = clamp(ph / (M_PI_F / 2.0) * 8.0 - 0.5, 0.0, 7.0);
+    int t0 = min(int(tb), 30), p0 = min(int(pb), 6);
+    float ft = tb - float(t0), fp = pb - float(p0);
+    int B = l * 256;
+    vec3 cd = mix(mix(BT[B + t0 * 8 + p0].rgb, BT[B + t0 * 8 + p0 + 1].rgb, fp),
+                  mix(BT[B + (t0 + 1) * 8 + p0].rgb, BT[B + (t0 + 1) * 8 + p0 + 1].rgb, fp), ft);
+    vec3 e3 = cd * LT[L + 1].w / (dist_m * dist_m);
+    vec2 xy = vec2(dot(w, right), dot(w, upl)) / max(ct, 1e-3);
+    float soft = 0.025;
+    vec4 L5 = LT[L + 5], L4 = LT[L + 4];
+    e3 *= smoothstep(L5.x - soft, L5.x + soft, xy.x) * (1.0 - smoothstep(L5.y - soft, L5.y + soft, xy.x))
+        * smoothstep(L5.z - soft, L5.z + soft, xy.y) * (1.0 - smoothstep(L5.w - soft, L5.w + soft, xy.y));
+    if (L4.x >= 0.0) {
+        vec2 uv = 0.5 + 0.5 * vec2(xy.x, -xy.y) / L4.y;
+        float m = textureLod(patterns, vec3(uv, L4.x), L4.z).r;
+        float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+        e3 *= mix(L4.w, m, inside);
+    }
+    return e3 * LT[L + 2].rgb;
+}
+
+vec3 fog_lamps(vec3 d, float tmax, vec2 px) {
+    vec4 LP = SV[40];
+    int nl = int(LP.x);
+    if (nl <= 0) return vec3(0.0);
+    vec3 eye = G[2].xyz;
+    // March only as far as the lamps can matter: past the farthest, a little.
+    float reach = 0.0;
+    for (int l = 0; l < nl; l++) reach = max(reach, length(LT[6 * l].xyz - eye));
+    float tEnd = min(tmax, reach * 2.5 + 10.0 / max(LT[3].w, 1e-6));
+    if (tEnd <= 0.0) return vec3(0.0);
+    const int N = 32;
+    float dt = tEnd / float(N);
+    // Dither the steps (fixed in the finder, a new offset each lens sample).
+    float jit = fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))) + LP.w);
+    float g = LP.z, g2 = g * g;
+    vec3 acc = vec3(0.0);
+    float tau = 0.0;
+    for (int k = 0; k < N; k++) {
+        float t = (float(k) + jit) * dt;
+        vec3 x = eye + d * t;
+        float sg = fog_density_at(x);
+        if (sg > 1e-7) {
+            vec3 lit = vec3(0.0);
+            for (int l = 0; l < nl; l++) {
+                vec3 e = lamp_at(x, l);
+                if (!any(greaterThan(e, vec3(0.0)))) continue;
+                if (LP.y > 0.5) e *= lamp_shadow(x, l);
+                // The fog between the lamp and here (at this point's density).
+                vec3 tl = LT[6 * l].xyz - x;
+                float dl = length(tl);
+                e *= exp(-sg * dl);
+                // Henyey-Greenstein: the light's way on (lamp -> x) against the way to the eye (-d).
+                float c = dot(-tl / max(dl, 1e-9), -d);
+                float ph = (1.0 - g2) / (4.0 * M_PI_F * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5));
+                lit += e * ph;
+            }
+            acc += exp(-tau) * sg * M_PI_F * lit * dt;
+        }
+        tau += sg * dt;
+    }
+    return acc;
+}
+
+vec3 through_fog(vec3 c, float tau, vec3 L) {
+    float tr = exp(-tau);
+    vec3 lin = to_lin(c) * tr + L * (1.0 - tr);
+    return vec3(lin_to_srgb(lin.r), lin_to_srgb(lin.g), lin_to_srgb(lin.b));
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uint W = uint(K[0].x), H = uint(K[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
+    float t = f[3 * n + i];
+    bool foggy = G[0].y > 0.0 || G[0].x > 0.0;
+    if (t < 1e-3 && !foggy) return;
+    vec2 q = (vec2(p) + 0.5 - K[1].xy) / K[0].zw;
+    vec3 dc;
+    if (K[1].z > 0.5) {                    // equidistant fisheye: radius = angle
+        float th = length(q);
+        dc = vec3(th > 1e-6 ? q / th * sin(th) : q, cos(th));
+    } else {
+        dc = normalize(vec3(q, 1.0));
+    }
+    vec3 d = normalize(K[2].xyz * dc.x + K[3].xyz * dc.y + K[4].xyz * dc.z);
+    vec3 back = K[6].z > 0.5 ? sky_at(d, K[1].w) : K[7].rgb;
+    float backDist = G[1].w;                 // the sky: as far as fog goes
+    if (K[6].w > 0.5) {
+        // The shells, blurred as the live render blurs a splat at that depth.
+        vec3 o = K[8].xyz;
+        float dist;
+        vec4 c0 = shell_at(o, d, dist);
+        vec4 acc = c0;
+        int nL = int(K[28].y);
+        if (nL > 0 && K[1].z < 0.5) {
+            int L = 61;
+            int nT = int(K[28].z);
+            float zc = max(dist * dc.z, 1e-4);
+            float k = K[L].y - 1.0 / zc;
+            float a = K[L].z;
+            vec2 centre = K[L + nT + 4].xy;
+            vec2 qv = (vec2(p) + 0.5 - centre) / K[L + nT + 4].z;
+            float ql = length(qv);
+            vec2 qd = ql > 1e-4 ? qv / ql : vec2(1.0, 0.0), qp = vec2(-qd.y, qd.x);
+            float tt = clamp(ql / 1.25, 0.0, 1.0) * float(nT - 1);
+            int i0 = min(int(tt), nT - 2);
+            vec4 m = mix(K[L + 2 + i0], K[L + 3 + i0], tt - float(i0));
+            vec2 mu = qd * (m.x * a);
+            float sr = sqrt(max(m.y, 0.0)) * a, st = sqrt(max(m.z, 0.0)) * a;
+            float fxk = K[0].z * abs(k);
+            float tr = fxk * fxk * (sr * sr + st * st), cap = 2.0 * K[28].x * K[28].x;
+            float g = tr > cap ? sqrt(cap / tr) : 1.0;
+            float sigPx = fxk * g * max(sr, st);
+            if (sigPx > 0.6) {
+                float spacing = sigPx * 0.78;
+                float lvl = log2(max(1.0, spacing * K[10].w * float(textureSize(shellCol, 0).x) / K[0].z));
+                acc = vec4(0.0); float wsum = 0.0;
+                for (int j = 0; j < 32; j++) {
+                    vec4 gs = K[29 + j];
+                    vec2 off = k * g * (mu + qd * (gs.x * sr) + qp * (gs.y * st));
+                    vec2 qj = q + off;
+                    vec3 dj = normalize(K[2].xyz * qj.x + K[3].xyz * qj.y + K[4].xyz);
+                    float dd;
+                    acc += shell_at_level(o, dj, dd, lvl) * gs.z;
+                    wsum += gs.z;
+                }
+                acc /= max(wsum, 1e-6);
+            }
+            acc.rgb *= m.w;
+        }
+        back = acc.rgb + (1.0 - acc.a) * back;
+        if (t > 0.5 && c0.a > 0.5) f[4 * n + i] = dist;
+        if (c0.a > 0.5) backDist = dist;
+    }
+    vec3 c = vec3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+    if (foggy) {
+        vec3 L;
+        if (t > 1e-3) {
+            float tb = fog_depth(d, backDist, L);
+            back = through_fog(back, tb, L);
+        }
+        float zs = f[4 * n + i];
+        if (t < 0.999 && zs > 0.0) {
+            float a = 1.0 - t;
+            float ts = fog_depth(d, zs, L);
+            c = through_fog(c / a, ts, L) * a;
+        }
+        // The lamps' light in the fog in front of what this pixel shows.
+        if (SV[40].x > 0.0) {
+            float tm = t < 0.5 && zs > 0.0 ? zs : backDist;
+            vec3 beams = fog_lamps(d, tm, vec2(p) + K[1].xy);
+            if (any(greaterThan(beams, vec3(0.0)))) {
+                float a = 1.0 - t;
+                if (a > 1e-3) c = vec3(lin_to_srgb(srgb_to_lin(c.r / a) + beams.r), lin_to_srgb(srgb_to_lin(c.g / a) + beams.g),
+                                       lin_to_srgb(srgb_to_lin(c.b / a) + beams.b)) * a;
+                back = vec3(lin_to_srgb(srgb_to_lin(back.r) + beams.r), lin_to_srgb(srgb_to_lin(back.g) + beams.g),
+                            lin_to_srgb(srgb_to_lin(back.b) + beams.b));
+            }
+        }
+    }
+    vec3 o3;
+    if (K[6].y > 0.5) {                    // a place: renormalise the leak, the background where empty
+        float keep = smoothstep(0.85, 0.97, t);
+        o3 = mix(c / max(1.0 - t, 0.03), c + t * back, keep);
+    } else {
+        o3 = c + t * back;
+    }
+    f[3 * i] = o3.x; f[3 * i + 1] = o3.y; f[3 * i + 2] = o3.z;
+    f[3 * n + i] = 0.0;
+}

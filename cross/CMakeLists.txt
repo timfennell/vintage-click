@@ -25,7 +25,39 @@ FetchContent_Declare(SDL3
 FetchContent_MakeAvailable(SDL3)
 
 find_package(Threads REQUIRED)
-add_executable(VintageClick WIN32 src/main.cpp)
+
+# The GPU kernels (shaders/*.comp, translated from the Mac app's Metal in
+# Shaders.swift): GLSL compiled to SPIR-V with glslc (the Vulkan SDK's, or the
+# system's), embedded in the program, run through SDL_GPU on Vulkan.
+find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin" REQUIRED)
+set(VC_KERNELS accumulate streak develop viewfinder meter dof_pack dof_tiles dof_blur relight shadow_vis flare_probe lens_fx background_fill negative shell_store develop16)
+set(spv_dir ${CMAKE_BINARY_DIR}/spv)
+file(GLOB shader_lib ${CMAKE_SOURCE_DIR}/shaders/*.glsl)
+set(spv_files)
+foreach(k IN LISTS VC_KERNELS)
+  add_custom_command(OUTPUT ${spv_dir}/${k}.spv
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${spv_dir}
+    COMMAND ${GLSLC} --target-env=vulkan1.1 -O -I ${CMAKE_SOURCE_DIR}/shaders
+            ${CMAKE_SOURCE_DIR}/shaders/${k}.comp -o ${spv_dir}/${k}.spv
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/${k}.comp ${shader_lib}
+    COMMENT "glslc ${k}.comp")
+  list(APPEND spv_files ${spv_dir}/${k}.spv)
+endforeach()
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gen/shaders_spv.h
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/gen
+  COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/gen/shaders_spv.h "-DNAMES=${VC_KERNELS}" -DDIR=${spv_dir}
+          -P ${CMAKE_SOURCE_DIR}/cmake/embed_spirv.cmake
+  DEPENDS ${spv_files} ${CMAKE_SOURCE_DIR}/cmake/embed_spirv.cmake
+  COMMENT "Embedding the GPU kernels")
+add_custom_target(vc_shaders DEPENDS ${CMAKE_BINARY_DIR}/gen/shaders_spv.h)
+
+add_executable(VintageClick WIN32 src/main.cpp src/movie.cpp src/platform.cpp)
+add_dependencies(VintageClick vc_shaders)
+target_include_directories(VintageClick PRIVATE ${CMAKE_BINARY_DIR}/gen)
+if(WIN32)
+  target_sources(VintageClick PRIVATE src/app.rc)   # the app icon and version info
+  target_link_libraries(VintageClick PRIVATE mfplat mfreadwrite mfuuid ole32)   # the movie camera's encoder
+endif()
 target_include_directories(VintageClick PRIVATE src third_party)
 target_link_libraries(VintageClick PRIVATE SDL3::SDL3-static Threads::Threads)
 if(MSVC)

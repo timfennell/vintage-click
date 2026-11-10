@@ -83,7 +83,10 @@ struct Font {
     std::vector<unsigned char> data;
     stbtt_fontinfo info{};
     bool ok = false;
-    struct Glyph { int w, h, xoff, yoff; float advance; std::vector<unsigned char> bmp; };
+    struct Glyph {
+        int w, h, xoff, yoff; float advance; std::vector<unsigned char> bmp;
+        int pad = -1; float haloBlur = 0; std::vector<float> halo;   // the glow: coverage blurred, padded by `pad` each side
+    };
     std::map<std::pair<int, int>, Glyph> cache;   // (codepoint, pixel size)
 
     bool load(const std::string& path) {
@@ -94,17 +97,78 @@ struct Font {
         ok = stbtt_InitFont(&info, data.data(), stbtt_GetFontOffsetForIndex(data.data(), 0)) != 0;
         return ok;
     }
-    const Glyph& glyph(int cp, int size) {
+    /// `size` is a point size, as the Mac's fonts take it: the em, not the whole line.
+    float scaleFor(int size) const { return stbtt_ScaleForMappingEmToPixels(&info, float(size)); }
+    Glyph& glyph(int cp, int size) {
         auto key = std::make_pair(cp, size);
         auto it = cache.find(key);
         if (it != cache.end()) return it->second;
         Glyph g{};
-        float s = stbtt_ScaleForPixelHeight(&info, float(size));
+        float s = scaleFor(size);
         int adv, lsb; stbtt_GetCodepointHMetrics(&info, cp, &adv, &lsb);
         g.advance = adv * s;
+        bool missing = stbtt_FindGlyphIndex(&info, cp) == 0;
+        if (missing && (cp == 0x25B6 || cp == 0x25C0 || cp == 0x25B2 || cp == 0x25BC || cp == 0x25CF || cp == 0x25C9)) {
+            // The marks the menus use (▶ ◀ ▲ ▼ ● ◉), drawn when the font has none: 4 x 4 samples a pixel.
+            int n = std::max(3, int(size * 0.62f));
+            g.w = g.h = n;
+            g.xoff = int(size * 0.06f);
+            int asc, desc, gap; stbtt_GetFontVMetrics(&info, &asc, &desc, &gap);
+            g.yoff = -int(asc * s * 0.72f);
+            g.advance = n + size * 0.18f;
+            g.bmp.assign(size_t(n) * n, 0);
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++) {
+                    int c = 0;
+                    for (int sy = 0; sy < 4; sy++)
+                        for (int sx = 0; sx < 4; sx++) {
+                            float u = (x + (sx + 0.5f) / 4) / n, v = (y + (sy + 0.5f) / 4) / n;
+                            bool in = false;
+                            float r = std::sqrt((u - 0.5f) * (u - 0.5f) + (v - 0.5f) * (v - 0.5f));
+                            if (cp == 0x25B6) in = u >= 0.1f && std::fabs(v - 0.5f) <= 0.45f * (1 - (u - 0.1f) / 0.85f);
+                            if (cp == 0x25C0) in = u <= 0.9f && std::fabs(v - 0.5f) <= 0.45f * (1 - (0.9f - u) / 0.85f);
+                            if (cp == 0x25B2) in = v <= 0.9f && std::fabs(u - 0.5f) <= 0.45f * (1 - (0.9f - v) / 0.85f);
+                            if (cp == 0x25BC) in = v >= 0.1f && std::fabs(u - 0.5f) <= 0.45f * (1 - (v - 0.1f) / 0.85f);
+                            if (cp == 0x25CF) in = r <= 0.32f;
+                            if (cp == 0x25C9) in = r <= 0.2f || (r >= 0.36f && r <= 0.47f);
+                            c += in;
+                        }
+                    g.bmp[size_t(y) * n + x] = (unsigned char)(c * 255 / 16);
+                }
+            return cache.emplace(key, std::move(g)).first->second;
+        }
         unsigned char* b = stbtt_GetCodepointBitmap(&info, s, s, cp, &g.w, &g.h, &g.xoff, &g.yoff);
         if (b) { g.bmp.assign(b, b + size_t(g.w) * g.h); stbtt_FreeBitmap(b, nullptr); }
         return cache.emplace(key, std::move(g)).first->second;
+    }
+    /// The glyph's glow (ViewfinderHUD's text shadow: blurred to about 0.45 x the size), made once.
+    void makeHalo(Glyph& g, int size, float blur) {
+        if (g.pad >= 0 && std::fabs(g.haloBlur - blur) < 1e-4f) return;
+        g.haloBlur = blur;
+        float sigma = std::max(0.5f, size * blur / 2);
+        int pad = int(std::ceil(sigma * 2.5f));
+        int W = g.w + 2 * pad, H = g.h + 2 * pad;
+        std::vector<float> a(size_t(W) * H, 0.f), t(size_t(W) * H, 0.f);
+        for (int y = 0; y < g.h; y++)
+            for (int x = 0; x < g.w; x++) a[size_t(y + pad) * W + x + pad] = g.bmp[size_t(y) * g.w + x] / 255.f;
+        std::vector<float> k(2 * pad + 1);
+        float ks = 0;
+        for (int i = -pad; i <= pad; i++) { k[i + pad] = std::exp(-0.5f * i * i / (sigma * sigma)); ks += k[i + pad]; }
+        for (auto& v : k) v /= ks;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                float sum = 0;
+                for (int i = -pad; i <= pad; i++) { int xx = x + i; if (xx >= 0 && xx < W) sum += a[size_t(y) * W + xx] * k[i + pad]; }
+                t[size_t(y) * W + x] = sum;
+            }
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                float sum = 0;
+                for (int i = -pad; i <= pad; i++) { int yy = y + i; if (yy >= 0 && yy < H) sum += t[size_t(yy) * W + x] * k[i + pad]; }
+                a[size_t(y) * W + x] = sum;
+            }
+        g.halo = std::move(a);
+        g.pad = pad;
     }
     static std::vector<int> codepoints(const std::string& s) {
         std::vector<int> out;
@@ -126,28 +190,34 @@ struct Font {
         for (int cp : codepoints(s)) x += glyph(cp, size).advance;
         return x;
     }
-    /// Draws text with its top-left at (x, y); `glow` 0 for print, ~0.35 for light.
-    void draw(Canvas& cv, const std::string& s, float x, float y, int size, RGBA c, float glow = 0.3f) {
-        if (!ok) return;
-        float scale = stbtt_ScaleForPixelHeight(&info, float(size));
+    /// Draws text with its top-left at (x, y). `glow` > 0: projected light, as the
+    /// Mac's finder and menus letter it: a soft shadow in the text's own colour
+    /// (0.55 of it, blurred to about 0.45 x the size) under the letters.
+    void draw(Canvas& cv, const std::string& s, float x, float y, int size, RGBA c, float glow = 0.45f, float shadowAlpha = 0.55f) {
+        if (!ok || size < 1) return;
+        float scale = scaleFor(size);
         int asc, desc, gap; stbtt_GetFontVMetrics(&info, &asc, &desc, &gap);
         float base = y + asc * scale;
-        int gr = glow > 0 ? std::max(1, int(size * 0.12f)) : 0;
-        for (int cp : codepoints(s)) {
+        auto cps = codepoints(s);
+        if (glow > 0) {
+            float gx0 = x;
+            RGBA shadow{c.r, c.g, c.b, c.a * shadowAlpha};
+            for (int cp : cps) {
+                Glyph& g = glyph(cp, size);
+                makeHalo(g, size, glow);
+                int W = g.w + 2 * g.pad, H = g.h + 2 * g.pad;
+                int ox = int(gx0 + g.xoff) - g.pad, oy = int(base + g.yoff) - g.pad;
+                for (int yy = 0; yy < H; yy++)
+                    for (int xx = 0; xx < W; xx++) {
+                        float v = g.halo[size_t(yy) * W + xx];
+                        if (v > 0.004f) cv.blend(ox + xx, oy + yy, shadow, v);
+                    }
+                gx0 += g.advance;
+            }
+        }
+        for (int cp : cps) {
             const Glyph& g = glyph(cp, size);
             int gx = int(x + g.xoff), gy = int(base + g.yoff);
-            if (gr > 0)
-                for (int yy = -gr; yy < g.h + gr; yy++)
-                    for (int xx = -gr; xx < g.w + gr; xx++) {
-                        // A cheap halo: the glyph's coverage nearby, faded.
-                        float m = 0;
-                        for (int dy = -gr; dy <= gr; dy += std::max(1, gr / 2))
-                            for (int dx = -gr; dx <= gr; dx += std::max(1, gr / 2)) {
-                                int sx = xx + dx, sy = yy + dy;
-                                if (sx >= 0 && sy >= 0 && sx < g.w && sy < g.h) m = std::max(m, g.bmp[size_t(sy) * g.w + sx] / 255.f * (1 - std::sqrt(float(dx * dx + dy * dy)) / (gr * 1.5f)));
-                            }
-                        cv.add(gx + xx, gy + yy, c, m * glow * 0.35f);
-                    }
             for (int yy = 0; yy < g.h; yy++)
                 for (int xx = 0; xx < g.w; xx++) cv.blend(gx + xx, gy + yy, c, g.bmp[size_t(yy) * g.w + xx] / 255.f);
             x += g.advance;
@@ -168,7 +238,7 @@ inline float drawLED(Canvas& cv, const std::string& text, float x0, float y0, fl
     if (int(glyphs.size()) > cells) glyphs.erase(glyphs.begin(), glyphs.end() - cells);
     glyphs.insert(glyphs.begin(), size_t(cells - int(glyphs.size())), {' ', false});
     float w = h * 0.52f, t = h * 0.11f, slant = h * 0.12f;
-    RGBA lit{1.0f, 0.12f, 0.10f, 1}, ghost{1.0f, 0.12f, 0.10f, 0.07f};
+    RGBA lit{0.92f, 0.29f, 0.19f, 1}, ghost{0.92f, 0.29f, 0.19f, 0.07f};   // the Mac's calibrated (1, 0.12, 0.10) as it shows
     for (int k = 0; k < cells; k++) {
         float x = x0 + k * w * 1.45f;
         auto pt = [&](float fx, float fy) { return V2{x + fx * w + (1 - fy) * slant, y0 + fy * h}; };

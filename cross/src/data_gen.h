@@ -11,6 +11,7 @@ inline const std::vector<Lens>& lensBag() {
         Lens{"Ohi Kor 35mm f/1.4", "the fast 35 mm for available light", 35.0f, 1.4f, 16.0f, 0.0f, 9, 0.5f, 0.1f, 0.5f, 0.3f, 0.0008f, 0.035f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Field Assignment"},
         Lens{"Ohi Kor 50mm f/1.4", "the standard fast fifty", 50.0f, 1.4f, 16.0f, 0.1f, 7, 0.45f, 0.15f, 0.40f, 0.45f, 0.0005f, 0.03f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Field Assignment"},
         Lens{"Ohi Kor 105mm f/2.5", "the portrait telephoto", 105.0f, 2.5f, 22.0f, 0.15f, 7, 0.25f, 0.05f, 0.25f, 1.0f, 0.0004f, 0.02f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Field Assignment"},
+        Lens{"Ohi Kor 135mm f/2", "the fast 135 f/2 (Ai-S): smooth, glowing wide open, purple-green fringes, crisp by f/4", 135.0f, 2.0f, 22.0f, 0.0f, 9, 0.3f, 0.1f, 0.3f, 1.3f, 0.0003f, 0.035f, Projection::Rectilinear, 0.0f, 0.04f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Field Assignment"},
         Lens{"Ohi Kor 180mm f/2.8 ED", "the low-dispersion 180, sports and wildlife", 180.0f, 2.8f, 32.0f, 0.0f, 9, 0.2f, 0.0f, 0.2f, 1.8f, 0.0002f, 0.006f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Field Assignment"},
         Lens{"Ohi Kor 300mm f/4.5 ED", "the field 300, compressed distance", 300.0f, 4.5f, 32.0f, 0.0f, 7, 0.15f, 0.0f, 0.15f, 3.5f, 0.0002f, 0.008f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Field Assignment"},
         Lens{"Itabashi Takuma 28mm f/3.5 SC", "the multi-coated M42 screw-mount 28: crisp, flare-resistant wide", 28.0f, 3.5f, 16.0f, 0.0f, 6, 0.3f, 0.0f, 0.5f, 0.4f, 0.0018f, 0.01f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Screw-Mount Classics"},
@@ -44,18 +45,28 @@ inline const std::vector<Lens>& lensBag() {
         Lens{"Burnside Bendy 50mm f/2.5", "the bendy tilting lens: steer a sharp sweet spot anywhere, the rest melts away", 50.0f, 2.5f, 22.0f, 0.0f, 0, 0.3f, 0.1f, 0.45f, 0.45f, 0.0015f, 0.04f, Projection::Rectilinear, 0.0f, 0.15f, 1.0f, 1.2f, 1.6f, Movement::Tilt, 15.0f, false, 0.0f, 1.0f, 0.0f, 0, "Toys & Mods"},
         Lens{"Ohi PC-Kor 35mm f/3.5", "the first perspective-control lens for 35 mm (1962): shift 11 mm to keep buildings straight", 35.0f, 3.5f, 32.0f, 0.0f, 6, 0.12f, 0.0f, 0.2f, 0.3f, 0.0012f, 0.006f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::Shift, 11.0f, false, 0.0f, 1.0f, 0.0f, 0, "Toys & Mods"},
         Lens{"Ohi PC-Kor 28mm f/3.5", "the wider shift lens (1975-83) for architecture and landscape", 28.0f, 3.5f, 22.0f, 0.0f, 7, 0.12f, 0.0f, 0.22f, 0.3f, 0.0014f, 0.006f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::Shift, 11.0f, false, 0.0f, 1.0f, 0.0f, 0, "Toys & Mods"},
+        Lens{"Lahntal Elmax 21mm f/3.4", "the symmetrical 21 (Super-Angulon type): deep, dark-cornered, needs a shoe finder", 21.0f, 3.4f, 22.0f, 0.0f, 10, 0.2f, 0.0f, 0.65f, 0.4f, 0.0007f, 0.004f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Elmarit 28mm f/2.8", "the compact reportage 28", 28.0f, 2.8f, 22.0f, 0.2f, 8, 0.25f, 0.0f, 0.45f, 0.7f, 0.0005f, 0.006f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Summax 35mm f/2", "the little 35 f/2 of 1979, the 'bokeh king': soft, round, calm", 35.0f, 2.0f, 16.0f, 0.1f, 8, 0.3f, -0.25f, 0.35f, 0.7f, 0.0004f, 0.01f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Summax 50mm f/2", "the rangefinder's standard 50 f/2: sharp wide open, quietly rendered", 50.0f, 2.0f, 16.0f, 0.0f, 10, 0.2f, 0.0f, 0.25f, 0.7f, 0.0003f, 0.008f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Summilar 50mm f/1.4", "the fast 50 f/1.4: a glow and swirl wide open, crisp by f/4", 50.0f, 1.4f, 16.0f, 0.0f, 10, 0.4f, 0.1f, 0.4f, 0.7f, 0.0004f, 0.02f, Projection::Rectilinear, 0.0f, 0.05f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Noctar 50mm f/1.0", "the 1976 f/1 night fifty: dreamy, heavy, bright-rimmed bokeh", 50.0f, 1.0f, 16.0f, 0.0f, 10, 0.55f, 0.25f, 0.55f, 1.0f, 0.0005f, 0.03f, Projection::Rectilinear, 0.0f, 0.08f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Summilar 75mm f/1.4", "the 1980 portrait 75 f/1.4: wafer-thin focus, creamy backgrounds", 75.0f, 1.4f, 16.0f, 0.0f, 9, 0.35f, 0.0f, 0.35f, 0.75f, 0.0004f, 0.03f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Elmarit 90mm f/2.8", "the slim 90 f/2.8: the rangefinder's portrait lens", 90.0f, 2.8f, 22.0f, 0.0f, 9, 0.2f, 0.0f, 0.2f, 1.0f, 0.0003f, 0.01f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
+        Lens{"Lahntal Tele-Elmax 135mm f/4", "the short-barrelled 135 f/4: the longest the rangefinder frames", 135.0f, 4.0f, 22.0f, 0.0f, 9, 0.15f, 0.0f, 0.15f, 1.5f, 0.0002f, 0.008f, Projection::Rectilinear, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, Movement::None, 0.0f, false, 0.0f, 1.0f, 0.0f, 0, "Rangefinder"},
     };
     return bag;
 }
 
 inline const std::vector<LensShelf>& lensShelves() {
     static const std::vector<LensShelf> s = {
-        {"Field Assignment", "the magazine photographer's prime kit of the 70s and 80s", 8},
+        {"Field Assignment", "the magazine photographer's prime kit of the 70s and 80s", 9},
         {"Screw-Mount Classics", "the multi-coated M42 primes of the early 70s", 6},
         {"Bokeh Monsters", "fast glass for melting backgrounds", 7},
         {"Macro", "close focusing, flat field, sharp corners", 4},
         {"Exotic", "rare vintage and odd optics", 7},
         {"Toys & Mods", "plastic, reversed, bent and shifted: lenses for breaking the rules", 7},
+        {"Rangefinder", "the Lahntal R5's own lenses: small, sharp, quiet", 9},
     };
     return s;
 }

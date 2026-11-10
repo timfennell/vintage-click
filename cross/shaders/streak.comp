@@ -1,0 +1,43 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// streak (Shaders.swift): a thin vertical wire across the stop (the
+// Anamorfake's monofilament) diffracts a share of all light sideways: a
+// horizontal line whose tails fall off with distance, a little longer in red
+// than blue. Made per row as a sum of four exponentials, each a forward and a
+// backward running sum, so a one-pixel highlight streaks as well as a lamp.
+// Z = (shortest length px, share of light, -, -). Clipped highlights stand for
+// far brighter sources than the scan could record, so count them up.
+layout(local_size_x = 32) in;
+layout(std430, set = 0, binding = 0) readonly buffer Acc { vec4 acc[]; };
+layout(std430, set = 1, binding = 0) buffer Out { vec4 outv[]; };
+layout(std140, set = 2, binding = 0) uniform Optics { vec4 O[12]; };
+layout(std140, set = 2, binding = 1) uniform Dev { vec4 D; };
+layout(std140, set = 2, binding = 2) uniform Streak { vec4 Z; };
+#include "vc.glsl"
+
+void main() {
+    uint y = gl_GlobalInvocationID.x;
+    uint W = uint(O[0].x), H = uint(O[0].y);
+    if (y >= H) return;
+    uint row = y * W;
+    for (uint i = 0u; i < W; i++) outv[row + i] = vec4(0.0);
+    for (uint j = 0u; j < 4u; j++) {
+        float len = Z.x * pow(4.0, float(j));
+        vec3 a = exp(-1.0 / (len * vec3(1.15, 1.0, 0.85)));
+        vec3 norm = (1.0 - a) / (1.0 + a) * (Z.y / 4.0);
+        vec3 run = vec3(0.0);
+        for (uint i = 0u; i < W; i++) {
+            vec3 v = acc[row + i].rgb * D.rgb;
+            v += max(v - 0.85, 0.0) * 12.0;
+            run = v + a * run;
+            outv[row + i].rgb += norm * run;
+        }
+        run = vec3(0.0);
+        for (int i = int(W) - 1; i >= 0; i--) {
+            vec3 v = acc[row + uint(i)].rgb * D.rgb;
+            v += max(v - 0.85, 0.0) * 12.0;
+            run = v + a * run;
+            outv[row + uint(i)].rgb += norm * (run - v);
+        }
+    }
+}

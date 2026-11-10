@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// dof_tiles (Shaders.swift): each 16-pixel tile's largest blur.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D dep;
+layout(std430, set = 1, binding = 0) buffer Tiles { float tiles[]; };
+layout(std140, set = 2, binding = 0) uniform Dof { vec4 D[48]; };
+#include "dof.glsl"
+
+void main() {
+    uvec2 tp = gl_GlobalInvocationID.xy;
+    uint W = uint(D[0].x), H = uint(D[0].y), tw = (W + 15u) / 16u, th = (H + 15u) / 16u;
+    if (tp.x >= tw || tp.y >= th) return;
+    float mx = 0.0;
+    for (uint y = 0u; y < 16u; y += 2u)
+        for (uint x = 0u; x < 16u; x += 2u) {
+            uvec2 p = min(tp * 16u + uvec2(x, y), uvec2(W - 1u, H - 1u));
+            DofSpread s = dof_spread(vec2(p) + 0.5, texelFetch(dep, ivec2(p), 0).r);
+            mx = max(mx, max(s.sr.x, s.sr.y) + length(s.shift));
+        }
+    tiles[tp.y * tw + tp.x] = mx;
+}

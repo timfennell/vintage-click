@@ -1,0 +1,28 @@
+#version 450
+// shell_store (Shaders.swift): the distant splats' render into the shells'
+// textures: colour with coverage (a place's leaks renormalised, as
+// background_fill does) and the distance along each ray (1e6 where empty).
+//   B[0] = (W, H, fx, place)  B[1] = (cx, cy, -, -)
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, set = 0, binding = 0) readonly buffer Frame { float f[]; };
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D col;
+layout(set = 1, binding = 1, r32f) uniform writeonly image2D dep;
+layout(std140, set = 2, binding = 0) uniform Store { vec4 B[2]; };
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uint W = uint(B[0].x), H = uint(B[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
+    vec3 c = vec3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+    float t = f[3 * n + i], med = f[4 * n + i];
+    float a = 1.0 - t;
+    if (B[0].w > 0.5) {
+        float keep = smoothstep(0.85, 0.97, t);
+        c = mix(c / max(1.0 - t, 0.03), c, keep);
+        a = mix(1.0, 1.0 - t, keep);
+    }
+    float dist = (a < 0.03 || !(med > 0.0) || med > 1e8) ? 1e6 : med;   // the renderer's depth runs along the ray
+    imageStore(col, ivec2(p), vec4(c, a));
+    imageStore(dep, ivec2(p), vec4(dist));
+}

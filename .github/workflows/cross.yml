@@ -50,7 +50,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers spirv-tools libgl1-mesa-dev xorg-dev \
+          sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers spirv-tools glslc libgl1-mesa-dev xorg-dev \
             libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libxrandr-dev \
             libxinerama-dev libxcursor-dev libxi-dev libasound2-dev libpulse-dev
 

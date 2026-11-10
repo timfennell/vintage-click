@@ -1,0 +1,12 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// develop (Shaders.swift): the exposure into a print, 8 bits a channel.
+layout(std430, set = 1, binding = 0) buffer Out { uint outp[]; };
+#include "develop_body.glsl"
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    uvec3 c = uvec3(round(develop_px(p) * 255.0));
+    outp[idx(p)] = c.r | (c.g << 8) | (c.b << 16) | (255u << 24);
+}

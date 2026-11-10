@@ -22,6 +22,9 @@ inline int (*render_ex)(const float*, float, float, float, float, int, int, cons
 inline int (*set_lens)(const float*, int);
 inline int (*set_camera_model)(const char*);
 inline void (*shutdown)(void);
+inline int (*set_colors)(const float*, const float*);   // the splats' colours, replaced in place (relighting)
+inline void (*set_render_degree)(int);
+inline void (*set_region)(float, float, float, float) = nullptr;   // draw only near (r > 0) or far (r < 0) splats                  // SH bands drawn (0: base colour only, -1: all)
 
 /// Load from `dir`; "" on success, otherwise why not.
 inline std::string load(const std::string& dir) {
@@ -40,8 +43,10 @@ inline std::string load(const std::string& dir) {
         return fn != nullptr;
     };
     if (!get(last_error, "sr_last_error") || !get(set_splats, "sr_set_splats") || !get(render_ex, "sr_render_ex") ||
-        !get(set_lens, "sr_set_lens") || !get(set_camera_model, "sr_set_camera_model") || !get(shutdown, "sr_shutdown"))
+        !get(set_lens, "sr_set_lens") || !get(set_camera_model, "sr_set_camera_model") || !get(shutdown, "sr_shutdown") ||
+        !get(set_colors, "sr_set_colors") || !get(set_render_degree, "sr_set_render_degree"))
         return std::string(name) + " is missing a function (an older renderer?)";
+    get(set_region, "sr_set_region");   // the distant shells use it when it is there
     return "";
 }
 }

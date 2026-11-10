@@ -1,0 +1,18 @@
+#version 450
+// dof_pack (Shaders.swift): the sharp frame into textures (colour
+// premultiplied with coverage; depth).
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, set = 0, binding = 0) readonly buffer Frame { float f[]; };
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D col;
+layout(set = 1, binding = 1, r32f) uniform writeonly image2D dep;
+layout(std140, set = 2, binding = 0) uniform Dof { vec4 D[48]; };
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uint W = uint(D[0].x), H = uint(D[0].y);
+    if (p.x >= W || p.y >= H) return;
+    uint n = W * H, i = p.y * W + p.x;
+    float t = f[3 * n + i], z = f[4 * n + i];
+    imageStore(col, ivec2(p), vec4(f[3 * i], f[3 * i + 1], f[3 * i + 2], 1.0 - t));
+    imageStore(dep, ivec2(p), vec4((t > 0.97 || !(z > 0.0)) ? 1e6 : z));
+}

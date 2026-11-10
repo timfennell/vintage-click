@@ -41,6 +41,9 @@ struct Lens {
     std::string collection;
 
     bool isFisheye() const { return projection != Projection::Rectilinear; }
+    /// Which bodies take it: the rangefinder its own lenses (and the f/0.95 Dream), a reflex the rest.
+    bool forRangefinder() const { return collection == "Rangefinder" || name.rfind("Kwanon 50mm f/0.95", 0) == 0; }
+    bool forReflex() const { return collection != "Rangefinder"; }
     std::vector<float> apertureStops() const {
         static const float full[] = {1.0f, 1.4f, 2, 2.8f, 4, 5.6f, 8, 11, 16, 22, 32};
         std::vector<float> s{maxAperture};
@@ -89,7 +92,7 @@ struct FilmStock {
 
 #include "data_gen.h"
 
-struct ShutterSpeed { const char* label; float seconds; };
+struct ShutterSpeed { std::string label; float seconds; };
 inline const std::vector<ShutterSpeed>& shutterSpeeds() {
     static const std::vector<ShutterSpeed> s = {
         {"1", 1}, {"2", 1 / 2.f}, {"4", 1 / 4.f}, {"8", 1 / 8.f}, {"15", 1 / 15.f}, {"30", 1 / 30.f},
@@ -121,6 +124,110 @@ inline float pupilWeight(V2 l, V2 q, const Lens& lens, float fNumber) {
     return (1 + lens.soapBubble * std::pow(r, 6.f)) / (1 + lens.soapBubble * 0.25f);
 }
 
+/// A filter screwed onto the front of the lens (Filters.swift). Everything that
+/// reaches the film (and the finder, and the meter behind the lens) goes through
+/// it: `transmission` is how much of each colour it passes (linear Rec.709), and
+/// the effect filters scatter some of the light.
+struct LensFilter {
+    std::string name, about, group;
+    V3 transmission{1, 1, 1};
+    int starPoints = 0;          // 0: none; 2: a single line; 4, 6, 8: a star
+    float starStrength = 0;
+    bool spectral = false;       // a diffraction grating: the spikes split into rainbows
+    float glow = 0, soften = 0, veil = 0;
+    /// The light it loses, in stops (what a TTL meter makes up for).
+    float stops() const { return -std::log2(std::max(transmission.x * 0.2126f + transmission.y * 0.7152f + transmission.z * 0.0722f, 1e-4f)); }
+    bool hasEffect() const { return starPoints > 0 || glow > 0 || soften > 0 || veil > 0; }
+    /// O[9..11] for the shaders. `threshold`: how bright a point must be to throw spikes or a halo.
+    void optics(float threshold, V4* o) const {
+        o[0] = {transmission.x, transmission.y, transmission.z, 0};
+        o[1] = {float(starPoints), starStrength, spectral ? 1.f : 0.f, 0.35f};
+        o[2] = {glow, soften, veil, threshold};
+    }
+};
+
+inline const std::vector<LensFilter>& lensFilters() {
+    auto t = [](const char* n, const char* a, const char* g, V3 tr) { LensFilter f{n, a, g}; f.transmission = tr; return f; };
+    auto star = [](const char* n, const char* a, int pts, float s, bool spec) {
+        LensFilter f{n, a, "effects"}; f.starPoints = pts; f.starStrength = s; f.spectral = spec; return f;
+    };
+    auto soft = [](const char* n, const char* a, float glow, float soften, float veil) {
+        LensFilter f{n, a, "effects"}; f.glow = glow; f.soften = soften; f.veil = veil; return f;
+    };
+    static const std::vector<LensFilter> f = {
+        LensFilter{"No filter", "just the lens", "none"},
+        t("Hoshiya ND2", "neutral density, 1 stop: open up a stop in bright light", "neutral density", {0.5f, 0.5f, 0.5f}),
+        t("Hoshiya ND4", "neutral density, 2 stops", "neutral density", {0.25f, 0.25f, 0.25f}),
+        t("Hoshiya ND8", "neutral density, 3 stops: fast film wide open in daylight", "neutral density", {0.125f, 0.125f, 0.125f}),
+        t("Hoshiya ND64", "neutral density, 6 stops: long exposures by day", "neutral density", {1.f / 64, 1.f / 64, 1.f / 64}),
+        t("Hoshiya Y2 Yellow", "b&w: the everyday filter; skies a touch deeper, clouds stand out", "black & white", {0.98f, 0.90f, 0.30f}),
+        t("Hoshiya G Orange", "b&w: dark skies, smooth skin, haze cut through", "black & white", {0.95f, 0.42f, 0.04f}),
+        t("Hoshiya R1 Red", "b&w: dramatic black skies, foliage darkens", "black & white", {0.90f, 0.07f, 0.02f}),
+        t("Rochester Wrattle No. 29 Deep Red", "b&w: near night-for-day; skies all but black", "black & white", {0.80f, 0.015f, 0.01f}),
+        t("Hoshiya X1 Green", "b&w: foliage lightens, skin deepens, skies a little darker", "black & white", {0.30f, 0.78f, 0.25f}),
+        t("Rochester Wrattle No. 47 Blue", "b&w: haze and fog deepen, reds go dark", "black & white", {0.04f, 0.14f, 0.86f}),
+        t("Hoshiya Skylight 1A", "colour: takes the blue off shade and sky, a faint warmth", "colour correction", {1.0f, 0.97f, 0.97f}),
+        t("Tiffield 81A Warming", "colour: a gentle warm-up, for overcast and shade", "colour correction", {1.0f, 0.92f, 0.80f}),
+        t("Tiffield 85B Amber", "colour: tungsten film in daylight (or a golden look)", "colour correction", {0.95f, 0.66f, 0.36f}),
+        t("Tiffield 80A Blue", "colour: daylight film under tungsten lights", "colour correction", {0.36f, 0.56f, 0.98f}),
+        star("Hoshiya Cross Screen 4X", "a cross screen: four spikes off every bright point", 4, 1, false),
+        star("Hoshiya Cross Screen 6X", "six spikes off every bright point", 6, 0.85f, false),
+        star("Hoshiya Cross Screen 8X", "eight spikes: very 70s", 8, 0.75f, false),
+        star("Coquin Diffractor 040", "bright points throw rainbow streaks to either side", 2, 1.2f, true),
+        star("Coquin Spectral Cross 041", "rainbow streaks in four directions", 4, 1, true),
+        star("Coquin Spectral Star 042", "an eight-ray rainbow starburst", 8, 0.8f, true),
+        soft("Tiffield Soft/Glow 1", "a gentle glow round highlights, still sharp beneath", 0.35f, 0.12f, 0),
+        soft("Tiffield Soft/Glow 3", "a dreamy glow: highlights bloom, edges melt", 0.9f, 0.35f, 0),
+        soft("Tiffield Pro-Haze 2", "a pale veil over everything, low contrast and soft light", 0.3f, 0.15f, 0.35f),
+        soft("Tiffield Black Haze 1", "halos on the lights, shadows kept deep: night city film", 0.6f, 0.06f, 0),
+        soft("Tiffield Fog 2", "a heavy fog: the scene recedes into light", 0.4f, 0.25f, 0.8f),
+    };
+    return f;
+}
+
+/// The camera the photographer carries (CameraModel in Exif.swift): its make,
+/// model and serial go on every frame.
+struct CameraModel {
+    std::string make, model, serial;
+    int year;
+    std::string fullName() const { return make + " " + model; }
+    bool rangefinder() const { return make == "Lahntal"; }
+    bool shutterPriority() const { return make == "Kwanon" && model == "EF"; }
+    /// A movie camera: frame rate and shutter angle, not a speed dial.
+    bool isMotion() const { return make == "Wilmont"; }
+    /// The fastest speed it has (index into shutterSpeeds; the slowest is 1 s).
+    int fastestShutter() const {
+        int last = int(shutterSpeeds().size()) - 1;
+        if (!(shutterPriority() || rangefinder())) return last;
+        for (int i = 0; i <= last; i++) if (std::string(shutterSpeeds()[i].label) == "1000") return i;
+        return last;
+    }
+    std::string about() const {
+        if (isMotion()) return "1955 · 8-perf horizontal motion picture, reflex finder, frame rate and shutter angle";
+        if (rangefinder()) return "1971 · rangefinder: bright frames, a focusing patch, its own lenses, 1 s to 1/1000";
+        return shutterPriority() ? "1973 · shutter-priority auto, needle on an aperture scale, 1 s to 1/1000"
+                                 : "1974 · manual, needle on a speed scale, LED readouts, 1 s to 1/4000";
+    }
+    /// The bodies in the bag: the Ohi Kor S2; the Kwanon EF (inspired by the 1973
+    /// Canon EF); the Lahntal R5 (the early-70s Leica M5).
+    static const std::vector<CameraModel>& all() {
+        static const std::vector<CameraModel> a = {{"Ohi Kor", "S2", "7392051", 1974}, {"Kwanon", "EF", "0213874", 1973},
+                                                   {"Lahntal", "R5", "1287415", 1971}};
+        return a;
+    }
+    /// The bag's and the hidden one: the Wilmont W11 (inspired by the Wilcam W-11, an
+    /// 8-perf horizontal 35 mm motion picture camera; every lens covers its frame).
+    static const std::vector<CameraModel>& every() {
+        static const std::vector<CameraModel> a = [] {
+            auto v = all();
+            v.push_back({"Wilmont", "W11", "0110457", 1955});
+            return v;
+        }();
+        return a;
+    }
+    static constexpr int wilmont = 3;   // its index in every()
+};
+
 struct CameraBody {
     int lensIndex = 4;          // the 50 mm f/1.4
     int apertureIndex = 0;
@@ -134,6 +241,38 @@ struct CameraBody {
     float metresPerUnit = 1;
     float sceneEV = 12;
     float calibration = 0;
+    /// Lens movements: a tilt lens's tilt (degrees: x turns the focus plane
+    /// across the frame, y up and down), a shift lens's shift (mm, right and up).
+    V2 tilt, shift;
+    int modelIndex = 0;                 // into CameraModel::every()
+    const CameraModel& model() const { return CameraModel::every()[modelIndex]; }
+    /// Shutter-priority automatic (a body that has it): the camera sets the aperture.
+    int autoExposure = -1;              // -1 unset (on), 0 off, 1 on
+    bool autoOn() const { return model().shutterPriority() && autoExposure != 0; }
+    /// The lens has to fit: a rangefinder takes its own, a reflex the rest.
+    bool fits(const Lens& l) const { return model().isMotion() || (model().rangefinder() ? l.forRangefinder() : l.forReflex()); }
+    int filterIndex = 0;
+    const LensFilter& filter() const { return lensFilters()[filterIndex]; }
+    /// Whether this lens can take that filter (rear-filter lenses: colour and ND only).
+    bool fits(const LensFilter& f) const { return !(lens().rearFilter && f.hasEffect()); }
+    /// Finder blur (classic): strongly blurred splats are drawn at this opacity,
+    /// fewer of them (CameraBody.finderThinning; "fast" focus 0.1).
+    static inline float finderThinning = 0.05f;
+
+    /// Tilts or shifts the lens by `v` (stick or arrows, per second, times dt),
+    /// up to how far it goes. False when the lens has no movements.
+    bool move(V2 v) {
+        float most = lens().movementAmount;
+        V2* m = lens().movement == Movement::Tilt ? &tilt : lens().movement == Movement::Shift ? &shift : nullptr;
+        if (!m) return false;
+        *m = *m + v * (most * 0.6f);
+        float l = std::sqrt(m->x * m->x + m->y * m->y);
+        if (l > most) *m = *m * (most / l);
+        return true;
+    }
+    /// Where a shifted lens puts the optical axis, from the frame's centre, in
+    /// pixels of an image `width` wide (shifting up moves the scene down the frame).
+    V2 axisOffset(int width) const { return V2{-shift.x, shift.y} * (float(width) / 36); }
 
     const Lens& lens() const { return lensBag()[lensIndex]; }
     const FilmStock& stock() const { return filmStocks()[stockIndex]; }
@@ -145,12 +284,36 @@ struct CameraBody {
         snprintf(b, sizeof b, "%s at EI %.0f (%s%d)", stock().name.c_str(), ratedEI(), push > 0 ? "push +" : "pull ", push);
         return b;
     }
+    /// A stop between the clicks: a take pulling the iris from one key's to the next's (0: none).
+    float stopBetween = 0;
     float takingAperture() const {
+        if (stopBetween > 0) return stopBetween;
         auto s = lens().apertureStops();
         return s[std::min<size_t>(apertureIndex, s.size() - 1)];
     }
     float viewingAperture() const { return dofPreview ? takingAperture() : lens().maxAperture; }
-    const ShutterSpeed& shutter() const { return shutterSpeeds()[shutterIndex]; }
+    ShutterSpeed shutter() const {
+        if (!model().isMotion()) return shutterSpeeds()[shutterIndex];
+        // A movie camera's rotating shutter: open for its angle of each turn,
+        // one turn a frame (180° at 24 fps is 1/48 s).
+        char b[16];
+        snprintf(b, sizeof b, shutterAngle == std::round(shutterAngle) ? "%.0f°" : "%.1f°", shutterAngle);
+        return {b, shutterAngle / 360 / frameRate};
+    }
+
+    // ---- a movie camera (the Wilmont)
+    static const std::vector<float>& frameRates() { static const std::vector<float> r = {24, 25, 30, 48}; return r; }
+    static const std::vector<float>& shutterAngles() { static const std::vector<float> a = {180, 172.8f, 144, 90, 45, 22.5f}; return a; }
+    float frameRate = 24;
+    /// Degrees: any angle (a take eases between its keys'), set by the dial in steps.
+    float shutterAngle = 180;
+    int shutterAngleIndex() const {
+        int best = 0;
+        for (int i = 0; i < int(shutterAngles().size()); i++)
+            if (std::fabs(shutterAngles()[i] - shutterAngle) < std::fabs(shutterAngles()[best] - shutterAngle)) best = i;
+        return best;
+    }
+    void setShutterAngleIndex(int i) { shutterAngle = shutterAngles()[std::clamp(i, 0, int(shutterAngles().size()) - 1)]; }
     int framesLeft() const { return stock().exposures - framesShot; }
 
     float magnification() const {
@@ -179,18 +342,42 @@ struct CameraBody {
     float filmStops() const { return exposureStops() - reciprocityLoss(); }
 
     void meterShutter(float lum) {
+        // A movie camera keeps its angle: the operator sets the stop.
+        if (model().isMotion()) return;
         int best = 0; float bestErr = 1e9f;
-        for (int i = 0; i < int(shutterSpeeds().size()); i++) {
+        for (int i = 0; i <= model().fastestShutter(); i++) {
             CameraBody x = *this; x.shutterIndex = i;
             float e = std::fabs(x.exposureStops() + std::log2(lum / 0.18f));
             if (e < bestErr) { bestErr = e; best = i; }
         }
         shutterIndex = best;
     }
+    /// The aperture that best matches the meter at the set speed (shutter-priority).
+    void meterAperture(float lum) {
+        int best = apertureIndex; float bestErr = 1e9f;
+        for (int i = 0; i < int(lens().apertureStops().size()); i++) {
+            CameraBody x = *this; x.apertureIndex = i;
+            float e = std::fabs(x.exposureStops() + std::log2(lum / 0.18f));
+            if (e < bestErr) { bestErr = e; best = i; }
+        }
+        apertureIndex = best;
+    }
     void changeAperture(int d) {
         apertureIndex = std::clamp(apertureIndex + d, 0, int(lens().apertureStops().size()) - 1);
     }
-    void changeShutter(int d) { shutterIndex = std::clamp(shutterIndex + d, 0, int(shutterSpeeds().size()) - 1); }
+    void changeShutter(int d) {
+        // Faster (+) is a narrower angle.
+        if (model().isMotion()) { setShutterAngleIndex(shutterAngleIndex() + d); return; }
+        shutterIndex = std::clamp(shutterIndex + d, 0, model().fastestShutter()); }
+    /// Another body: its speeds and modes; the lens has to fit.
+    void chooseBody(int i) {
+        modelIndex = i % int(CameraModel::every().size());
+        shutterIndex = std::min(shutterIndex, model().fastestShutter());
+        if (!fits(lens())) {
+            const char* want = model().rangefinder() ? "Lahntal Summax 50mm f/2" : "Ohi Kor 50mm f/1.4";
+            for (int k = 0; k < int(lensBag().size()); k++) if (lensBag()[k].name == want) { chooseLens(k); break; }
+        }
+    }
     void turnFocus(float rate, float dt) {
         focusM = std::clamp(focusM * std::exp(rate * dt * 1.1f), lens().minFocusM, 200.f);
     }
@@ -203,6 +390,9 @@ struct CameraBody {
             if (std::fabs(stops[i] - n) < std::fabs(stops[best] - n)) best = i;
         apertureIndex = best;
         focusM = std::max(focusM, lens().minFocusM);
+        tilt = {}; shift = {};
+        // An effect filter cannot go on the back of a fisheye or mirror lens.
+        if (!fits(filter())) filterIndex = 0;
     }
     void loadRoll(int stock, int p) { stockIndex = stock; push = p; framesShot = 0; rollNumber += 1; }
 
@@ -276,11 +466,14 @@ struct CameraBody {
         float invFocus = metresPerUnit / focusM;
         float maxSigma = focalPx * 0.25f;
         std::vector<V4> p = {{1, invFocus, radiusUnits, (cells == 1 && table) ? 1.f : 0.f},
-                             {1 / (2 * float(cells)), 1, 0, maxSigma}};
+                             {1 / (2 * float(cells)), 1, (cells == 1 && table) ? finderThinning : 0.f, maxSigma}};
         if (table) p.insert(p.end(), table->begin(), table->end());
         p.resize(2 + tableSize);
+        // The image surface off the film by d mm moves focus by d / f^2 dioptres.
         float f = L.focalMM / 1000, perMM = 0.001f / (f * f) * metresPerUnit;
-        p.push_back({0, 0, L.curvatureRadial * perMM, L.curvatureTangential * perMM});
+        const float halfDiagonalMM = 21.63f, deg = float(M_PI) / 180;
+        p.push_back({std::tan(tilt.x * deg) * halfDiagonalMM * perMM, -std::tan(tilt.y * deg) * halfDiagonalMM * perMM,
+                     L.curvatureRadial * perMM, L.curvatureTangential * perMM});
         float open = L.maxAperture / n;
         float rim = cells > 1 ? L.sphericalAberration * open * open * metresPerUnit : 0;
         p.push_back({cell.x, cell.y, L.squeeze, rim});

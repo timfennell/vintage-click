@@ -1,0 +1,130 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// relight (Shaders.swift): gs_render's model, made for scans lit from the
+// camera. Each light reads the scan's broad colour (SH DC + band 1) in its own
+// direction for the diffuse, bands 2-3 at the half vector for the shine; the
+// house lights give back a share of the scan as captured. Writes new SH DC
+// colours (the renderer then draws with the higher bands off).
+//   G[0] = (camera position, house lights)   G[1] = (lights, N, K higher coeffs, shine colour)
+//   G[2] = (house lights' colour, shadows on)   G[3] = (shadow quality, version, daylight scan, -)
+//   per light 6 float4s (PlacedLight.packed); its beam table B (32 x 8 bins).
+// Windows keeps the scan's higher SH bands in half floats (two to a uint) to
+// spare video memory; VIS packs the eight lights' visibility bytes in two uints.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) uniform sampler2DArray patterns;
+layout(std430, set = 0, binding = 1) readonly buffer Means { float means[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Dc0 { float dc0[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Sh0 { uint sh0h[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Beams { vec4 BT[]; };
+layout(std430, set = 0, binding = 5) readonly buffer Vis { uint VIS[]; };
+layout(std430, set = 1, binding = 0) buffer OutDc { float out_dc[]; };
+layout(std140, set = 2, binding = 0) uniform Relight { vec4 G[4]; };
+layout(std140, set = 2, binding = 1) uniform Lamps { vec4 LT[48]; };
+
+const float M_PI_F = 3.14159265358979;
+const float C0 = 0.28209479177387814;
+const float C1 = 0.4886025119029199;
+
+float srgb_to_lin(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+float lin_to_srgb(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+vec3 srgb_to_lin3(vec3 c) { c = max(c, 0.0); return vec3(srgb_to_lin(c.r), srgb_to_lin(c.g), srgb_to_lin(c.b)); }
+vec3 lin_to_srgb3(vec3 c) { c = max(c, 0.0); return vec3(lin_to_srgb(c.r), lin_to_srgb(c.g), lin_to_srgb(c.b)); }
+
+void sh_basis(vec3 d, out float B[15]) {
+    float x = d.x, y = d.y, z = d.z, xx = x * x, yy = y * y, zz = z * z;
+    B[0] = -C1 * y; B[1] = C1 * z; B[2] = -C1 * x;
+    B[3] = 1.0925484305920792 * x * y; B[4] = -1.0925484305920792 * y * z;
+    B[5] = 0.31539156525252005 * (2.0 * zz - xx - yy); B[6] = -1.0925484305920792 * x * z;
+    B[7] = 0.5462742152960396 * (xx - yy);
+    B[8] = -0.5900435899266435 * y * (3.0 * xx - yy); B[9] = 2.890611442640554 * x * y * z;
+    B[10] = -0.4570457994644658 * y * (4.0 * zz - xx - yy);
+    B[11] = 0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
+    B[12] = -0.4570457994644658 * x * (4.0 * zz - xx - yy); B[13] = 1.445305721320277 * z * (xx - yy);
+    B[14] = -0.5900435899266435 * x * (xx - 3.0 * yy);
+}
+// Higher band coefficient j (0 ... 3K-1) of splat i, from the half floats.
+float sh_at(uint i, uint K, uint j) {
+    uint e = i * K * 3u + j;
+    vec2 two = unpackHalf2x16(sh0h[e >> 1]);
+    return (e & 1u) == 0u ? two.x : two.y;
+}
+vec3 sh_sum(vec3 d, uint i, uint K, uint first, uint last) {
+    float B[15];
+    sh_basis(d, B);
+    vec3 s = vec3(0.0);
+    for (uint k = first; k < min(last, K); k++)
+        s += B[k] * vec3(sh_at(i, K, 3u * k), sh_at(i, K, 3u * k + 1u), sh_at(i, K, 3u * k + 2u));
+    return s;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint N = uint(G[1].y), K = uint(G[1].z), nl = uint(G[1].x);
+    if (i >= N) return;
+    vec3 mean = vec3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
+    vec3 base = 0.5 + C0 * vec3(dc0[3 * i], dc0[3 * i + 1], dc0[3 * i + 2]);
+    float ambient = G[0].w;
+    vec3 v = normalize(mean - G[0].xyz);           // camera -> splat, as 3DGS reads SH
+    vec3 tint = G[2].rgb;
+    vec3 lin = srgb_to_lin3(base) * ambient * tint;
+    vec3 shine = vec3(0.0);
+    bool has_sh = K >= 8u;
+    if (has_sh && ambient > 0.0) shine += pow(ambient * tint, vec3(1.0 / 2.2)) * sh_sum(v, i, K, 0u, K);
+    const vec3 lum = vec3(0.2126, 0.7152, 0.0722);
+    for (uint l = 0u; l < nl; l++) {
+        uint L = 6u * l;
+        vec3 d = LT[L].xyz - mean;
+        float dist_m = max(length(d) * LT[L + 3u].w, 1e-3);
+        vec3 ldir = d / max(length(d), 1e-9);
+        // The head's traced beam, by angle off its axis and around it.
+        vec3 w = -ldir, aim = LT[L + 1u].xyz, right = LT[L + 3u].xyz, upl = cross(right, aim);
+        float ct = dot(w, aim);
+        if (ct <= 0.0) continue;
+        float th = acos(min(ct, 1.0));
+        float ph = atan(abs(dot(w, upl)), abs(dot(w, right)));
+        float tb = clamp(pow(th / (M_PI_F / 2.0), 1.0 / 1.3) * 32.0 - 0.5, 0.0, 31.0);
+        float pb = clamp(ph / (M_PI_F / 2.0) * 8.0 - 0.5, 0.0, 7.0);
+        int t0 = min(int(tb), 30), p0 = min(int(pb), 6);
+        float ft = tb - float(t0), fp = pb - float(p0);
+        uint B = l * 256u;
+        vec3 cd = mix(mix(BT[B + uint(t0 * 8 + p0)].rgb, BT[B + uint(t0 * 8 + p0 + 1)].rgb, fp),
+                      mix(BT[B + uint((t0 + 1) * 8 + p0)].rgb, BT[B + uint((t0 + 1) * 8 + p0 + 1)].rgb, fp), ft);
+        vec3 e3 = cd * LT[L + 1u].w / (dist_m * dist_m);
+        // Modifiers, in the light's frame: barn doors and flags cut the beam,
+        // a gobo or cookie is a mask.
+        vec2 xy = vec2(dot(w, right), dot(w, upl)) / max(ct, 1e-3);
+        float soft = 0.025;
+        vec4 L5 = LT[L + 5u], L4 = LT[L + 4u];
+        float cut = smoothstep(L5.x - soft, L5.x + soft, xy.x) * (1.0 - smoothstep(L5.y - soft, L5.y + soft, xy.x))
+                  * smoothstep(L5.z - soft, L5.z + soft, xy.y) * (1.0 - smoothstep(L5.w - soft, L5.w + soft, xy.y));
+        e3 *= cut;
+        if (L4.x >= 0.0) {
+            vec2 uv = 0.5 + 0.5 * vec2(xy.x, -xy.y) / L4.y;
+            float m = textureLod(patterns, vec3(uv, L4.x), L4.z).r;
+            float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+            e3 *= mix(L4.w, m, inside);
+        }
+        if (G[2].w > 0.5) e3 *= float((VIS[i * 2u + l / 4u] >> (8u * (l % 4u))) & 255u) / 255.0;     // shadowed
+        float e = dot(e3, lum);
+        if (e <= 0.0) continue;
+        vec3 col = LT[L + 2u].rgb * (e3 / e);
+        // Diffuse: the broad colour seen from the light's side. (A daylight
+        // scan's band 1 is the sun's doing: those relight from the base colour alone.)
+        bool camera_lit = G[3].z < 0.5;
+        vec3 diff = max(base + (K >= 3u && camera_lit ? sh_sum(-ldir, i, K, 0u, 3u) : vec3(0.0)), 0.0);
+        lin += srgb_to_lin3(diff) * e * col;
+        if (has_sh && camera_lit) {
+            vec3 h = normalize(v - ldir);
+            vec3 S = sh_sum(h, i, K, 3u, K);
+            vec3 full = max(base + sh_sum(h, i, K, 0u, 3u) + S, 0.0);
+            float Lf = dot(full, lum);
+            vec3 chroma = Lf > 1e-3 ? full / Lf : vec3(1.0);
+            float k = G[1].w;
+            vec3 sh_here = dot(S, lum) * ((1.0 - k) + k * chroma);
+            shine += pow(max(e * col, 0.0), vec3(1.0 / 2.2)) * sh_here * LT[L + 2u].w;
+        }
+    }
+    vec3 o = max(lin_to_srgb3(lin) + shine, 0.0);
+    vec3 dc = (o - 0.5) / C0;
+    out_dc[3 * i] = dc.x; out_dc[3 * i + 1] = dc.y; out_dc[3 * i + 2] = dc.z;
+}

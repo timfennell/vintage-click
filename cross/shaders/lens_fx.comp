@@ -1,0 +1,25 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// lens_fx (Shaders.swift): what an effect filter adds to the exposure, from
+// the whole of it (written before develop reads it). In exposed light, as
+// develop adds it.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, set = 0, binding = 0) readonly buffer Acc { vec4 acc[]; };
+layout(std430, set = 1, binding = 0) buffer Out { vec4 outv[]; };
+layout(std140, set = 2, binding = 0) uniform Optics { vec4 O[12]; };
+layout(std140, set = 2, binding = 1) uniform Dev { vec4 D; };
+#include "vc.glsl"
+#include "spectra.glsl"
+#include "filterfx.glsl"
+
+vec3 fxK;
+vec3 fx_src(vec2 q) { return acc[idx(clamp_px(ivec2(q)))].rgb * fxK; }
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
+    fxK = D.rgb * exp2(O[5].w) * O[9].rgb;
+    uint i = idx(p);
+    vec2 pc = vec2(p) + 0.5;
+    outv[i] = vec4(filter_fx(pc, acc[i].rgb * fxK, 20), 0.0);
+}

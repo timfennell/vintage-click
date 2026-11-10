@@ -1,0 +1,27 @@
+#version 450
+// flare_probe (Shaders.swift): how much of each flaring light the camera can
+// see: samples over its face, visible where nothing in the frame is nearer
+// than the light.   P[i] = (pixel, distance along the ray, face radius px)
+layout(local_size_x = 8) in;
+layout(std430, set = 0, binding = 0) readonly buffer Frame { float f[]; };
+layout(std430, set = 1, binding = 0) buffer Out { float outv[]; };
+layout(std140, set = 2, binding = 0) uniform Optics { vec4 O0; uvec4 C; };
+layout(std140, set = 2, binding = 1) uniform Probes { vec4 P[8]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= C.x) return;
+    vec4 q = P[i];
+    uint W = uint(O0.x), H = uint(O0.y), n = W * H;
+    float seen = 0.0, total = 0.0;
+    for (uint k = 0u; k < 16u; k++) {
+        float r = sqrt((float(k) + 0.5) / 16.0) * q.w, a = float(k) * 2.39996323;
+        vec2 pp = q.xy + r * vec2(cos(a), sin(a));
+        total += 1.0;
+        if (pp.x < 0.0 || pp.y < 0.0 || pp.x >= float(W) || pp.y >= float(H)) { seen += 1.0; continue; }
+        uint j = uint(pp.y) * W + uint(pp.x);
+        float t = f[3 * n + j], z = f[4 * n + j];
+        if (t > 0.6 || !(z > 0.0) || z > q.z * 0.97) seen += 1.0;
+    }
+    outv[i] = seen / total;
+}
