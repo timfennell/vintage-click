@@ -1,5 +1,5 @@
-VINTAGE CLICK for Windows (preview)
-===================================
+VINTAGE CLICK for Windows
+=========================
 
 A manual-focus 35 mm SLR from the 1970s, and a 3D Gaussian splat scan to walk
 around in. Focus on the split-prism screen, read the needle meter, choose a
@@ -12,7 +12,7 @@ STARTING IT
   2. Double-click VintageClick.exe.
   3. Windows may say "Windows protected your PC" (the program is not signed).
      Click "More info", then "Run anyway". It only asks the first time.
-  4. Choose a scan (.ply file), or drag one onto the window.
+  4. Choose a scan (.ply file) or a scene (.vcscene), or drag one onto the window.
 
 WHAT IT NEEDS
   - Windows 10 or 11, 64-bit.
@@ -22,7 +22,8 @@ WHAT IT NEEDS
   - 8 GB of memory for small scans, 16 GB for big ones.
 
 PHOTOS
-  Developed rolls go to Pictures\Vintage Click, by day, session and roll.
+  Developed rolls go to Pictures\Vintage Click, by day, session and roll
+  (Menu > Photos chooses another folder).
 
 CONTROLS                    Keyboard and mouse        Game controller
   walk / look               W A S D, mouse            sticks
@@ -42,7 +43,15 @@ CONTROLS                    Keyboard and mouse        Game controller
   On the light table: drag the loupe with the mouse (or the sticks), wheel or
   triggers for its power, arrows for the frame, Q / E for another session.
 
-This is a preview: the Mac version also has studio lighting, lens filters,
-tilt/shift and DNG files, which are still to come here.
+  On the light table: A / Return marks a keeper, Y / P sends the marked frames
+  (or all) to the enlarger for full prints, X / G opens the print wall.
+
+ALSO IN HERE (as on the Mac)
+  Studio lighting (L): place and fly lamps, gels, modifiers, house lights.
+  Lens filters (V), tilt / shift lenses (hold M + arrows), three camera bodies
+  and a hidden motion picture camera (W on the camera bag's body row).
+  Scene bundles (.vcscene) from the Scene Builder: fog, sounds, a start view.
+  Proofs and the enlarger, EXIF in every print, DNG negatives (Menu > Photos).
+  Menu > Settings > Controls lists every key and button.
 
 Free and open source (GPL-3.0): https://github.com/timfennell/vintage-click
