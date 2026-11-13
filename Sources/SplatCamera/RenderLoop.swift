@@ -869,6 +869,17 @@ final class RenderLoop {
         for i in 0..<src.count { e.flare[4 + 4 * i].w = seen[i] }
     }
 
+    /// A point within the pixel for sub-pupil `k` of `n` (Halton 2, 3; centred): none for a single look.
+    static func subpixel(_ k: Int, of n: Int) -> SIMD2<Float> {
+        guard n > 1 else { return .zero }
+        func halton(_ i: Int, _ b: Int) -> Float {
+            var f: Float = 1, r: Float = 0, i = i + 1
+            while i > 0 { f /= Float(b); r += f * Float(i % b); i /= b }
+            return r
+        }
+        return SIMD2(halton(k, 2), halton(k, 3)) - 0.5
+    }
+
     /// One sub-pupil of the exposure: render the view sheared to that lens
     /// point (focus plane fixed), add it to the film; develop after the last.
     private func step(_ e: ExposureJob) {
@@ -921,6 +932,10 @@ final class RenderLoop {
             $0.rows(eye: cam.position, up: e.lighting.up, metresPerUnit: metresPerUnit, light: e.lighting.fogLight)
         }
         fogSeed = Float(e.next) * 0.618034
+        // Each sub-pupil looks from a different point within the pixel: summed, the
+        // edges come out anti-aliased (a lamp blazing through leaves, its colour
+        // fringes), as film has no pixel grid to step along.
+        let jit = Self.subpixel(e.next, of: e.cells.count)
         // The photo in finder-sized tiles: each a render with the principal
         // point moved so it sees its part of the frame.
         for y0 in stride(from: 0, to: h, by: th) {
@@ -932,24 +947,27 @@ final class RenderLoop {
                     table: nil, axis: axis - origin,
                     fieldRadius: simd_length(SIMD2(Float(w), Float(h))) / 2, cell: d, patch: share))
                 guard render(photoSlot.index, view: vm, fx: fx,
-                             cx: axis.x + fx * d.x * invFocus - Float(x0),
-                             cy: axis.y + fx * d.y * invFocus - Float(y0)),
+                             cx: axis.x + fx * d.x * invFocus - Float(x0) + jit.x,
+                             cy: axis.y + fx * d.y * invFocus - Float(y0) + jit.y),
                       let tcb = queue.makeCommandBuffer(), let te = tcb.makeComputeCommandEncoder() else {
                     finish(e)
                     e.failed?("the renderer failed on sub-pupil \(e.next + 1) of \(e.cells.count)")
                     return
                 }
                 encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
-                          cx: axis.x + fx * d.x * invFocus - Float(x0), cy: axis.y + fx * d.y * invFocus - Float(y0),
+                          cx: axis.x + fx * d.x * invFocus - Float(x0) + jit.x, cy: axis.y + fx * d.y * invFocus - Float(y0) + jit.y,
                           fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows)
                 let first = e.next == 0 ? Float(1) : 0
                 var l = [SIMD4<Float>(c.x, c.y, 1, first), mask,
-                         SIMD4<Float>(Float(x0), Float(y0), Float(tw), Float(th))]
+                         SIMD4<Float>(Float(x0), Float(y0), Float(tw), Float(th)),
+                         // The lamps' faces shift with this sub-pupil (flare_faces).
+                         b.lens.isFisheye ? .zero : SIMD4<Float>(fx * d.x, fx * d.y, invFocus, share),
+                         SIMD4<Float>(jit.x, jit.y, 0, 0)]
                 te.setComputePipelineState(accumulatePSO)
                 te.setBuffer(photoSlot.buf, offset: photoSlot.off, index: 0)
                 te.setBytes(&o, length: o.count * 16, index: 1)
                 te.setBuffer(e.accum, offset: 0, index: 2)
-                te.setBytes(&l, length: 48, index: 3)
+                te.setBytes(&l, length: l.count * 16, index: 3)
                 te.setBytes(&faceRows, length: faceRows.count * 16, index: 4)
                 te.dispatchThreads(MTLSize(width: tw, height: th, depth: 1), threadsPerThreadgroup: tg)
                 te.endEncoding()

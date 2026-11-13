@@ -541,7 +541,12 @@ float glass_flaws(float2 d, float seed, float k, float dust, bool bubbles) {
 // transmittance, z the ray depth there). Its lens or panel at its true
 // brightness, seen at its angle, spread by the lamp's own defocus.
 // The lamps' distances follow the per-light rows: F[36 + li / 4][li % 4].
-float3 flare_faces(float2 p, float2 size, constant float4* F, float T, float z) {
+//   sub = a photo's sub-pupil: (fx x its lens offset, scene units -> px, focus 1/units, its share
+//   of the aperture as a radius); zero in the finder. Each sub-pupil sees the lamp
+//   shifted as anything at its distance is, so the lens blurs it (and what stands in
+//   front of it) by averaging, as the film would see it; the face's own blur is then
+//   only what one sub-pupil spreads.
+float3 flare_faces(float2 p, float2 size, constant float4* F, float T, float z, float4 sub) {
     int nl = int(F[0].x);
     float diag = length(size);
     float3 add = 0;
@@ -552,10 +557,14 @@ float3 flare_faces(float2 p, float2 size, constant float4* F, float T, float z) 
         float seen = (dist > 0 && z > 0 && z < dist * 0.97) ? T : 1.0;
         if (seen <= 0.001) continue;
         float2 s = a.xy * size;
+        float blurPx = b.w * diag;
+        if (sub.w > 0) {
+            s += sub.xy * (sub.z - 1 / max(dist, 1e-6));
+            blurPx *= sub.w;
+        }
         float2 A = fa.xy, B = fa.zw;
         float det = A.x * B.y - A.y * B.x;
         float rf = sqrt(max(abs(det), 0.25));                // its size, px
-        float blurPx = b.w * diag;
         float grow = (rf + blurPx) / rf;
         float2 d = p - s;
         if (dot(d, d) > (rf * grow + 4) * (rf * grow + 4) * 4) continue;
@@ -933,7 +942,7 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
             uint W = uint(O[0].x), H = uint(O[0].y), n = W * H;
             uint2 q = uint2(clamp(pe, float2(0), O[0].xy - 1));
             uint j = q.y * W + q.x;
-            float3 faces = flare_faces(pe, O[0].xy, FL, f[3 * n + j], f[4 * n + j]);
+            float3 faces = flare_faces(pe, O[0].xy, FL, f[3 * n + j], f[4 * n + j], float4(0));
             float3 fl = (lens_flare(pe / O[0].xy, O[0].xy, FL) + faces) * O[5].y * O[9].rgb * inside;
             outc = float3(lin_to_srgb(srgb_to_lin(outc.r) + fl.r), lin_to_srgb(srgb_to_lin(outc.g) + fl.g),
                           lin_to_srgb(srgb_to_lin(outc.b) + fl.b));
@@ -1282,28 +1291,29 @@ float3 lamp_at(float3 x, constant float4* L, device const float4* B, texture2d_a
     return e3 * L[2].rgb;
 }
 
-float3 fog_lamps(float3 d, float tmax, float2 px, constant float4* G, constant float4& LP,
+float3 fog_lamps(float3 d, float ta, float tb, thread float& tau, float2 px, constant float4* G, constant float4& LP,
                  constant float4* LT, device const float4* BT, constant float4* SV,
                  device const float* m0, device const float* m1, device const float* m2, device const float* m3,
                  device const float* m4, device const float* m5, device const float* m6, device const float* m7,
                  texture2d_array<float> patterns) {
+    // One stretch of the view ray, ta..tb; `tau` carries the fog's depth along it
+    // (a pixel marches to its surface, then on past it for what shows through).
     int nl = int(LP.x);
     if (nl <= 0) return 0;
     float3 eye = G[2].xyz;
     // March only as far as the lamps can matter: past the farthest, a little.
     float reach = 0;
     for (int l = 0; l < nl; l++) reach = max(reach, length(LT[6 * l].xyz - eye));
-    float tEnd = min(tmax, reach * 2.5 + 10 / max(LT[3].w, 1e-6));
-    if (tEnd <= 0) return 0;
-    const int N = 32;
-    float dt = tEnd / float(N);
+    tb = min(tb, reach * 2.5 + 10 / max(LT[3].w, 1e-6));
+    if (tb <= ta) return 0;
+    const int N = 28;
+    float dt = (tb - ta) / float(N);
     // Dither the steps (fixed in the finder, a new offset each lens sample).
     float jit = fract(52.9829189 * fract(dot(px, float2(0.06711056, 0.00583715))) + LP.w);
     float g = LP.z, g2 = g * g;
     float3 acc = 0;
-    float tau = 0;
     for (int k = 0; k < N; k++) {
-        float t = (float(k) + jit) * dt;
+        float t = ta + (float(k) + jit) * dt;
         float3 x = eye + d * t;
         float sg = fog_density_at(x, G);
         if (sg > 1e-7) {
@@ -1427,22 +1437,48 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
             back = through_fog(back, tb, L);
         }
         float zs = f[4 * n + i];
+        // A pixel the scan only partly covers may have no depth of its own (its
+        // middle never reached the surface): take the nearest neighbour's, so a
+        // leaf's edge is fogged as the leaf is.
+        if (!(zs > 0) && t < 0.999) {
+            float best = 0;
+            for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
+                int2 q = int2(p) + int2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
+                float z = f[4 * n + uint(q.y) * W + uint(q.x)];
+                if (z > 0 && (best == 0 || z < best)) best = z;
+            }
+            zs = best > 0 ? best : backDist;
+        }
+        // Something that barely covers the pixel (a stray, faint splat: a scan's
+        // floater) is fogged as what lies behind it, so it melts into the fog
+        // instead of hanging dark in front of it; solid things keep their depth.
+        // (In a place blurred splats never add up to solid, and leave the pixel
+        // part open: there coverage counts as full until the pixel is nearly empty,
+        // as frame_rgb renormalises it.)
+        float cover = K[6].y > 0.5 ? 1 - smoothstep(0.85, 0.97, t) : 1 - t;
+        float faint = 1 - smoothstep(0.08, 0.35, cover);
+        if (zs > 0) zs = mix(zs, backDist, faint);
         if (t < 0.999 && zs > 0) {
             float a = 1 - t;
             float ts = fog_depth(d, zs, G, L);
             c = through_fog(c / a, ts, L) * a;
         }
         // The lamps' light in the fog in front of what this pixel shows.
+        // The scan's part gets the light in front of it; what shows through, all of it.
         if (LP.x > 0) {
-            float tm = t < 0.5 && zs > 0 ? zs : backDist;
-            float3 beams = fog_lamps(d, tm, float2(p) + K[1].xy, G, LP, LT, BT, SV, m0, m1, m2, m3, m4, m5, m6, m7, patterns);
-            if (any(beams > 0)) {
-                float a = 1 - t;
-                if (a > 1e-3) c = float3(lin_to_srgb(srgb_to_lin(c.r / a) + beams.r), lin_to_srgb(srgb_to_lin(c.g / a) + beams.g),
-                                         lin_to_srgb(srgb_to_lin(c.b / a) + beams.b)) * a;
-                back = float3(lin_to_srgb(srgb_to_lin(back.r) + beams.r), lin_to_srgb(srgb_to_lin(back.g) + beams.g),
-                              lin_to_srgb(srgb_to_lin(back.b) + beams.b));
-            }
+            float tz = zs > 0 ? zs : backDist, tauL = 0;
+            float3 nearB = fog_lamps(d, 0, tz, tauL, float2(p) + K[1].xy,
+                                     G, LP, LT, BT, SV, m0, m1, m2, m3, m4, m5, m6, m7, patterns);
+            float3 farB = t > 1e-3 ? nearB + fog_lamps(d, tz, backDist, tauL, float2(p) + K[1].xy,
+                                     G, LP, LT, BT, SV, m0, m1, m2, m3, m4, m5, m6, m7, patterns) : nearB;
+            float a = 1 - t;
+            if (a > 1e-3 && any(nearB > 0))
+                c = float3(lin_to_srgb(srgb_to_lin(c.r / a) + nearB.r), lin_to_srgb(srgb_to_lin(c.g / a) + nearB.g),
+                           lin_to_srgb(srgb_to_lin(c.b / a) + nearB.b)) * a;
+            if (t > 1e-3 && any(farB > 0))
+                back = float3(lin_to_srgb(srgb_to_lin(back.r) + farB.r), lin_to_srgb(srgb_to_lin(back.g) + farB.g),
+                              lin_to_srgb(srgb_to_lin(back.b) + farB.b));
         }
     }
     float3 o3;
@@ -1494,7 +1530,22 @@ kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [
     float w = pupil(L[0].xy, field(float2(p) + 0.5, O), O, L[1].w) * L[0].z;
     float4 prev = L[0].w > 0.5 ? float4(0) : acc[i];
     // The lamps' own faces, behind whatever of the scan stands in front of them.
-    float3 faces = FL[0].x > 0 ? flare_faces(float2(p) + 0.5, O[0].xy, FL, f[3 * n + j], f[4 * n + j]) : 0;
+    // A pixel the scan only partly covers may have no depth of its own: the
+    // nearest neighbour's, so a leaf's edge hides the lamp as much as it covers.
+    float3 faces = 0;
+    if (FL[0].x > 0) {
+        float T = f[3 * n + j], z = f[4 * n + j];
+        if (!(z > 0) && T < 0.999) {
+            for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
+                int2 q = int2(g) + int2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= int(tw) || q.y >= int(th)) continue;
+                float zq = f[4 * n + uint(q.y) * tw + uint(q.x)];
+                if (zq > 0 && (!(z > 0) || zq < z)) z = zq;
+            }
+        }
+        // (The render was shifted within the pixel by L[4]: the faces with it.)
+        faces = flare_faces(float2(p) + 0.5 - L[4].xy, O[0].xy, FL, T, z, L[3]);
+    }
     acc[i] = prev + float4((to_lin(c) + faces) * L[1].rgb * w, w);
 }
 
@@ -1592,6 +1643,25 @@ static float3 develop_px(device const float4* acc, constant float4* O, constant 
     lin.g = acc_at(acc, pc, O).g;
     lin.b = acc_at(acc, c + (pc - c) * (1 + k), O).b;
     lin *= D.rgb * expo * vig * O[9].rgb;                 // O[9]: the filter's colour
+    // Bloom: light far past white (a lamp's face) doesn't stop at its edge on film:
+    // the lens's glare and the emulsion spread a share of it a few pixels round,
+    // so a lamp blazing through leaves bleeds softly over their edges instead of
+    // showing a cut-out staircase. Only the excess over white moves, and the
+    // light is kept (what spreads out of this pixel, the neighbours' brings in).
+    {
+        float3 scale = D.rgb * expo * O[9].rgb;
+        float3 here = acc_at(acc, pc, O).rgb * scale;
+        float3 keep = max(here - 1.0, 0.0);
+        float r = O[0].y * 0.0022;                      // ~4.5 px on a 2048-high frame
+        float3 inflow = 0;
+        for (uint j = 0; j < 16; j++) {
+            float2 o = vogel(j, 16) * r;
+            inflow += max(acc_at(acc, pc + o, O).rgb * scale - 1.0, 0.0);
+        }
+        inflow /= 16;
+        // Half the excess stays where it is (the core stays hot), half spreads.
+        lin += (inflow - keep) * 0.5 * vig;
+    }
     if (D.w > 0) lin += streaks[idx(p, O)].rgb * expo;    // D.w: the lens streaks
     if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) lin = max(lin + fx[idx(p, O)].rgb * vig, 0.0);
     // Lens flare from the lights shining into the lens, through the filter.
