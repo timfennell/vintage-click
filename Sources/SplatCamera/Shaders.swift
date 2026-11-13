@@ -1889,15 +1889,19 @@ kernel void dof_blur(device float* f [[buffer(0)]], constant float4* D [[buffer(
     float2 pc = float2(p) + 0.5;
     float z0 = dep.read(p).r;
     DofSpread s0 = dof_spread(pc, z0, D);
-    // How far to look: the largest blur that could reach here (3 x 3 tiles).
+    // How far to look: the largest blur that could reach here (dof_reach, gathered
+    // over the tiles round), smoothly between tile centres. Taken tile by tile, the
+    // look-radius stepped at tile edges: with a big blur those steps showed as a
+    // staircase along every out-of-focus edge.
     int tw = int((W + 15) / 16), th = int((H + 15) / 16);
-    int2 tc = int2(p) / 16;
-    float reach = max(s0.sr.x, s0.sr.y);
-    for (int dy = -1; dy <= 1; dy++)
-        for (int dx = -1; dx <= 1; dx++) {
-            int2 t = clamp(tc + int2(dx, dy), int2(0), int2(tw - 1, th - 1));
-            reach = max(reach, tiles[t.y * tw + t.x]);
-        }
+    float2 tf = pc / 16 - 0.5;
+    int2 t0 = int2(floor(tf));
+    float2 fr = tf - float2(t0);
+    float r00 = tiles[clamp(t0.y, 0, th - 1) * tw + clamp(t0.x, 0, tw - 1)];
+    float r10 = tiles[clamp(t0.y, 0, th - 1) * tw + clamp(t0.x + 1, 0, tw - 1)];
+    float r01 = tiles[clamp(t0.y + 1, 0, th - 1) * tw + clamp(t0.x, 0, tw - 1)];
+    float r11 = tiles[clamp(t0.y + 1, 0, th - 1) * tw + clamp(t0.x + 1, 0, tw - 1)];
+    float reach = max(max(s0.sr.x, s0.sr.y), mix(mix(r00, r10, fr.x), mix(r01, r11, fr.x), fr.y));
     if (reach < 0.75) {                                // in focus all round: as rendered, with the pupil's light
         f[3 * i] *= s0.light; f[3 * i + 1] *= s0.light; f[3 * i + 2] *= s0.light;
         return;
