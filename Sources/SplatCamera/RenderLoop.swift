@@ -202,8 +202,8 @@ final class RenderLoop {
 
     // MARK: the finder's blur (image space)
     private var dofPackPSO: MTLComputePipelineState!, dofTilesPSO: MTLComputePipelineState!, dofBlurPSO: MTLComputePipelineState!
-    private var dofReachPSO: MTLComputePipelineState!
-    private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?, dofReach: MTLBuffer?
+    private var dofReachPSO: MTLComputePipelineState!, dofBlocksPSO: MTLComputePipelineState!
+    private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?, dofReach: MTLBuffer?, dofBlocks: MTLBuffer?
     /// 48 equal-area points over the unit disc.
     static let dofSamples: [SIMD4<Float>] = (0..<48).map { j in let v = vogel(j, 48); return SIMD4(v.x, v.y, 0, 0) }
 
@@ -220,8 +220,9 @@ final class RenderLoop {
             dofDep = device.makeTexture(descriptor: d)
             dofTiles = device.makeBuffer(length: ((W + 15) / 16) * ((H + 15) / 16) * 4, options: .storageModePrivate)
             dofReach = device.makeBuffer(length: ((W + 15) / 16) * ((H + 15) / 16) * 4, options: .storageModePrivate)
+            dofBlocks = device.makeBuffer(length: ((W + 63) / 64 + 1) * ((H + 63) / 64 + 1) * 4, options: .storageModePrivate)
         }
-        guard let col = dofCol, let dep = dofDep, let tiles = dofTiles, let reach = dofReach else { return }
+        guard let col = dofCol, let dep = dofDep, let tiles = dofTiles, let reach = dofReach, let blocks = dofBlocks else { return }
         var D: [SIMD4<Float>] = [SIMD4(Float(W), Float(H), fx, fx * 0.25), SIMD4(cx, cy, metresPerUnit, Float(lens.count)),
                                  SIMD4(Float(CameraBody.tableSize), Float(col.mipmapLevelCount), 0, 0)] + lens
         var G = Self.dofSamples
@@ -244,9 +245,15 @@ final class RenderLoop {
             e.dispatchThreads(MTLSize(width: (W + 15) / 16, height: (H + 15) / 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             // How far each tile's blur reaches, gathered over the whole neighbourhood
             // it can reach (a leaf far out of focus spreads over many tiles).
+            let tw = (W + 15) / 16, th = (H + 15) / 16
+            e.setComputePipelineState(dofBlocksPSO)
+            e.setBuffer(tiles, offset: 0, index: 2)
+            e.setBuffer(blocks, offset: 0, index: 4)
+            e.dispatchThreads(MTLSize(width: (tw + 3) / 4, height: (th + 3) / 4, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             e.setComputePipelineState(dofReachPSO)
             e.setBuffer(tiles, offset: 0, index: 2)
             e.setBuffer(reach, offset: 0, index: 3)
+            e.setBuffer(blocks, offset: 0, index: 4)
             e.dispatchThreads(MTLSize(width: (W + 15) / 16, height: (H + 15) / 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             e.setComputePipelineState(dofBlurPSO)
             e.setBuffer(frame, offset: offset, index: 0)
@@ -475,6 +482,7 @@ final class RenderLoop {
         dofPackPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_pack")!)
         dofTilesPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_tiles")!)
         dofReachPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_reach")!)
+        dofBlocksPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blocks")!)
         dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         develop16PSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop16")!)

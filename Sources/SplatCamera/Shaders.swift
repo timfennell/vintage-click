@@ -1861,13 +1861,30 @@ kernel void dof_tiles(texture2d<float> dep [[texture(0)]], constant float4* D [[
 }
 // The largest blur that reaches each tile from any tile (not only its neighbours):
 // a tile whose spread, 2.5 x as dof_blur looks, covers the distance to this one.
+// The largest blur in each block of 4 x 4 tiles (64 px), for dof_reach's far look.
+kernel void dof_blocks(constant float4* D [[buffer(1)]], device const float* tiles [[buffer(2)]],
+                       device float* blocks [[buffer(4)]], uint2 bp [[thread_position_in_grid]]) {
+    uint W = uint(D[0].x), H = uint(D[0].y);
+    int tw = int((W + 15) / 16), th = int((H + 15) / 16);
+    int bw = (tw + 3) / 4, bh = (th + 3) / 4;
+    if (int(bp.x) >= bw || int(bp.y) >= bh) return;
+    float mx = 0;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+        int2 t = int2(bp) * 4 + int2(x, y);
+        if (t.x < tw && t.y < th) mx = max(mx, tiles[t.y * tw + t.x]);
+    }
+    blocks[bp.y * uint(bw) + bp.x] = mx;
+}
+
 kernel void dof_reach(constant float4* D [[buffer(1)]], device const float* tiles [[buffer(2)]],
-                      device float* reach [[buffer(3)]], uint2 tp [[thread_position_in_grid]]) {
+                      device float* reach [[buffer(3)]], device const float* blocks [[buffer(4)]],
+                      uint2 tp [[thread_position_in_grid]]) {
     uint W = uint(D[0].x), H = uint(D[0].y);
     int tw = int((W + 15) / 16), th = int((H + 15) / 16);
     if (int(tp.x) >= tw || int(tp.y) >= th) return;
     float mx = tiles[tp.y * uint(tw) + tp.x];
-    const int K = 16;                                // up to 16 tiles (256 px) away
+    // Near: tile by tile, up to 4 tiles (64 px) away.
+    const int K = 4;
     for (int dy = -K; dy <= K; dy++)
         for (int dx = -K; dx <= K; dx++) {
             int2 t = int2(tp) + int2(dx, dy);
@@ -1875,6 +1892,22 @@ kernel void dof_reach(constant float4* D [[buffer(1)]], device const float* tile
             float r = tiles[t.y * tw + t.x];
             float gap = max(0.0, length(float2(dx, dy)) - 1.5) * 16;
             if (r * 2.5 >= gap) mx = max(mx, r);
+        }
+    // Far: block by block (a blur at macro distances can cross half the frame),
+    // measured from the block's nearest edge, so nothing that could reach is missed.
+    int bw = (tw + 3) / 4, bh = (th + 3) / 4;
+    float2 here = (float2(tp) + 0.5) * 16;
+    const int KB = 24;                               // 24 blocks: ~1500 px
+    int2 bc = int2(tp) / 4;
+    for (int dy = -KB; dy <= KB; dy++)
+        for (int dx = -KB; dx <= KB; dx++) {
+            int2 b = bc + int2(dx, dy);
+            if (b.x < 0 || b.y < 0 || b.x >= bw || b.y >= bh) continue;
+            float r = blocks[b.y * bw + b.x];
+            if (r <= mx) continue;
+            float2 lo = float2(b) * 64, hi = lo + 64;
+            float2 nearest = clamp(here, lo, hi);
+            if (r * 2.5 >= length(here - nearest)) mx = r;
         }
     reach[tp.y * uint(tw) + tp.x] = mx;
 }
