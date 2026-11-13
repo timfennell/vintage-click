@@ -94,7 +94,7 @@ uint idx(uint2 p, constant float4* O) { return p.y * uint(O[0].x) + p.x; }
 float3 frame_rgb(device const float* f, uint2 p, constant float4* O) {
     uint n = uint(O[0].x * O[0].y), i = idx(p, O);
     float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
-    float t = f[3 * n + i];
+    float t = max(f[3 * n + i], 0.0);   // (negative: the background is in already)
     // In a place (O[4].w = 2) the scan surrounds you: what shows through is
     // the blend's leak, not a background. Blurred splats over each other
     // never add back up to solid (a single layer leaks about a third), so
@@ -109,7 +109,7 @@ float3 frame_rgb(device const float* f, uint2 p, constant float4* O) {
 // Distance along the view axis in metres (far away where nothing was hit).
 float frame_z(device const float* f, uint2 p, constant float4* O) {
     uint n = uint(O[0].x * O[0].y), i = idx(p, O);
-    float T = f[3 * n + i], d = f[4 * n + i];
+    float T = abs(f[3 * n + i]), d = f[4 * n + i];
     if (T > 0.97 || !(d > 0)) return 1e5;
     float2 uv = (float2(p) + 0.5 - O[1].xy) / O[0].zw;
     return d / sqrt(1 + dot(uv, uv)) * O[1].z;
@@ -942,7 +942,7 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
             uint W = uint(O[0].x), H = uint(O[0].y), n = W * H;
             uint2 q = uint2(clamp(pe, float2(0), O[0].xy - 1));
             uint j = q.y * W + q.x;
-            float3 faces = flare_faces(pe, O[0].xy, FL, f[3 * n + j], f[4 * n + j], float4(0));
+            float3 faces = flare_faces(pe, O[0].xy, FL, abs(f[3 * n + j]), f[4 * n + j], float4(0));
             float3 fl = (lens_flare(pe / O[0].xy, O[0].xy, FL) + faces) * O[5].y * O[9].rgb * inside;
             outc = float3(lin_to_srgb(srgb_to_lin(outc.r) + fl.r), lin_to_srgb(srgb_to_lin(outc.g) + fl.g),
                           lin_to_srgb(srgb_to_lin(outc.b) + fl.b));
@@ -969,7 +969,7 @@ kernel void probe(device const float* f [[buffer(0)]], constant float4* O [[buff
     for (int dy = -2; dy <= 2; dy++)
         for (int dx = -2; dx <= 2; dx++) {
             uint i = idx(clamp_px(c + int2(dx, dy), O), O);
-            float T = f[3 * n + i], d = f[4 * n + i];
+            float T = abs(f[3 * n + i]), d = f[4 * n + i];
             if (T < 0.5 && d > 0 && (best == 0 || d < best)) { best = d; solid = 1 - T; }
         }
     out[0] = best;
@@ -1359,7 +1359,7 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     uint W = uint(K[0].x), H = uint(K[0].y);
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
-    float t = f[3 * n + i];
+    float t = abs(f[3 * n + i]);
     bool foggy = G[0].y > 0 || G[0].x > 0 || G[4 + 5 * int(G[0].x)].x > 0;
     if (t < 1e-3 && !foggy) return;
     float2 q = (float2(p) + 0.5 - K[1].xy) / K[0].zw;
@@ -1448,17 +1448,23 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
                 float z = f[4 * n + uint(q.y) * W + uint(q.x)];
                 if (z > 0 && (best == 0 || z < best)) best = z;
             }
-            zs = best > 0 ? best : backDist;
+            if (best > 0) zs = best;
+            else {
+                // Further out (a leaf far out of focus spreads a wide, faint halo with
+                // no depth of its own): the nearest surface found, fading to "far" the
+                // further away it was, so the halo takes its leaf's fog without a seam
+                // and a lone floater in open fog still melts into it.
+                float R = float(H) * 0.04, foundD = R;
+                for (uint k = 0; k < 24; k++) {
+                    float2 o = vogel(k, 24) * R;
+                    int2 q = int2(float2(p) + o);
+                    if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
+                    float z = f[4 * n + uint(q.y) * W + uint(q.x)];
+                    if (z > 0 && (best == 0 || z < best)) { best = z; foundD = length(o); }
+                }
+                zs = best > 0 ? mix(best, backDist, smoothstep(0.5 * R, R, foundD)) : backDist;
+            }
         }
-        // Something that barely covers the pixel (a stray, faint splat: a scan's
-        // floater) is fogged as what lies behind it, so it melts into the fog
-        // instead of hanging dark in front of it; solid things keep their depth.
-        // (In a place blurred splats never add up to solid, and leave the pixel
-        // part open: there coverage counts as full until the pixel is nearly empty,
-        // as frame_rgb renormalises it.)
-        float cover = K[6].y > 0.5 ? 1 - smoothstep(0.85, 0.97, t) : 1 - t;
-        float faint = 1 - smoothstep(0.08, 0.35, cover);
-        if (zs > 0) zs = mix(zs, backDist, faint);
         if (t < 0.999 && zs > 0) {
             float a = 1 - t;
             float ts = fog_depth(d, zs, G, L);
@@ -1483,13 +1489,17 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     }
     float3 o3;
     if (K[6].y > 0.5) {                    // a place: renormalise the leak, the background where empty
-        float keep = smoothstep(0.85, 0.97, t);
+        // The finder's sharp render: full cover until the pixel is nearly empty. A
+        // photo's lens sample is the renderer's own blur, whose see-through edges are
+        // real (a leaf far out of focus, a faint floater): only a solid surface's
+        // small leak is filled, and the rest shows what lies behind, fog and all.
+        float keep = K[9].w > 0.5 ? smoothstep(0.3, 0.9, t) : smoothstep(0.85, 0.97, t);
         o3 = mix(c / max(1 - t, 0.03), c + t * back, keep);
     } else {
         o3 = c + t * back;
     }
     f[3 * i] = o3.x; f[3 * i + 1] = o3.y; f[3 * i + 2] = o3.z;
-    f[3 * n + i] = 0;
+    f[3 * n + i] = -t;    // composited: shows nothing more through, but the lamps' faces still see its cover
 }
 
 // The distant shells, from a far-only render of the camera's view widened by
@@ -1504,7 +1514,7 @@ kernel void shell_store(device const float* f [[buffer(0)]], constant float4* B 
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
     float3 c = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
-    float t = f[3 * n + i], med = f[4 * n + i];
+    float t = max(f[3 * n + i], 0.0), med = f[4 * n + i];
     float a = 1 - t;
     if (B[0].w > 0.5) {
         float keep = smoothstep(0.85, 0.97, t);
@@ -1525,7 +1535,7 @@ kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [
     uint2 p = g + uint2(L[2].xy);
     if (g.x >= tw || g.y >= th || p.x >= uint(O[0].x) || p.y >= uint(O[0].y)) return;
     uint n = tw * th, j = g.y * tw + g.x;
-    float3 c = float3(f[3 * j], f[3 * j + 1], f[3 * j + 2]) + f[3 * n + j] * O[4].rgb;
+    float3 c = float3(f[3 * j], f[3 * j + 1], f[3 * j + 2]) + max(f[3 * n + j], 0.0) * O[4].rgb;
     uint i = idx(p, O);
     float w = pupil(L[0].xy, field(float2(p) + 0.5, O), O, L[1].w) * L[0].z;
     float4 prev = L[0].w > 0.5 ? float4(0) : acc[i];
@@ -1534,7 +1544,7 @@ kernel void accumulate(device const float* f [[buffer(0)]], constant float4* O [
     // nearest neighbour's, so a leaf's edge hides the lamp as much as it covers.
     float3 faces = 0;
     if (FL[0].x > 0) {
-        float T = f[3 * n + j], z = f[4 * n + j];
+        float T = abs(f[3 * n + j]), z = f[4 * n + j];
         if (!(z > 0) && T < 0.999) {
             for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
                 int2 q = int2(g) + int2(dx, dy);
@@ -1832,7 +1842,7 @@ kernel void dof_pack(device const float* f [[buffer(0)]], constant float4* D [[b
     uint W = uint(D[0].x), H = uint(D[0].y);
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
-    float t = f[3 * n + i], z = f[4 * n + i];
+    float t = max(f[3 * n + i], 0.0), z = f[4 * n + i];
     col.write(float4(f[3 * i], f[3 * i + 1], f[3 * i + 2], 1 - t), p);
     dep.write(float4((t > 0.97 || !(z > 0)) ? 1e6 : z), p);
 }
@@ -1849,6 +1859,26 @@ kernel void dof_tiles(texture2d<float> dep [[texture(0)]], constant float4* D [[
         }
     tiles[tp.y * tw + tp.x] = mx;
 }
+// The largest blur that reaches each tile from any tile (not only its neighbours):
+// a tile whose spread, 2.5 x as dof_blur looks, covers the distance to this one.
+kernel void dof_reach(constant float4* D [[buffer(1)]], device const float* tiles [[buffer(2)]],
+                      device float* reach [[buffer(3)]], uint2 tp [[thread_position_in_grid]]) {
+    uint W = uint(D[0].x), H = uint(D[0].y);
+    int tw = int((W + 15) / 16), th = int((H + 15) / 16);
+    if (int(tp.x) >= tw || int(tp.y) >= th) return;
+    float mx = tiles[tp.y * uint(tw) + tp.x];
+    const int K = 16;                                // up to 16 tiles (256 px) away
+    for (int dy = -K; dy <= K; dy++)
+        for (int dx = -K; dx <= K; dx++) {
+            int2 t = int2(tp) + int2(dx, dy);
+            if (t.x < 0 || t.y < 0 || t.x >= tw || t.y >= th) continue;
+            float r = tiles[t.y * tw + t.x];
+            float gap = max(0.0, length(float2(dx, dy)) - 1.5) * 16;
+            if (r * 2.5 >= gap) mx = max(mx, r);
+        }
+    reach[tp.y * uint(tw) + tp.x] = mx;
+}
+
 kernel void dof_blur(device float* f [[buffer(0)]], constant float4* D [[buffer(1)]],
                      device const float* tiles [[buffer(2)]], constant float4* G [[buffer(3)]],
                      texture2d<float> col [[texture(0)]], texture2d<float> dep [[texture(1)]],
@@ -1879,12 +1909,17 @@ kernel void dof_blur(device float* f [[buffer(0)]], constant float4* D [[buffer(
     constexpr sampler sm(filter::linear, mip_filter::linear, address::clamp_to_edge);
     float2 size = float2(W, H);
     float4 acc = 0; float wsum = 0;
+    // The sample pattern turned a different way at each pixel: a big blur's samples
+    // crossing an edge then come and go as fine grain, not in blocks shared by
+    // neighbouring pixels.
+    float rot = fract(52.9829189 * fract(dot(pc, float2(0.06711056, 0.00583715)))) * 2 * M_PI_F;
+    float2x2 turn = float2x2(float2(cos(rot), sin(rot)), float2(-sin(rot), cos(rot)));
     // Each sample (and the pixel itself) spreads its light as its own Gaussian.
     for (int j = -1; j < N; j++) {
         float2 ps; float4 c; float zs; float A;
         if (j < 0) { ps = pc; c = col.read(p); zs = z0; A = 1; }
         else {
-            float2 v = G[j].xy * R;
+            float2 v = turn * G[j].xy * R;
             ps = pc + v;
             c = col.sample(sm, ps / size, level(lvl));
             zs = dep.sample(sm, ps / size, level(0)).r;
@@ -1924,7 +1959,7 @@ kernel void flare_probe(device const float* f [[buffer(0)]], constant float4* O 
         total += 1;
         if (pp.x < 0 || pp.y < 0 || pp.x >= float(W) || pp.y >= float(H)) { seen += 1; continue; }
         uint j = uint(pp.y) * W + uint(pp.x);
-        float t = f[3 * n + j], z = f[4 * n + j];
+        float t = abs(f[3 * n + j]), z = f[4 * n + j];
         if (t > 0.6 || !(z > 0) || z > q.z * 0.97) seen += 1;
     }
     out[i] = seen / total;

@@ -618,7 +618,14 @@ func begin(_ path: String, _ k: SceneKind) {
 func beginBundle(_ path: String) {
     let f = SceneBundle.peek(path)
     let place = f?.place ?? false
-    begin(path, SceneKind(place: place, ev: f?.ev ?? (place ? 13 : 12), scale: f?.metresPerUnit))
+    // A size measured in the game wins until the file's own changes (re-saved from
+    // Blender at another scale): a scan left unscaled in Blender says 1.
+    var scale = f?.metresPerUnit
+    let key = "bundleScale:" + path
+    let lastFileScale = UserDefaults.standard.object(forKey: key) as? Double
+    if let measured = SceneKind.remembered(path)?.scale, let fs = scale, (lastFileScale == nil || lastFileScale == Double(fs)) { scale = measured }
+    if let fs = f?.metresPerUnit { UserDefaults.standard.set(Double(fs), forKey: key) }
+    begin(path, SceneKind(place: place, ev: f?.ev ?? (place ? 13 : 12), scale: scale))
 }
 
 /// From Finder: pick a .ply (and say what it is).

@@ -112,7 +112,7 @@ final class RenderLoop {
     /// the background, in `enc`.
     private func encodeBackground(_ enc: MTLComputeCommandEncoder, frame: MTLBuffer, offset: Int, w: Int, h: Int,
                                   view V: [Float], fx: Float, cx: Float, cy: Float, fisheye: Bool, up: SIMD3<Float>,
-                                  level mip: Float, shells: ShellView? = nil, fog: [SIMD4<Float>]? = nil) {
+                                  level mip: Float, shells: ShellView? = nil, fog: [SIMD4<Float>]? = nil, photo: Bool = false) {
         guard skyTex != nil || shells != nil || fog != nil else { return }
         let s = sky
         var k: [SIMD4<Float>] = [
@@ -122,7 +122,7 @@ final class RenderLoop {
             SIMD4((skyTex?.level ?? 1) * exp2(s?.stops ?? 0), background.w > 1.5 ? 1 : 0, skyTex != nil ? 1 : 0, shells != nil ? 1 : 0),
             SIMD4(background.x, background.y, background.z, 0),
             SIMD4(shells?.camera ?? .zero, shellRadius),
-            SIMD4(shells?.aperture ?? 0, shells?.focusM ?? 1, metresPerUnit, 0),
+            SIMD4(shells?.aperture ?? 0, shells?.focusM ?? 1, metresPerUnit, photo ? 1 : 0),
         ]
         k += window.map { w -> [SIMD4<Float>] in
             [SIMD4(w.r, w.fx / Float(w.w)), SIMD4(w.d, w.fx / Float(w.h)), SIMD4(w.f, 0),
@@ -202,7 +202,8 @@ final class RenderLoop {
 
     // MARK: the finder's blur (image space)
     private var dofPackPSO: MTLComputePipelineState!, dofTilesPSO: MTLComputePipelineState!, dofBlurPSO: MTLComputePipelineState!
-    private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?
+    private var dofReachPSO: MTLComputePipelineState!
+    private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?, dofReach: MTLBuffer?
     /// 48 equal-area points over the unit disc.
     static let dofSamples: [SIMD4<Float>] = (0..<48).map { j in let v = vogel(j, 48); return SIMD4(v.x, v.y, 0, 0) }
 
@@ -218,8 +219,9 @@ final class RenderLoop {
             d.mipmapLevelCount = 1
             dofDep = device.makeTexture(descriptor: d)
             dofTiles = device.makeBuffer(length: ((W + 15) / 16) * ((H + 15) / 16) * 4, options: .storageModePrivate)
+            dofReach = device.makeBuffer(length: ((W + 15) / 16) * ((H + 15) / 16) * 4, options: .storageModePrivate)
         }
-        guard let col = dofCol, let dep = dofDep, let tiles = dofTiles else { return }
+        guard let col = dofCol, let dep = dofDep, let tiles = dofTiles, let reach = dofReach else { return }
         var D: [SIMD4<Float>] = [SIMD4(Float(W), Float(H), fx, fx * 0.25), SIMD4(cx, cy, metresPerUnit, Float(lens.count)),
                                  SIMD4(Float(CameraBody.tableSize), Float(col.mipmapLevelCount), 0, 0)] + lens
         var G = Self.dofSamples
@@ -240,9 +242,15 @@ final class RenderLoop {
             e.setBytes(&D, length: D.count * 16, index: 1)
             e.setBuffer(tiles, offset: 0, index: 2)
             e.dispatchThreads(MTLSize(width: (W + 15) / 16, height: (H + 15) / 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            // How far each tile's blur reaches, gathered over the whole neighbourhood
+            // it can reach (a leaf far out of focus spreads over many tiles).
+            e.setComputePipelineState(dofReachPSO)
+            e.setBuffer(tiles, offset: 0, index: 2)
+            e.setBuffer(reach, offset: 0, index: 3)
+            e.dispatchThreads(MTLSize(width: (W + 15) / 16, height: (H + 15) / 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             e.setComputePipelineState(dofBlurPSO)
             e.setBuffer(frame, offset: offset, index: 0)
-            e.setBuffer(tiles, offset: 0, index: 2)
+            e.setBuffer(reach, offset: 0, index: 2)
             e.setBytes(&G, length: G.count * 16, index: 3)
             e.setTexture(col, index: 0)
             e.setTexture(dep, index: 1)
@@ -466,6 +474,7 @@ final class RenderLoop {
         storePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "shell_store")!)
         dofPackPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_pack")!)
         dofTilesPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_tiles")!)
+        dofReachPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_reach")!)
         dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         develop16PSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop16")!)
@@ -785,7 +794,7 @@ final class RenderLoop {
         let wantBake = needsBake(job)
         cond.lock(); bakeWanted = wantBake; refineWanted = shells != nil && !dof && !Self.noRefine; cond.unlock()
         let fogRows = job.lighting.fog.map {
-            $0.rows(eye: job.position, up: job.lighting.up, metresPerUnit: metresPerUnit, light: job.lighting.fogLight)
+            $0.rows(eye: job.position, up: job.lighting.up, metresPerUnit: job.body.metresPerUnit, light: job.lighting.fogLight)
         }
         fogSeed = 0
         if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof || fogRows != nil,
@@ -929,7 +938,8 @@ final class RenderLoop {
         var faceRows = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
         let (tw, th) = finderSize
         let fogRows = e.lighting.fog.map {
-            $0.rows(eye: cam.position, up: e.lighting.up, metresPerUnit: metresPerUnit, light: e.lighting.fogLight)
+            // In the exposure's own scale (a take keeps the one it was set up in).
+            $0.rows(eye: cam.position, up: e.lighting.up, metresPerUnit: b.metresPerUnit, light: e.lighting.fogLight)
         }
         fogSeed = Float(e.next) * 0.618034
         // Each sub-pupil looks from a different point within the pixel: summed, the
@@ -956,7 +966,7 @@ final class RenderLoop {
                 }
                 encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
                           cx: axis.x + fx * d.x * invFocus - Float(x0) + jit.x, cy: axis.y + fx * d.y * invFocus - Float(y0) + jit.y,
-                          fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows)
+                          fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows, photo: true)
                 let first = e.next == 0 ? Float(1) : 0
                 var l = [SIMD4<Float>(c.x, c.y, 1, first), mask,
                          SIMD4<Float>(Float(x0), Float(y0), Float(tw), Float(th)),
