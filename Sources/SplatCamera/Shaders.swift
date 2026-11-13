@@ -1838,13 +1838,16 @@ DofSpread dof_spread(float2 pc, float zr, constant float4* D) {
 // and each 16-pixel tile's largest blur.
 kernel void dof_pack(device const float* f [[buffer(0)]], constant float4* D [[buffer(1)]],
                      texture2d<float, access::write> col [[texture(0)]], texture2d<float, access::write> dep [[texture(1)]],
+                     texture2d<float, access::write> inv [[texture(2)]],
                      uint2 p [[thread_position_in_grid]]) {
     uint W = uint(D[0].x), H = uint(D[0].y);
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
     float t = max(f[3 * n + i], 0.0), z = f[4 * n + i];
     col.write(float4(f[3 * i], f[3 * i + 1], f[3 * i + 2], 1 - t), p);
-    dep.write(float4((t > 0.97 || !(z > 0)) ? 1e6 : z), p);
+    float zz = (t > 0.97 || !(z > 0)) ? 1e6 : z;
+    dep.write(float4(zz), p);
+    inv.write(float4(1 / zz), p);
 }
 kernel void dof_tiles(texture2d<float> dep [[texture(0)]], constant float4* D [[buffer(1)]],
                       device float* tiles [[buffer(2)]], uint2 tp [[thread_position_in_grid]]) {
@@ -1915,6 +1918,7 @@ kernel void dof_reach(constant float4* D [[buffer(1)]], device const float* tile
 kernel void dof_blur(device float* f [[buffer(0)]], constant float4* D [[buffer(1)]],
                      device const float* tiles [[buffer(2)]], constant float4* G [[buffer(3)]],
                      texture2d<float> col [[texture(0)]], texture2d<float> dep [[texture(1)]],
+                     texture2d<float> inv [[texture(2)]],
                      uint2 p [[thread_position_in_grid]]) {
     uint W = uint(D[0].x), H = uint(D[0].y);
     if (p.x >= W || p.y >= H) return;
@@ -1959,12 +1963,15 @@ kernel void dof_blur(device float* f [[buffer(0)]], constant float4* D [[buffer(
             float2 v = turn * G[j].xy * R;
             ps = pc + v;
             c = col.sample(sm, ps / size, level(lvl));
-            zs = dep.sample(sm, ps / size, level(0)).r;
+            // Depth from the same level as the colour (1/depth averaged): a sample
+            // standing for a patch of image gets that patch's depth, not one pixel's.
+            zs = 1 / max(inv.sample(sm, ps / size, level(lvl)).r, 1e-6);
             A = area;
         }
         DofSpread s = dof_spread(ps, zs, D);
         float2 sr = s.sr;
-        if (zs > z0 * 1.02) sr = min(sr, s0.sr);       // behind: no wider than what is in front
+        // Behind: no wider than what is in front (eased in, not switched).
+        sr = mix(sr, min(sr, s0.sr), smoothstep(1.0, 1.06, zs / max(z0, 1e-6)));
         float2 qv = (ps - D[3 + int(D[2].x) + 4].xy);
         float ql = length(qv);
         float2 qd = ql > 1e-4 ? qv / ql : float2(1, 0), qp = float2(-qd.y, qd.x);

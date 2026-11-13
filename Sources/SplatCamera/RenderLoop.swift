@@ -204,6 +204,8 @@ final class RenderLoop {
     private var dofPackPSO: MTLComputePipelineState!, dofTilesPSO: MTLComputePipelineState!, dofBlurPSO: MTLComputePipelineState!
     private var dofReachPSO: MTLComputePipelineState!, dofBlocksPSO: MTLComputePipelineState!
     private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?, dofReach: MTLBuffer?, dofBlocks: MTLBuffer?
+    /// 1 / depth with mipmaps: a big blur reads depth from the same level as colour.
+    private var dofInv: MTLTexture?
     /// 48 equal-area points over the unit disc.
     static let dofSamples: [SIMD4<Float>] = (0..<48).map { j in let v = vogel(j, 48); return SIMD4(v.x, v.y, 0, 0) }
 
@@ -215,6 +217,8 @@ final class RenderLoop {
             d.usage = [.shaderRead, .shaderWrite]
             d.storageMode = .private
             dofCol = device.makeTexture(descriptor: d)
+            d.pixelFormat = .r16Float
+            dofInv = device.makeTexture(descriptor: d)       // same mip chain as the colour
             d.pixelFormat = .r32Float
             d.mipmapLevelCount = 1
             dofDep = device.makeTexture(descriptor: d)
@@ -222,7 +226,8 @@ final class RenderLoop {
             dofReach = device.makeBuffer(length: ((W + 15) / 16) * ((H + 15) / 16) * 4, options: .storageModePrivate)
             dofBlocks = device.makeBuffer(length: ((W + 63) / 64 + 1) * ((H + 63) / 64 + 1) * 4, options: .storageModePrivate)
         }
-        guard let col = dofCol, let dep = dofDep, let tiles = dofTiles, let reach = dofReach, let blocks = dofBlocks else { return }
+        guard let col = dofCol, let dep = dofDep, let inv = dofInv, let tiles = dofTiles, let reach = dofReach,
+              let blocks = dofBlocks else { return }
         var D: [SIMD4<Float>] = [SIMD4(Float(W), Float(H), fx, fx * 0.25), SIMD4(cx, cy, metresPerUnit, Float(lens.count)),
                                  SIMD4(Float(CameraBody.tableSize), Float(col.mipmapLevelCount), 0, 0)] + lens
         var G = Self.dofSamples
@@ -233,10 +238,11 @@ final class RenderLoop {
             e.setBytes(&D, length: D.count * 16, index: 1)
             e.setTexture(col, index: 0)
             e.setTexture(dep, index: 1)
+            e.setTexture(inv, index: 2)
             e.dispatchThreads(grid, threadsPerThreadgroup: tg)
             e.endEncoding()
         }
-        if let b = cb.makeBlitCommandEncoder() { b.generateMipmaps(for: col); b.endEncoding() }
+        if let b = cb.makeBlitCommandEncoder() { b.generateMipmaps(for: col); b.generateMipmaps(for: inv); b.endEncoding() }
         if let e = cb.makeComputeCommandEncoder() {
             e.setComputePipelineState(dofTilesPSO)
             e.setTexture(dep, index: 0)
@@ -261,6 +267,7 @@ final class RenderLoop {
             e.setBytes(&G, length: G.count * 16, index: 3)
             e.setTexture(col, index: 0)
             e.setTexture(dep, index: 1)
+            e.setTexture(inv, index: 2)
             e.dispatchThreads(grid, threadsPerThreadgroup: tg)
             e.endEncoding()
         }
