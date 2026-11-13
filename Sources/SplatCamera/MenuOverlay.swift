@@ -9,6 +9,8 @@ final class MenuOverlay: NSView {
         let title: String
         let detail: String
         let action: () -> Void
+        /// ◀ ▶ step a setting down or up (nil: the item only chooses).
+        var adjust: ((Int) -> Void)? = nil
     }
     var items: [Item] = [] { didSet { needsDisplay = true } }
     var selected = 0 { didSet { needsDisplay = true } }
@@ -262,12 +264,15 @@ final class MenuOverlay: NSView {
                 amber.withAlphaComponent(0.18).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
             }
-            text((i == selected ? "▶ " : "  ") + item.title, NSPoint(x: r.minX + u, y: r.minY + 0.35 * u), size: 1.15 * u,
+            text((i == selected ? "▶ " : "  ") + item.title + (i == selected && item.adjust != nil ? "   ◀ ▶" : ""),
+                 NSPoint(x: r.minX + u, y: r.minY + 0.35 * u), size: 1.15 * u,
                  color: i == selected ? amber : .white)
             text(item.detail, NSPoint(x: r.minX + 3 * u, y: r.minY + 1.7 * u), size: 0.8 * u,
                  color: NSColor(white: 0.55, alpha: 1))
         }
-        text("▲▼ choose   A / Enter / click select   B / Esc back", NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u),
+        let adjustable = items.indices.contains(selected) && items[selected].adjust != nil
+        text(adjustable ? "▲▼ choose   ◀▶ / A / click: change   B / Esc back" : "▲▼ choose   A / Enter / click select   B / Esc back",
+             NSPoint(x: panel.minX + 2 * u, y: panel.maxY - 2.6 * u),
              size: 0.9 * u, color: NSColor(white: 0.6, alpha: 1))
     }
 

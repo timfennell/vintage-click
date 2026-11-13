@@ -49,8 +49,6 @@ final class GamepadInput {
     enum Button: Hashable {
         case a, b, x, y, left, right, up, down, l1, r1, menu, view, l3, r3, cycleUp, removeLight, slower, faster, flare
         case filters, gels, modifiers, patternFocus
-        /// The menu's W (also up): the camera bag's hidden body.
-        case keyW
         /// The movie camera's timeline: set a key, the previous / next key,
         /// a frame back / on (Shift: a second), roll (play the move).
         case setKey, prevKey, nextKey, stepBack, stepForward, roll
@@ -221,7 +219,7 @@ final class GamepadInput {
                 s.look = .zero
                 s.shoulders = 0
             case .menu:
-                keys = [(.upArrow, .up), (.downArrow, .down), (.keyW, .up), (.keyW, .keyW), (.keyS, .down),
+                keys = [(.upArrow, .up), (.downArrow, .down), (.keyW, .up), (.keyS, .down),
                         (.leftArrow, .left), (.rightArrow, .right), (.keyA, .left), (.keyD, .right),
                         (.returnOrEnter, .a), (.spacebar, .a), (.escape, .b), (.deleteOrBackspace, .b)]
                 s.move = .zero

@@ -76,8 +76,17 @@ struct SceneFile: Codable {
         var colour: [Float]?
         var softness: Float?
     }
+    struct GroundFog: Codable {
+        var visibilityM: Float?
+        var level: [Float]?          // a point on the ground (scan space)
+        var depthM: Float?
+        var fadeM: Float?
+        var patchiness: Float?
+        var driftM: Float?
+    }
     var fog: Fog?
     var fogVolumes: [FogVolume]?
+    var groundFog: GroundFog?
 }
 
 /// A .vcscene unpacked (once per version of the file) into the caches.
@@ -241,6 +250,12 @@ struct SceneBundle {
             f.patches.append(SceneFog.Patch(shape: shape, toUnit: [inv.columns.0, inv.columns.1, inv.columns.2],
                                             visibilityM: vis, tint: Self.vec(v.colour) ?? SIMD3(1, 1, 1),
                                             softness: v.softness ?? 0.4))
+        }
+        if let g = file.groundFog, let v = g.visibilityM, v > 0 {
+            let up = self.up ?? SIMD3(0, -1, 0)
+            f.ground = SceneFog.Ground(visibilityM: v, level: simd_dot(Self.vec(g.level) ?? .zero, up),
+                                       depthM: g.depthM ?? 1, fadeM: g.fadeM ?? 0.5,
+                                       patchiness: g.patchiness ?? 0.5, driftM: g.driftM ?? 5)
         }
         return f.isEmpty ? nil : f
     }

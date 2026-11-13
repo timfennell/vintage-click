@@ -137,7 +137,7 @@ final class RenderLoop {
         enc.setBuffer(frame, offset: offset, index: 0)
         enc.setBytes(&k, length: k.count * 16, index: 1)
         // The fog (G[0].y and G[0].x zero: none).
-        var g = fog ?? [SIMD4<Float>](repeating: .zero, count: 4)
+        var g = fog ?? [SIMD4<Float>](repeating: .zero, count: 6)
         enc.setBytes(&g, length: g.count * 16, index: 2)
         // The lamps it scatters (their rows, beam tables, shadow maps and views):
         // beams and shafts in the fog, cut by what stands in the light.

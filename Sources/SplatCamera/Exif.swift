@@ -20,13 +20,13 @@ struct CameraModel: Codable {
 
     /// Inspired by the Wilcam W-11: an 8-perf horizontal 35 mm motion picture
     /// camera (the wide-gate frame is the still frame on its side, so every
-    /// lens in the bag covers it, on adapters). Hidden: not in the bag's cycle.
+    /// lens in the bag covers it, on adapters).
     static let wilmontW11 = CameraModel(make: "Wilmont", model: "W11", serial: "0110457", year: 1955)
 
     /// The bodies in the bag.
-    static let all: [CameraModel] = [ohiKorS2, kwanonEF, lahntalR5]
-    /// The bag's and the hidden ones (found by name: --body, saved shots).
-    static let every: [CameraModel] = all + [wilmontW11]
+    static let all: [CameraModel] = [ohiKorS2, kwanonEF, lahntalR5, wilmontW11]
+    /// Every body (found by name: --body, saved shots).
+    static let every: [CameraModel] = all
     var rangefinder: Bool { make == "Lahntal" }
     /// A movie camera: frame rate and shutter angle, not a speed dial.
     var isMotion: Bool { make == "Wilmont" }

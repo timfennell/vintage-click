@@ -1091,6 +1091,36 @@ bool fog_span(float3 o, float3 d, int shape, thread float& t0, thread float& t1)
     }
     return t1 > t0;
 }
+// Value noise (0..1), smooth, for the ground fog's drifts.
+float fog_hash(float3 p) { return fract(sin(dot(p, float3(127.1, 311.7, 74.7))) * 43758.5453); }
+float fog_vnoise(float3 p) {
+    float3 i = floor(p), f = fract(p);
+    f = f * f * (3 - 2 * f);
+    float a = mix(mix(fog_hash(i), fog_hash(i + float3(1, 0, 0)), f.x),
+                  mix(fog_hash(i + float3(0, 1, 0)), fog_hash(i + float3(1, 1, 0)), f.x), f.y);
+    float b = mix(mix(fog_hash(i + float3(0, 0, 1)), fog_hash(i + float3(1, 0, 1)), f.x),
+                  mix(fog_hash(i + float3(0, 1, 1)), fog_hash(i + float3(1, 1, 1)), f.x), f.y);
+    return mix(a, b, f.z);
+}
+// The ground layer's density (a share of full) at x: its height profile, broken
+// by drifts (three octaves, flattened along up so they lie in sheets).
+float ground_share(float3 x, constant float4* G, constant float4* R) {
+    float3 up = G[3].xyz;
+    float h = dot(x, up) - R[0].y, depth = R[0].z, fade = R[0].w;
+    if (h < -fade) return 0;
+    float prof = h <= depth ? 1.0 : exp(-(h - depth) / fade);
+    float pch = R[1].x;
+    if (pch > 0 && prof > 1e-3) {
+        // Stretch the noise along the ground: drifts wider than they are tall.
+        float3 q = (x - up * dot(x, up) * 0.6) / R[1].y;
+        float n = 0.55 * fog_vnoise(q) + 0.3 * fog_vnoise(q * 2.07 + 13.1) + 0.15 * fog_vnoise(q * 4.13 + 71.7);
+        // patchy: clear air where the noise is low, denser where high (mean kept near 1)
+        float m = smoothstep(0.25 + 0.3 * pch, 0.75, n) * (1 + 1.2 * pch);
+        prof *= mix(1.0, m, pch);
+    }
+    return prof;
+}
+
 float fog_depth(float3 d, float tmax, constant float4* G, thread float3& light) {
     float3 eye = G[2].xyz, up = G[3].xyz;
     float tau = 0;
@@ -1141,6 +1171,26 @@ float fog_depth(float3 d, float tmax, constant float4* G, thread float3& light) 
         tau += tp;
         lit += tp * P[4].rgb;
     }
+    // The ground layer: marched through the band of height it lies in.
+    constant float4* R = G + 4 + 5 * np;
+    if (R[0].x > 0) {
+        float3 up = G[3].xyz;
+        float h0 = dot(eye, up) - R[0].y, s = dot(d, up);
+        float lo = -R[0].w, hi = R[0].z + 6 * R[0].w;
+        float ta = 0, tb = tmax;
+        if (abs(s) < 1e-6) { if (h0 < lo || h0 > hi) tb = -1; }
+        else {
+            float t1 = (lo - h0) / s, t2 = (hi - h0) / s;
+            ta = max(0.0, min(t1, t2)); tb = min(tmax, max(t1, t2));
+        }
+        if (tb > ta) {
+            float sum = 0;
+            for (int j = 0; j < 16; j++) sum += ground_share(eye + d * mix(ta, tb, (float(j) + 0.5) / 16), G, R);
+            float tg = R[0].x * (tb - ta) * sum / 16;
+            tau += tg;
+            lit += tg * G[1].rgb;
+        }
+    }
     light = tau > 1e-6 ? lit / tau : float3(0);
     return tau;
 }
@@ -1176,6 +1226,8 @@ float fog_density_at(float3 x, constant float4* G) {
         float r = fog_shape_r(q, int(P[3].z));
         if (r < 1) sg += P[3].x * smoothstep(1.0, 1.0 - P[3].y, r);
     }
+    constant float4* R = G + 4 + 5 * np;
+    if (R[0].x > 0) sg += R[0].x * ground_share(x, G, R);
     return sg;
 }
 
@@ -1298,7 +1350,7 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     if (p.x >= W || p.y >= H) return;
     uint n = W * H, i = p.y * W + p.x;
     float t = f[3 * n + i];
-    bool foggy = G[0].y > 0 || G[0].x > 0;
+    bool foggy = G[0].y > 0 || G[0].x > 0 || G[4 + 5 * int(G[0].x)].x > 0;
     if (t < 1e-3 && !foggy) return;
     float2 q = (float2(p) + 0.5 - K[1].xy) / K[0].zw;
     float3 dc;

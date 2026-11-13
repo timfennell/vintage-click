@@ -93,7 +93,7 @@ and the meter does not know about that, as real meters did not.
 
 ### Camera bodies
 
-The camera bag holds three bodies (select **Camera body** in the bag to change):
+The camera bag holds four bodies (select **Camera body** in the bag to change):
 
 - **Ohi Kor S2** (1974): the manual SLR above, needle on a speed scale, LED
   readouts, 1 s to 1/4000.
@@ -110,6 +110,17 @@ The camera bag holds three bodies (select **Camera body** in the bag to change):
   takes only rangefinder lenses. Photos are taken from the lens, so close
   subjects frame a little differently from what the window shows, as on the
   real camera.
+- **Wilmont W11** (1955, after the Wilcam W-11): an 8-perf horizontal 35 mm
+  **motion picture camera**. Its wide-gate frame is the still frame, so every
+  lens in the bag fits it on an adapter. Set a frame rate (24, 25, 30 or 48)
+  and a shutter angle (180° down to 22.5°) in **Camera bag › Motion**, then key
+  a move on the timeline along the bottom of the reflex finder: fly the camera
+  and press **K** to set a key (with the focus and stop as they are), **⇧K** to
+  delete it, **I / O** to jump between keys, **Z / X** to step a frame (**⇧** a
+  second), **P** to roll the move. **G** develops a quick preview onto the
+  light table, **⇧G** the final (ProRes 422 HQ or HEVC 10-bit, chosen in the
+  Motion page). Frames are exposed through the shutter's angle, so the move
+  blurs as it would on film. On the light table, **Return** plays a take.
 
 <p>
 <img src="docs/screenshots/body-kwanon-ef.jpg" width="49%" alt="The Kwanon EF's finder">
@@ -251,6 +262,16 @@ each ghost shows those of a different element.
 
 *A Fresnel aimed into the lens: its glow in the finder at f/1.4 (left), and on
 film at f/8 at dusk (right), with a starburst, coloured ghosts and veiling glare.*
+
+**Fog** (**Menu › Lights › Fog…**): a haze over the whole scene (how far you
+can see, how much it settles low, its tint) and a layer of **ground fog** with
+its depth, how softly its top fades, how patchy it is (even, drifts, wisps)
+and the drifts' size; the ground level sits at your feet and ◀ ▶ raise or
+lower it. The steps scale with the scan, so the same page suits a bee or a
+forest. The fog takes its light from the house lights and your lamps: beams
+show in it, and whatever stands in a beam casts a dark shaft. A scene from
+the Scene Builder brings its own fog (and fog patches) to start from; what
+you set in the game is remembered with the scene.
 
 ### The light table
 

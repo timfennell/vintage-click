@@ -25,9 +25,26 @@ struct SceneFog: Codable, Equatable {
     /// A point at the haze's base (the ground), scan units.
     var base = SIMD3<Float>(0, 0, 0)
     var patches: [Patch] = []
+    /// A layer of fog lying on the ground (set in the game's Fog page, or a .vcscene's).
+    var ground: Ground? = nil
+
+    /// Fog lying on the ground: dense up to a height above the ground level,
+    /// fading above that, broken into drifts and clearings by its patchiness.
+    struct Ground: Codable, Equatable {
+        var visibilityM: Float
+        /// The ground's height along up (scan units).
+        var level: Float
+        /// How deep the layer lies above the ground, and over how much its top fades (metres).
+        var depthM: Float
+        var fadeM: Float
+        /// 0 even ... 1 in drifts and wisps with clear air between.
+        var patchiness: Float
+        /// The drifts' size (metres).
+        var driftM: Float
+    }
 
     static let maxPatches = 8
-    var isEmpty: Bool { visibilityM <= 0 && patches.isEmpty }
+    var isEmpty: Bool { visibilityM <= 0 && patches.isEmpty && (ground?.visibilityM ?? 0) <= 0 }
 
     /// Extinction per metre for a visibility (where contrast falls to 2%).
     static func sigma(visibilityM v: Float) -> Float { v > 0 ? 3.912 / v : 0 }
@@ -36,6 +53,8 @@ struct SceneFog: Codable, Equatable {
     ///   G[0] = (patches, haze extinction per unit, fall-off units (0 even), base height along up)
     ///   G[1] = (haze light rgb, far distance units)   G[2] = (eye, -)   G[3] = (up, -)
     ///   per patch 5 rows: three rows to its unit space, (extinction per unit, softness, shape, -), (light rgb, -)
+    ///   then the ground layer: (extinction per unit, ground level, depth units, fade units),
+    ///   (patchiness, drift size units, -, -)
     /// `light`: the house lights' colour on a white surface, as the frame has it.
     func rows(eye: SIMD3<Float>, up: SIMD3<Float>, metresPerUnit mpu: Float, light: SIMD3<Float>) -> [SIMD4<Float>] {
         let ps = patches.prefix(Self.maxPatches)
@@ -52,7 +71,19 @@ struct SceneFog: Codable, Equatable {
             r.append(SIMD4(Self.sigma(visibilityM: p.visibilityM) * mpu, max(0.01, min(1, p.softness)), Float(p.shape.rawValue), 0))
             r.append(SIMD4(light * p.tint, 0))
         }
+        let g = ground
+        r.append(SIMD4(Self.sigma(visibilityM: g?.visibilityM ?? 0) * mpu, g?.level ?? 0,
+                       (g?.depthM ?? 0) / mpu, max(g?.fadeM ?? 0, 0.001) / mpu))
+        r.append(SIMD4(max(0, min(1, g?.patchiness ?? 0)), max(g?.driftM ?? 1, 0.01) / mpu, 0, 0))
         return r
+    }
+
+    /// The ground layer's density at height `h` above its ground level (units), as a
+    /// share of full (no drifts: their mean).
+    static func groundProfile(_ hAbove: Float, depth: Float, fade: Float) -> Float {
+        if hAbove < -fade { return 0 }                 // under the ground: nothing to see
+        if hAbove <= depth { return 1 }
+        return exp(-(hAbove - depth) / max(fade, 1e-6))
     }
 
     /// How much light gets through the fog from `eye` to `point` (scan units):
@@ -101,6 +132,16 @@ struct SceneFog: Codable, Equatable {
                 sum += x * x * (3 - 2 * x)
             }
             tau += sp * tmax * sum / 32
+        }
+        if let g = ground, g.visibilityM > 0 {
+            let sg = Self.sigma(visibilityM: g.visibilityM) * mpu
+            let depth = g.depthM / mpu, fade = max(g.fadeM, 0.001) / mpu
+            var sum: Float = 0
+            for j in 0..<32 {
+                let q = eye + d * (tmax * (Float(j) + 0.5) / 32)
+                sum += Self.groundProfile(simd_dot(q, up) - g.level, depth: depth, fade: fade)
+            }
+            tau += sg * tmax * sum / 32
         }
         return exp(-tau)
     }

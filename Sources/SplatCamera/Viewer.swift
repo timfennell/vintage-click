@@ -53,7 +53,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var meterLum: Float = 0.18
     private var lastFinderKey = ""
     /// Which page of the game menu is showing.
-    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder, motion }
+    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder, motion, fog }
     private var menuPage = MenuPage.main
     /// A refined frame eases in over the shells frame it replaces: that frame, held, and when the fade began.
     private var fadeFrom: (buf: MTLBuffer, off: Int, slot: Int)?
@@ -1298,7 +1298,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// scene, photos, settings, finder).
     func openMenu(page name: String) {
         let pages: [String: MenuPage] = ["main": .main, "bag": .bag, "lights": .lights, "scene": .scene,
-                                         "photos": .photos, "settings": .settings, "finder": .finder]
+                                         "photos": .photos, "settings": .settings, "finder": .finder, "fog": .fog]
         go(pages[name] ?? .main)
     }
 
@@ -1348,6 +1348,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                     let all = CameraModel.all
                     let i = all.firstIndex { $0.fullName == self.body.model.fullName }
                     self.body.chooseBody(i.map { all[($0 + 1) % all.count] } ?? all[0])
+                    if self.body.model.isMotion { self.body.frameRate = self.workingTake.frameRate }
                     Sounds.shared.play(.lensChange)
                     self.reopenMenu() },
             ]
@@ -1422,7 +1423,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                     self.reopenMenu() },
             ]
         case .lights:
-            var items: [Item] = [back(to: .main)]
+            var items: [Item] = [back(to: .main), fogLink]
             let newFlare = Item(title: "Lens flare on new lights: \(newLightsFlare ? "on" : "off")",
                                 detail: "whether a light you add flares when it shines into the lens (each light can still be switched)") { [weak self] in
                 guard let self else { return }
@@ -1459,6 +1460,8 @@ final class Viewer: NSObject, MTKViewDelegate {
                 })
             }
             return items
+        case .fog:
+            return fogItems()
         case .scene:
             return [
                 back(to: .main),
@@ -1710,6 +1713,195 @@ final class Viewer: NSObject, MTKViewDelegate {
     }
 
     /// Redraws the menu with fresh values, keeping the selection.
+    // MARK: fog, set in the game
+
+    private var menuStickX: Float = 0
+
+    private var fogLink: MenuOverlay.Item {
+        let f = lighting.fog
+        let now = f == nil ? "clear air"
+            : [f!.visibilityM > 0 ? String(format: "haze %@", Self.metres(f!.visibilityM)) : nil,
+               (f!.ground?.visibilityM ?? 0) > 0 ? "ground fog" : nil,
+               f!.patches.isEmpty ? nil : "\(f!.patches.count) patches"].compactMap { $0 }.joined(separator: ", ")
+        return .init(title: "Fog…", detail: "haze and a layer of ground fog, lit by the house lights and your lamps (now: \(now))") {
+            [weak self] in self?.go(.fog) }
+    }
+
+    /// "1.5 m", "30 cm", "2 km".
+    static func metres(_ m: Float) -> String {
+        m >= 1000 ? String(format: "%.0f km", m / 1000) : m >= 10 ? String(format: "%.0f m", m)
+            : m >= 1 ? String(format: "%.1f m", m) : m >= 0.1 ? String(format: "%.0f cm", m * 100) : String(format: "%.0f mm", m * 1000)
+    }
+
+    /// The scan's size in metres: fog steps are scaled to it (a bee or a forest).
+    private var sceneMetres: Float { max(0.05, radius * body.metresPerUnit) }
+
+    /// Steps for a setting, as multiples of the scan's size, rounded to tidy values.
+    private func fogSteps(_ multiples: [Float]) -> [Float] {
+        multiples.map { m -> Float in
+            let v = m * sceneMetres
+            let e = pow(10, floor(log10(v)))
+            let d = v / e
+            return (d < 1.5 ? 1 : d < 3.5 ? 2 : d < 7.5 ? 5 : 10) * e
+        }
+    }
+
+    /// Steps `value` along `steps` (0 = off, kept first) by `dir`, wrapping when chosen.
+    private func step(_ value: Float, in steps: [Float], _ dir: Int, wrap: Bool = false) -> Float {
+        let i = steps.enumerated().min { abs($0.1 - value) < abs($1.1 - value) }?.offset ?? 0
+        var j = i + dir
+        if wrap { j = (j + steps.count) % steps.count } else { j = max(0, min(steps.count - 1, j)) }
+        return steps[j]
+    }
+
+    private static let fogTints: [(String, SIMD3<Float>)] = [
+        ("white", [1, 1, 1]), ("cool", [0.85, 0.92, 1.05]), ("warm", [1.05, 0.95, 0.82]),
+        ("grey-green", [0.88, 0.95, 0.88]), ("smoky", [0.8, 0.76, 0.72]),
+    ]
+
+    /// Changes the fog (making one if there was none) and remembers it with the scene.
+    private func changeFog(_ f: (inout SceneFog) -> Void) {
+        var fog = lighting.fog ?? SceneFog()
+        f(&fog)
+        lighting.fog = fog.isEmpty ? nil : fog
+        rememberFog()
+        reopenMenu()
+    }
+
+    /// The ground under the camera: eye height above it in a place, the scan's bottom for an object.
+    private var groundHere: Float {
+        let up = camera.up
+        return simd_dot(camera.position, up) - (sceneIsPlace ? 1.6 / body.metresPerUnit : radius * 0.5)
+    }
+
+    private func newGround() -> SceneFog.Ground {
+        let st = fogSteps([0.5])[0]
+        return SceneFog.Ground(visibilityM: st, level: groundHere, depthM: fogSteps([0.04])[0],
+                               fadeM: fogSteps([0.02])[0], patchiness: 0.5, driftM: fogSteps([0.3])[0])
+    }
+
+    private func fogItems() -> [MenuOverlay.Item] {
+        typealias Item = MenuOverlay.Item
+        let f = lighting.fog ?? SceneFog()
+        let haze = [0] + fogSteps([200, 100, 50, 20, 10, 5, 3, 2, 1, 0.5])
+        let settle = [0] + fogSteps([5, 2, 1, 0.5, 0.2, 0.1, 0.05])
+        let g = f.ground
+        let gVis = [0] + fogSteps([5, 2, 1, 0.5, 0.2, 0.1, 0.05])
+        let gDepth = fogSteps([0.005, 0.01, 0.02, 0.04, 0.08, 0.15, 0.3])
+        let gFade = fogSteps([0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2])
+        let gDrift = fogSteps([0.05, 0.1, 0.2, 0.4, 0.8, 1.5])
+        let patch: [Float] = [0, 0.25, 0.5, 0.75, 1]
+        let patchName = ["even", "a little uneven", "patchy", "drifts", "wisps"]
+        let tint = Self.fogTints.firstIndex { simd_distance($0.1, f.tint) < 0.01 } ?? 0
+        var items: [Item] = [
+            Item(title: "Back to lights", detail: "") { [weak self] in self?.go(.lights) },
+            .init(title: "Haze: " + (f.visibilityM > 0 ? "you see about " + Self.metres(f.visibilityM) : "off"),
+                  detail: "fog over everything: how far you can see through it", action: { [weak self] in
+                guard let self else { return }
+                self.changeFog { $0.visibilityM = self.step($0.visibilityM, in: haze, 1, wrap: true) } },
+                  adjust: { [weak self] d in
+                guard let self else { return }
+                self.changeFog { $0.visibilityM = self.step($0.visibilityM, in: haze, d) } }),
+            .init(title: "Haze settles low: " + (f.heightFalloffM > 0 ? "thins every " + Self.metres(f.heightFalloffM) + " up" : "no, even"),
+                  detail: "thicker near the ground, clearing as it rises (from the ground level below)", action: { [weak self] in
+                guard let self else { return }
+                self.changeFog { $0.heightFalloffM = self.step($0.heightFalloffM, in: settle, 1, wrap: true)
+                    if $0.heightFalloffM > 0 && $0.base == .zero { $0.base = self.camera.up * self.groundHere } } },
+                  adjust: { [weak self] d in
+                guard let self else { return }
+                self.changeFog { $0.heightFalloffM = self.step($0.heightFalloffM, in: settle, d)
+                    if $0.heightFalloffM > 0 && $0.base == .zero { $0.base = self.camera.up * self.groundHere } } }),
+            .init(title: "Fog colour: " + Self.fogTints[tint].0,
+                  detail: "its tint (it takes its light from the house lights and the lamps)", action: { [weak self] in
+                self?.changeFog { $0.tint = Self.fogTints[(tint + 1) % Self.fogTints.count].1 } },
+                  adjust: { [weak self] d in
+                self?.changeFog { $0.tint = Self.fogTints[(tint + d + Self.fogTints.count) % Self.fogTints.count].1 } }),
+            .init(title: "Ground fog: " + ((g?.visibilityM ?? 0) > 0 ? "you see about " + Self.metres(g!.visibilityM) + " in it" : "off"),
+                  detail: "a layer of fog lying on the ground", action: { [weak self] in
+                guard let self else { return }
+                self.changeFog { var gg = $0.ground ?? self.newGround()
+                    gg.visibilityM = $0.ground == nil ? gg.visibilityM : self.step(gg.visibilityM, in: gVis, 1, wrap: true)
+                    $0.ground = gg } },
+                  adjust: { [weak self] d in
+                guard let self else { return }
+                self.changeFog { var gg = $0.ground ?? self.newGround()
+                    gg.visibilityM = $0.ground == nil ? gg.visibilityM : self.step(gg.visibilityM, in: gVis, d)
+                    $0.ground = gg } }),
+        ]
+        if let g, g.visibilityM > 0 {
+            func ground(_ c: @escaping (inout SceneFog.Ground) -> Void) -> Void {
+                changeFog { if var gg = $0.ground { c(&gg); $0.ground = gg } }
+            }
+            let nudge = fogSteps([0.01])[0] / body.metresPerUnit
+            let lift = (simd_dot(camera.position, camera.up) - g.level) * body.metresPerUnit
+            items += [
+                .init(title: "Ground fog depth: " + Self.metres(g.depthM),
+                      detail: "how deep it lies, thick, above the ground", action: { [weak self] in
+                    guard let self else { return }
+                    ground { $0.depthM = self.step($0.depthM, in: gDepth, 1, wrap: true) } },
+                      adjust: { [weak self] d in
+                    guard let self else { return }
+                    ground { $0.depthM = self.step($0.depthM, in: gDepth, d) } }),
+                .init(title: "Its top fades over: " + Self.metres(g.fadeM),
+                      detail: "a hard edge, or thinning softly above", action: { [weak self] in
+                    guard let self else { return }
+                    ground { $0.fadeM = self.step($0.fadeM, in: gFade, 1, wrap: true) } },
+                      adjust: { [weak self] d in
+                    guard let self else { return }
+                    ground { $0.fadeM = self.step($0.fadeM, in: gFade, d) } }),
+                .init(title: "Variability: " + patchName[patch.firstIndex { abs($0 - g.patchiness) < 0.1 } ?? 0],
+                      detail: "even, or broken into drifts and wisps with clear air between", action: { [weak self] in
+                    guard let self else { return }
+                    ground { $0.patchiness = self.step($0.patchiness, in: patch, 1, wrap: true) } },
+                      adjust: { [weak self] d in
+                    guard let self else { return }
+                    ground { $0.patchiness = self.step($0.patchiness, in: patch, d) } }),
+                .init(title: "Drifts about " + Self.metres(g.driftM) + " across",
+                      detail: "the size of the drifts and clearings", action: { [weak self] in
+                    guard let self else { return }
+                    ground { $0.driftM = self.step($0.driftM, in: gDrift, 1, wrap: true) } },
+                      adjust: { [weak self] d in
+                    guard let self else { return }
+                    ground { $0.driftM = self.step($0.driftM, in: gDrift, d) } }),
+                .init(title: "Ground level: " + Self.metres(abs(lift)) + (lift >= 0 ? " below the camera" : " above the camera"),
+                      detail: "◀ ▶ lower or raise it; select to put it at your feet here", action: { [weak self] in
+                    guard let self else { return }
+                    let h = self.groundHere
+                    ground { $0.level = h } },
+                      adjust: { d in ground { $0.level += Float(d) * nudge } }),
+            ]
+        }
+        if !f.patches.isEmpty {
+            items.append(.init(title: "Fog patches: \(f.patches.count) from the scene",
+                               detail: "placed in Blender's Scene Builder; select to clear them") { [weak self] in
+                self?.changeFog { $0.patches = [] } })
+        }
+        if lighting.fog != nil {
+            items.append(.init(title: "Clear the air", detail: "no fog at all") { [weak self] in
+                guard let self else { return }
+                self.lighting.fog = nil
+                self.rememberFog()
+                self.reopenMenu() })
+        }
+        return items
+    }
+
+    /// Where this scene's fog is kept: its .vcscene (as saved) or its scan.
+    var fogKey: String? = nil
+
+    private func rememberFog() {
+        guard let k = fogKey else { return }
+        if let f = lighting.fog, let d = try? JSONEncoder().encode(f) { UserDefaults.standard.set(d, forKey: "fog:" + k) }
+        else { UserDefaults.standard.set(Data("none".utf8), forKey: "fog:" + k) }
+    }
+
+    /// The fog last set in the game for this scene, if any (nil: never changed here).
+    func restoreFog() {
+        guard let k = fogKey, let d = UserDefaults.standard.data(forKey: "fog:" + k) else { return }
+        if String(decoding: d, as: UTF8.self) == "none" { lighting.fog = nil; return }
+        if let f = try? JSONDecoder().decode(SceneFog.self, from: d) { lighting.fog = f }
+    }
+
     private func reopenMenu() {
         let keep = menu?.selected ?? 0
         openMenu()
@@ -1776,20 +1968,19 @@ final class Viewer: NSObject, MTKViewDelegate {
             if p.contains(.b) || p.contains(.menu) { menu.showingFilm = false }
             return
         }
-        // W on the camera bag's body row: the movie camera (hidden), and back.
-        if p.contains(.keyW) && menuPage == .bag && menu.selected == 1 {
-            body.chooseBody(body.model.isMotion ? .ohiKorS2 : .wilmontW11)
-            if body.model.isMotion { body.frameRate = workingTake.frameRate }
-            Sounds.shared.play(.lensChange)
-            reopenMenu()
-            return
-        }
         // A stick steps once per push, like the d-pad.
         let y = s.move.y + s.look.y
         if abs(y) > 0.5 && abs(menuStick) <= 0.5 { menu.move(y > 0 ? -1 : 1) }
         menuStick = y
         if p.contains(.up) { menu.move(-1) }
         if p.contains(.down) { menu.move(1) }
+        // ◀ ▶ (and the stick across) step a setting that has steps.
+        if menu.items.indices.contains(menu.selected), let adj = menu.items[menu.selected].adjust {
+            let x = s.move.x + s.look.x
+            if p.contains(.left) || (x < -0.5 && menuStickX >= -0.5) { adj(-1) }
+            if p.contains(.right) || (x > 0.5 && menuStickX <= 0.5) { adj(1) }
+            menuStickX = x
+        }
         if p.contains(.a) { menu.choose() }
         // B / Escape go back up a level; Start (or Menu) closes it from anywhere.
         if p.contains(.b) {
@@ -1797,6 +1988,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             case .main: closeMenu()
             case .finder: go(.settings)
             case .motion: go(.bag)
+            case .fog: go(.lights)
             default: go(.main)
             }
         }

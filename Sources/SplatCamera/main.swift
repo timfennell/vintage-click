@@ -378,6 +378,10 @@ func configureSession() {
     } else if let scene = viewer.scenePath {
         viewer.loop.setSky(SkySetting.remembered(scene: scene))
     }
+    // Fog set in the game is kept with the scene: a .vcscene's per saved version
+    // (saving it again from Blender starts from its own), a scan's per file.
+    viewer.fogKey = sceneBundle.map { "bundle:" + $0.folder.lastPathComponent } ?? viewer.scenePath
+    viewer.restoreFog()
     viewer.sceneName = sceneBundle?.name ?? (["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
         ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem)
     viewer.onScaleSet = { scale in
