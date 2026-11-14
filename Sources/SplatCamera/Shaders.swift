@@ -2233,12 +2233,14 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         float3 nrm = float3(sf.xyz) / 127.5 - 1;
         float upn = abs(dot(nrm / max(length(nrm), 1e-4), G[5].xyz));
         float sizeM = exp2(float(sf.w) / 255 * 24 - 20) * G[5].w;
-        float thin = 1 - smoothstep(0.004, 0.06, sizeM);
+        float thin = 1 - smoothstep(0.02, 0.25, sizeM);    // twigs and small branches as a scan has them
         float open = G[4].z > 0.5 ? float(SKY[i]) / 255 : 1.0;
         float sn = saturate(G[4].x * 1.4 * smoothstep(0.5, 0.9, upn) * open);
-        float fr = saturate(G[4].y * (0.35 + 0.65 * open) * (0.4 + 0.6 * thin));
+        // Hoarfrost grows wherever the cold, damp air reaches, sky or no sky (a
+        // little more where open to it), thickest on fine detail.
+        float fr = saturate(G[4].y * 1.1 * (0.7 + 0.3 * open) * (0.15 + 0.85 * thin * thin));
         base = mix(base, float3(0.93, 0.95, 0.98), sn);
-        base = mix(base, float3(0.84, 0.89, 0.95), fr * 0.85);
+        base = mix(base, float3(0.85, 0.9, 0.96), fr * 0.9);
         damp = 1 - saturate(sn + 0.6 * fr);
     }
     float ambient = G[0].w;
