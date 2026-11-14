@@ -53,7 +53,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var meterLum: Float = 0.18
     private var lastFinderKey = ""
     /// Which page of the game menu is showing.
-    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder, motion, fog }
+    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder, motion, fog, snow }
     private var menuPage = MenuPage.main
     /// A refined frame eases in over the shells frame it replaces: that frame, held, and when the fade began.
     private var fadeFrom: (buf: MTLBuffer, off: Int, slot: Int)?
@@ -1298,7 +1298,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// scene, photos, settings, finder).
     func openMenu(page name: String) {
         let pages: [String: MenuPage] = ["main": .main, "bag": .bag, "lights": .lights, "scene": .scene,
-                                         "photos": .photos, "settings": .settings, "finder": .finder, "fog": .fog]
+                                         "photos": .photos, "settings": .settings, "finder": .finder, "fog": .fog, "snow": .snow]
         go(pages[name] ?? .main)
     }
 
@@ -1423,7 +1423,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                     self.reopenMenu() },
             ]
         case .lights:
-            var items: [Item] = [back(to: .main), fogLink]
+            var items: [Item] = [back(to: .main), fogLink, snowLink]
             let newFlare = Item(title: "Lens flare on new lights: \(newLightsFlare ? "on" : "off")",
                                 detail: "whether a light you add flares when it shines into the lens (each light can still be switched)") { [weak self] in
                 guard let self else { return }
@@ -1462,6 +1462,8 @@ final class Viewer: NSObject, MTKViewDelegate {
             return items
         case .fog:
             return fogItems()
+        case .snow:
+            return snowItems()
         case .scene:
             return [
                 back(to: .main),
@@ -1886,6 +1888,110 @@ final class Viewer: NSObject, MTKViewDelegate {
         return items
     }
 
+    // MARK: snow, set in the game
+
+    private var snowLink: MenuOverlay.Item {
+        let s = lighting.snow
+        let now = s == nil ? "none"
+            : [s!.density > 0 ? "falling" : nil, s!.settled > 0 ? "settled" : nil, s!.frost > 0 ? "hoarfrost" : nil]
+                .compactMap { $0 }.joined(separator: ", ")
+        return .init(title: "Snow…", detail: "falling snow, snow settled on what faces the sky, hoarfrost (now: \(now.isEmpty ? "none" : now))") {
+            [weak self] in self?.go(.snow) }
+    }
+
+    /// A new snowfall, centred where you stand, sized to the scan.
+    func newSnow() -> SceneSnow {
+        var s = SceneSnow()
+        s.centre = camera.position
+        s.ground = groundHere
+        s.radiusM = fogSteps([0.6])[0]
+        s.ceilingM = fogSteps([0.3])[0]
+        s.fallMS = max(0.05, min(1.2, sceneMetres * 0.05))
+        s.flakeM = max(0.0005, min(0.008, sceneMetres * 0.0003))
+        return s
+    }
+
+    private func changeSnow(_ f: (inout SceneSnow) -> Void) {
+        var s = lighting.snow ?? newSnow()
+        f(&s)
+        lighting.snow = s.isEmpty ? nil : s
+        rememberSnow()
+        reopenMenu()
+    }
+
+    private func snowItems() -> [MenuOverlay.Item] {
+        typealias Item = MenuOverlay.Item
+        let s = lighting.snow ?? newSnow()
+        func stepper(_ title: String, _ detail: String, _ get: @escaping (SceneSnow) -> Float, _ steps: [Float],
+                     _ set: @escaping (inout SceneSnow, Float) -> Void) -> Item {
+            Item(title: title, detail: detail, action: { [weak self] in
+                guard let self else { return }
+                self.changeSnow { set(&$0, self.step(get($0), in: steps, 1, wrap: true)) } },
+                 adjust: { [weak self] d in
+                guard let self else { return }
+                self.changeSnow { set(&$0, self.step(get($0), in: steps, d)) } })
+        }
+        func named(_ v: Float, _ steps: [Float], _ names: [String]) -> String {
+            names[steps.enumerated().min { abs($0.1 - v) < abs($1.1 - v) }?.offset ?? 0]
+        }
+        let fall: [Float] = [0, 1500, 5000, 15000, 40000]
+        let fallNames = ["none", "light", "steady", "heavy", "a blizzard"]
+        let sizes: [Float] = [0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.03]
+        let winds: [Float] = [0, 0.5, 1, 2, 4, 7, 11, 16]
+        let dirs: [Float] = [0, 45, 90, 135, 180, 225, 270, 315]
+        let dirNames = ["ahead of the start", "ahead-right", "right", "behind-right", "behind", "behind-left", "left", "ahead-left"]
+        let gusts: [Float] = [0, 0.3, 0.7]
+        let settled: [Float] = [0, 0.25, 0.5, 0.75, 1]
+        let settledNames = ["none", "a dusting", "a light cover", "covered", "deep"]
+        let frost: [Float] = [0, 0.3, 0.6, 0.9]
+        let frostNames = ["none", "a touch", "hoarfrost", "thick hoarfrost"]
+        let radii = fogSteps([0.15, 0.3, 0.6, 1.2, 2.5])
+        let ceilings = fogSteps([0.05, 0.1, 0.2, 0.4, 0.8])
+        let falls = fogSteps([0.005, 0.01, 0.03, 0.06, 0.12]).map { min($0, 3) }
+        var items: [Item] = [
+            Item(title: "Back to lights", detail: "") { [weak self] in self?.go(.lights) },
+            stepper("Snow falling: " + named(s.density, fall, fallNames), "how hard it snows", { $0.density }, fall) { $0.density = $1 },
+            stepper("Flakes: about " + Self.metres(s.flakeM) + " across", "fine powder to big wet clumps", { $0.flakeM }, sizes) { $0.flakeM = $1 },
+            stepper("Falling at " + String(format: "%.2g m/s", s.fallMS), "how fast the flakes come down", { $0.fallMS }, falls) { $0.fallMS = $1 },
+            stepper("Wind: " + (s.windMS > 0 ? String(format: "%.2g m/s", s.windMS) : "still"), "the flakes drift with it",
+                    { $0.windMS }, winds) { $0.windMS = $1 },
+            stepper("Blowing toward: " + named(s.windDeg, dirs, dirNames), "seen from where the snow was started", { $0.windDeg }, dirs) { $0.windDeg = $1 },
+            stepper("Gusts: " + named(s.gust, gusts, ["none", "some", "strong"]), "the wind rising and falling", { $0.gust }, gusts) { $0.gust = $1 },
+            stepper("Snow settled: " + named(s.settled, settled, settledNames), "on what faces up and is open to the sky",
+                    { $0.settled }, settled) { $0.settled = $1 },
+            stepper("Hoarfrost: " + named(s.frost, frost, frostNames), "frost on all the cold reaches, most on twigs, grass and leaf edges",
+                    { $0.frost }, frost) { $0.frost = $1 },
+            stepper("Snowfall reaches " + Self.metres(s.radiusM) + " round you", "the column of falling snow (it moves with you); settling reaches three times as far",
+                    { $0.radiusM }, radii) { $0.radiusM = $1 },
+            stepper("Snow ceiling: " + Self.metres(s.ceilingM) + " up", "where the snow starts: keep it under the scan's sky dome",
+                    { $0.ceilingM }, ceilings) { $0.ceilingM = $1 },
+            Item(title: "Centre it here", detail: "the snowfall's middle and the ground at your feet") { [weak self] in
+                guard let self else { return }
+                let c = self.camera.position, gr = self.groundHere
+                self.changeSnow { $0.centre = c; $0.ground = gr } },
+        ]
+        if lighting.snow != nil {
+            items.append(Item(title: "No snow", detail: "clear it all") { [weak self] in
+                guard let self else { return }
+                self.lighting.snow = nil
+                self.rememberSnow()
+                self.reopenMenu() })
+        }
+        return items
+    }
+
+    private func rememberSnow() {
+        guard let k = fogKey else { return }
+        if let s = lighting.snow, let d = try? JSONEncoder().encode(s) { UserDefaults.standard.set(d, forKey: "snow:" + k) }
+        else { UserDefaults.standard.set(Data("none".utf8), forKey: "snow:" + k) }
+    }
+
+    func restoreSnow() {
+        guard let k = fogKey, let d = UserDefaults.standard.data(forKey: "snow:" + k) else { return }
+        if String(decoding: d, as: UTF8.self) == "none" { lighting.snow = nil; return }
+        if let s = try? JSONDecoder().decode(SceneSnow.self, from: d) { lighting.snow = s }
+    }
+
     /// Where this scene's fog is kept: its .vcscene (as saved) or its scan.
     var fogKey: String? = nil
 
@@ -1988,7 +2094,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             case .main: closeMenu()
             case .finder: go(.settings)
             case .motion: go(.bag)
-            case .fog: go(.lights)
+            case .fog, .snow: go(.lights)
             default: go(.main)
             }
         }
@@ -2588,6 +2694,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         // The shutter is open for its angle of the frame: the camera moves on meanwhile.
         let open = Double(b.shutter.seconds)
         job.cameraAt = { u in t.sample(at: t0 + Double(u) * open)?.camera ?? k.camera }
+        job.snowClock = t0          // the same snow whenever the take develops
         job.filterThreshold = filterThreshold
         job.flare = photoFlare(body: b, camera: k.camera, plot: t.lighting)
         let (w, h) = (m.width, m.height)

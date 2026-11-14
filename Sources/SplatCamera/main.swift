@@ -71,6 +71,7 @@ let startFilm = args.contains("--film-menu"), startLenses = args.contains("--len
 let startFilters = args.contains("--filter-menu")
 // --menu-page NAME: open on that page of the game menu (for checks and screenshots).
 let menuPageChoice = option("--menu-page")
+let snowChoice = option("--snow")
 let measureDemo = args.contains("--measure-demo")
 args.removeAll { $0 == "--measure-demo" }
 args.removeAll { $0 == "--menu" || $0 == "--controls" || $0 == "--film-menu" || $0 == "--lens-menu" || $0 == "--filter-menu" }
@@ -382,6 +383,14 @@ func configureSession() {
     // (saving it again from Blender starts from its own), a scan's per file.
     viewer.fogKey = sceneBundle.map { "bundle:" + $0.folder.lastPathComponent } ?? viewer.scenePath
     viewer.restoreFog()
+    viewer.restoreSnow()
+    // --snow FLAKES,SETTLED,FROST: snow for checks (flakes falling, settled 0-1, frost 0-1).
+    if let v = snowChoice?.split(separator: ",").compactMap({ Float($0) }), v.count == 3 {
+        var s = viewer.newSnow()
+        s.density = v[0]; s.settled = v[1]; s.frost = v[2]
+        viewer.lighting.snow = s
+        print("Snow: \(s)")
+    }
     viewer.sceneName = sceneBundle?.name ?? (["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
         ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem)
     viewer.onScaleSet = { scale in

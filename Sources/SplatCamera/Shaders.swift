@@ -1344,6 +1344,51 @@ float3 fog_lamps(float3 d, float ta, float tb, thread float& tau, float2 px, con
     return acc;
 }
 
+// ---- falling snow --------------------------------------------------------------
+// Each flake's light, once per view: the house lights on a small white flake, the
+// lamps on it (their beams, doors, patterns and shadows; a flake throws light on
+// mostly, so one between you and a lamp glows), and the fog between it and the eye.
+//   W[i] = flake (position, size), scan units   SN = (flakes, house light rgb)
+//   out[i] = linear rgb, and how much of it gets through the fog (.w)
+kernel void snow_light(constant float4* G [[buffer(2)]],
+                       constant float4* LT [[buffer(3)]], device const float4* BT [[buffer(4)]],
+                       constant float4* SV [[buffer(5)]],
+                       device const float* m0 [[buffer(6)]], device const float* m1 [[buffer(7)]],
+                       device const float* m2 [[buffer(8)]], device const float* m3 [[buffer(9)]],
+                       device const float* m4 [[buffer(10)]], device const float* m5 [[buffer(11)]],
+                       device const float* m6 [[buffer(12)]], device const float* m7 [[buffer(13)]],
+                       constant float4& LP [[buffer(14)]],
+                       device const float4* W [[buffer(15)]], constant float4& SN [[buffer(16)]],
+                       device float4* out [[buffer(17)]],
+                       texture2d_array<float> patterns [[texture(3)]],
+                       uint i [[thread_position_in_grid]]) {
+    if (i >= uint(SN.x)) return;
+    float3 x = W[i].xyz;
+    float3 eye = G[2].xyz;
+    float3 toEye = eye - x;
+    float de = length(toEye);
+    float3 lit = SN.yzw * 0.8;                               // the house lights on white
+    int nl = int(LP.x);
+    for (int l = 0; l < nl; l++) {
+        constant float4* L = LT + 6 * l;
+        float3 e = lamp_at(x, L, BT + l * 256, patterns);
+        if (!any(e > 0)) continue;
+        if (LP.y > 0.5) {
+            device const float* m = l == 0 ? m0 : l == 1 ? m1 : l == 2 ? m2 : l == 3 ? m3
+                                  : l == 4 ? m4 : l == 5 ? m5 : l == 6 ? m6 : m7;
+            e *= lamp_shadow(x, SV + 5 * l, m);
+        }
+        // a flake scatters mostly onward: brightest looking toward the lamp through it
+        float3 tl = normalize(L[0].xyz - x);
+        float c = dot(-tl, toEye / max(de, 1e-9));
+        float g = 0.5, ph = (1 - g * g) / pow(max(1 + g * g - 2 * g * c, 1e-4), 1.5);
+        lit += e * (0.35 + 0.25 * ph);
+    }
+    float3 L;
+    float tau = (G[0].y > 0 || G[0].x > 0 || G[4 + 5 * int(G[0].x)].x > 0) ? fog_depth(-toEye / max(de, 1e-9), de, G, L) : 0;
+    out[i] = float4(lit, exp(-tau));
+}
+
 kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
                             constant float4* G [[buffer(2)]],
                             constant float4* LT [[buffer(3)]], device const float4* BT [[buffer(4)]],
@@ -1353,6 +1398,9 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
                             device const float* m4 [[buffer(10)]], device const float* m5 [[buffer(11)]],
                             device const float* m6 [[buffer(12)]], device const float* m7 [[buffer(13)]],
                             constant float4& LP [[buffer(14)]],
+                            device const float4* FK [[buffer(18)]], device const uint* FB [[buffer(19)]],
+                            device const uint* FI [[buffer(20)]], device const float4* FL [[buffer(21)]],
+                            constant float4& FS [[buffer(22)]],
                             texture2d<float> sky [[texture(0)]], texture2d<float> shellCol [[texture(1)]],
                             texture2d<float> shellDep [[texture(2)]], texture2d_array<float> patterns [[texture(3)]],
                             uint2 p [[thread_position_in_grid]]) {
@@ -1361,7 +1409,8 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     uint n = W * H, i = p.y * W + p.x;
     float t = abs(f[3 * n + i]);
     bool foggy = G[0].y > 0 || G[0].x > 0 || G[4 + 5 * int(G[0].x)].x > 0;
-    if (t < 1e-3 && !foggy) return;
+    bool snowy = FS.x > 0;
+    if (t < 1e-3 && !foggy && !snowy) return;
     float2 q = (float2(p) + 0.5 - K[1].xy) / K[0].zw;
     float3 dc;
     if (K[1].z > 0.5) {                    // equidistant fisheye: radius = angle
@@ -1497,6 +1546,34 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
         o3 = mix(c / max(1 - t, 0.03), c + t * back, keep);
     } else {
         o3 = c + t * back;
+    }
+    // Falling snow over all of it: each flake in this pixel's bin, hidden by what
+    // stands in front of it (in proportion to its cover), lit and fogged as
+    // snow_light found. FS = (bins across, bins down, bin size, -).
+    if (snowy) {
+        uint bwN = uint(FS.x), bs = uint(FS.z);
+        uint b = min(p.y / bs, uint(FS.y) - 1) * bwN + min(p.x / bs, bwN - 1);
+        uint start = FB[2 * b], cnt = FB[2 * b + 1];
+        float zsc = f[4 * n + i];
+        float3 lin = to_lin(o3);
+        float2 pc = float2(p) + 0.5;
+        float nearest = 0, cover = 0;
+        for (uint k = 0; k < cnt; k++) {
+            uint id = FI[start + k];
+            float4 A = FK[2 * id], B = FK[2 * id + 1];
+            float2 dd = pc - A.xy;
+            float g = A.w * exp(-0.5 * dot(dd, dd) / (A.z * A.z));
+            if (g < 1e-3) continue;
+            // behind the scan's surface here: hidden as much as the surface covers
+            if (zsc > 0 && zsc < B.x) g *= t;
+            float4 Lf = FL[uint(B.y)];
+            float3 c = Lf.rgb * Lf.w + G[1].rgb * (1 - Lf.w);   // through the fog: veiled in its light
+            lin = mix(lin, c, saturate(g));
+            if (g > cover) { cover = g; nearest = B.x; }
+        }
+        o3 = float3(lin_to_srgb(lin.r), lin_to_srgb(lin.g), lin_to_srgb(lin.b));
+        // A flake that fills the pixel is what the finder's blur sees there.
+        if (cover > 0.5) f[4 * n + i] = nearest;
     }
     f[3 * i] = o3.x; f[3 * i + 1] = o3.y; f[3 * i + 2] = o3.z;
     f[3 * n + i] = -t;    // composited: shows nothing more through, but the lamps' faces still see its cover
@@ -2103,10 +2180,41 @@ kernel void shadow_vis(device const float* means [[buffer(0)]], device const flo
     vis[i * 8 + slot] = uchar(clamp(lit / float(nf), 0.0, 1.0) * 255 + 0.5);
 }
 
+// How open each splat is to the sky (for snow settling): seen from the snow's
+// ceiling straight down, is anything above it? Fades out at the snowfall's edge.
+//   S[0..2] view rows, S[3] = (fx, map size, reach (units), splats), S[4] = (column centre on the ground plane), S[5] = (up)
+kernel void sky_vis(device const float* means [[buffer(0)]], device const float* map [[buffer(1)]],
+                    constant float4* S [[buffer(2)]], device uchar* vis [[buffer(3)]],
+                    uint i [[thread_position_in_grid]]) {
+    if (i >= uint(S[3].w)) return;
+    float3 m = float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
+    float3 pc = float3(dot(S[0].xyz, m) + S[0].w, dot(S[1].xyz, m) + S[1].w, dot(S[2].xyz, m) + S[2].w);
+    float fx = S[3].x, res = S[3].y;
+    float3 up = S[5].xyz;
+    float3 rel = m - S[4].xyz;
+    float horiz = length(rel - up * dot(rel, up));
+    float edge = 1 - smoothstep(0.8 * S[3].z, S[3].z, horiz);
+    if (pc.z <= 0 || edge <= 0) { vis[i] = 0; return; }
+    float2 uv = float2(fx * pc.x / pc.z, fx * pc.y / pc.z) + res * 0.5;
+    if (any(uv < 0) || any(uv >= res)) { vis[i] = 0; return; }
+    float dr = length(pc);
+    float bias = 0.004 * dr + 3 * dr / fx;
+    float open = 0;
+    for (uint k = 0; k < 5; k++) {
+        float2 o = k == 0 ? float2(0) : vogel(k - 1, 4) * 1.2;
+        float2 tp = shadow_tap(map, int2(uv + o), uint(res));
+        // something above it: a surface nearer the sky than this splat
+        bool roof = tp.x < 0.6 && tp.y > 0 && tp.y < dr - bias;
+        open += roof ? 0.0 : 1.0;
+    }
+    vis[i] = uchar(clamp(open / 5 * edge, 0.0, 1.0) * 255 + 0.5);
+}
+
 kernel void relight(device const float* means [[buffer(0)]], device const float* dc0 [[buffer(1)]],
                     device const float* sh0 [[buffer(2)]], device float* out_dc [[buffer(3)]],
                     constant float4* G [[buffer(4)]], constant float4* LT [[buffer(5)]],
                     device const float4* BT [[buffer(6)]], device const uchar* VIS [[buffer(7)]],
+                    device const uchar4* SURF [[buffer(8)]], device const uchar* SKY [[buffer(9)]],
                     texture2d_array<float> patterns [[texture(0)]],
                     uint i [[thread_position_in_grid]]) {
     constexpr sampler pat(filter::linear, mip_filter::linear, address::clamp_to_edge);
@@ -2115,13 +2223,31 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
     float3 mean = float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
     float3 base = 0.5 + C0 * float3(dc0[3 * i], dc0[3 * i + 1], dc0[3 * i + 2]);
     device const float* sh = sh0 + i * K * 3;
+    // Snow and hoarfrost: G[4] = (settled, frost, sky known, -), G[5] = (up, metres per unit).
+    // Snow lies on what faces up and is open to the sky; frost on everything the cold
+    // reaches, most on fine exposed detail (twigs, grass, leaf edges). Either covers
+    // the scan's own shading (its captured light), so that is damped under it.
+    float damp = 1;
+    if (G[4].x > 0 || G[4].y > 0) {
+        uchar4 sf = SURF[i];
+        float3 nrm = float3(sf.xyz) / 127.5 - 1;
+        float upn = abs(dot(nrm / max(length(nrm), 1e-4), G[5].xyz));
+        float sizeM = exp2(float(sf.w) / 255 * 24 - 20) * G[5].w;
+        float thin = 1 - smoothstep(0.004, 0.06, sizeM);
+        float open = G[4].z > 0.5 ? float(SKY[i]) / 255 : 1.0;
+        float sn = saturate(G[4].x * 1.4 * smoothstep(0.5, 0.9, upn) * open);
+        float fr = saturate(G[4].y * (0.35 + 0.65 * open) * (0.4 + 0.6 * thin));
+        base = mix(base, float3(0.93, 0.95, 0.98), sn);
+        base = mix(base, float3(0.84, 0.89, 0.95), fr * 0.85);
+        damp = 1 - saturate(sn + 0.6 * fr);
+    }
     float ambient = G[0].w;
     float3 v = normalize(mean - G[0].xyz);           // camera -> splat, as 3DGS reads SH
     float3 tint = G[2].rgb;
     float3 lin = srgb_to_lin3(base) * ambient * tint;
     float3 shine = 0;
     bool has_sh = K >= 8;
-    if (has_sh && ambient > 0) shine += pow(ambient * tint, 1 / 2.2) * sh_sum(v, sh, K, 0, K);
+    if (has_sh && ambient > 0) shine += pow(ambient * tint, 1 / 2.2) * sh_sum(v, sh, K, 0, K) * damp;
     const float3 lum = float3(0.2126, 0.7152, 0.0722);
     for (uint l = 0; l < nl; l++) {
         constant float4* L = LT + 6 * l;
@@ -2165,7 +2291,7 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         // (A daylight scan's band 1 is the sun's doing: read from a new direction
         // it gives false colour, so those relight from the base colour alone.)
         bool camera_lit = G[3].z < 0.5;
-        float3 diff = max(base + (K >= 3 && camera_lit ? sh_sum(-ldir, sh, K, 0, 3) : 0.0), 0.0);
+        float3 diff = max(base + (K >= 3 && camera_lit ? sh_sum(-ldir, sh, K, 0, 3) * damp : 0.0), 0.0);
         lin += srgb_to_lin3(diff) * e * col;
         if (has_sh && camera_lit) {
             float3 h = normalize(v - ldir);
@@ -2175,7 +2301,7 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
             float3 chroma = Lf > 1e-3 ? full / Lf : float3(1);
             float k = G[1].w;
             float3 sh_at = dot(S, lum) * ((1 - k) + k * chroma);
-            shine += pow(max(e * col, 0.0), 1 / 2.2) * sh_at * L[2].w;
+            shine += pow(max(e * col, 0.0), 1 / 2.2) * sh_at * L[2].w * damp;
         }
     }
     float3 o = max(lin_to_srgb3(lin) + shine, 0.0);

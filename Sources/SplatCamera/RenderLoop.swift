@@ -41,6 +41,8 @@ final class ExposureJob {
     /// Linear light, three half floats per pixel, when a negative was asked for.
     var negative: Data?
     let started = CACurrentMediaTime()
+    /// When the shutter opened, for falling snow (a take's frames: the take's own time).
+    var snowClock: Double = CACurrentMediaTime()
     var outputPath: URL?
     /// Lens flare rows (Flare.uniforms), taken at the shutter.
     var flare: [SIMD4<Float>] = []
@@ -112,8 +114,9 @@ final class RenderLoop {
     /// the background, in `enc`.
     private func encodeBackground(_ enc: MTLComputeCommandEncoder, frame: MTLBuffer, offset: Int, w: Int, h: Int,
                                   view V: [Float], fx: Float, cx: Float, cy: Float, fisheye: Bool, up: SIMD3<Float>,
-                                  level mip: Float, shells: ShellView? = nil, fog: [SIMD4<Float>]? = nil, photo: Bool = false) {
-        guard skyTex != nil || shells != nil || fog != nil else { return }
+                                  level mip: Float, shells: ShellView? = nil, fog: [SIMD4<Float>]? = nil, photo: Bool = false,
+                                  snow: SnowPass? = nil) {
+        guard skyTex != nil || shells != nil || fog != nil || snow != nil else { return }
         let s = sky
         var k: [SIMD4<Float>] = [
             SIMD4(Float(w), Float(h), fx, fx), SIMD4(cx, cy, fisheye ? 1 : 0, mip),
@@ -136,12 +139,12 @@ final class RenderLoop {
         enc.setComputePipelineState(skyPSO)
         enc.setBuffer(frame, offset: offset, index: 0)
         enc.setBytes(&k, length: k.count * 16, index: 1)
-        // The fog (G[0].y and G[0].x zero: none).
-        var g = fog ?? [SIMD4<Float>](repeating: .zero, count: 6)
+        // The fog (G[0].y and G[0].x zero: none; the eye in G[2] all the same, for the snow).
+        var g = fog ?? snow?.clearAir ?? [SIMD4<Float>](repeating: .zero, count: 6)
         enc.setBytes(&g, length: g.count * 16, index: 2)
         // The lamps it scatters (their rows, beam tables, shadow maps and views):
-        // beams and shafts in the fog, cut by what stands in the light.
-        let nLamps = fog == nil || lampTable == nil ? 0 : min(lampRows.count / 6, Self.maxLights)
+        // beams and shafts in the fog, cut by what stands in the light; and on the snow.
+        let nLamps = (fog == nil && snow == nil) || lampTable == nil ? 0 : min(lampRows.count / 6, Self.maxLights)
         var lp = SIMD4<Float>(Float(nLamps), lampShadows ? 1 : 0, 0.55, fogSeed)
         enc.setBytes(&lp, length: 16, index: 14)
         var rows = nLamps > 0 ? lampRows : [SIMD4<Float>](repeating: .zero, count: 6)
@@ -160,7 +163,61 @@ final class RenderLoop {
         enc.setTexture(skyTex?.texture ?? dummy2D, index: 0)
         enc.setTexture(shells != nil ? shellCol : dummyArray, index: 1)
         enc.setTexture(shells != nil ? shellDep : dummyArray, index: 2)
+        // Falling snow: each flake lit first (snow_light), then drawn bin by bin.
+        var fs = SIMD4<Float>(0, 0, 0, 0)
+        if let snow, !snow.binned.flakes.isEmpty,
+           let world = snow.world.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }),
+           let lightBuf = device.makeBuffer(length: snow.world.count * 16, options: .storageModePrivate),
+           let drawn = snow.binned.flakes.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }),
+           let bins = snow.binned.bins.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: max($0.count, 16), options: .storageModeShared) }),
+           let index = (snow.binned.index + [0, 0, 0, 0]).withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }) {
+            var sn = SIMD4<Float>(Float(snow.world.count), snow.house.x, snow.house.y, snow.house.z)
+            enc.setComputePipelineState(snowLightPSO)
+            enc.setBuffer(world, offset: 0, index: 15)
+            enc.setBytes(&sn, length: 16, index: 16)
+            enc.setBuffer(lightBuf, offset: 0, index: 17)
+            enc.dispatchThreads(MTLSize(width: snow.world.count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+            enc.setComputePipelineState(skyPSO)
+            enc.setBuffer(drawn, offset: 0, index: 18)
+            enc.setBuffer(bins, offset: 0, index: 19)
+            enc.setBuffer(index, offset: 0, index: 20)
+            enc.setBuffer(lightBuf, offset: 0, index: 21)
+            fs = SIMD4(Float(snow.binned.binsW), Float(snow.binned.binsH), Float(SceneSnow.Binned.size), 0)
+        } else {
+            for i in 18...21 { enc.setBuffer(dummyBuf, offset: 0, index: i) }
+        }
+        enc.setBytes(&fs, length: 16, index: 22)
         enc.dispatchThreads(MTLSize(width: w, height: h, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+    }
+
+    /// Falling snow for one view: the flakes (scan units), binned as this view sees
+    /// them, and the clear-air rows (the eye) when there is no fog.
+    struct SnowPass {
+        var world: [SIMD4<Float>]
+        var binned: SceneSnow.Binned
+        var house: SIMD3<Float>
+        var clearAir: [SIMD4<Float>]
+    }
+
+    /// The snow seen by a view at time `t` (nil: none falling). `lens`: the view's
+    /// lens offset (scene units, a photo's sub-pupil) and how much of the blur to
+    /// spread the flakes by.
+    private func snowPass(_ lighting: LightingPlot, body b: CameraBody, eye: SIMD3<Float>, view V: [Float],
+                          fx: Float, cx: Float, cy: Float, w: Int, h: Int, t: Double,
+                          lensOffset: SIMD2<Float> = .zero, blur: Float) -> SnowPass? {
+        guard let snow = lighting.snow, snow.density > 0 else { return nil }
+        let mpu = b.metresPerUnit
+        let world = snow.flakes(at: t, eye: eye, up: lighting.up, metresPerUnit: mpu)
+        guard !world.isEmpty else { return nil }
+        // The sub-pupil's view is moved by its lens point: so are the flakes (as the splats).
+        let eyeSub = eye + SIMD3(V[0], V[1], V[2]) * lensOffset.x + SIMD3(V[4], V[5], V[6]) * lensOffset.y
+        let invFocus = mpu / max(b.focusM, 0.01)
+        let aperture = b.lens.focalMM / 1000 / b.takingAperture / 2 / mpu
+        let binned = SceneSnow.bin(world, view: V, eye: eyeSub, fx: fx, cx: cx, cy: cy, width: w, height: h,
+                                   invFocus: invFocus, apertureUnits: aperture, blur: blur)
+        return SnowPass(world: world, binned: binned, house: lighting.fogLight * 1.33,
+                        clearAir: SceneFog().rows(eye: eye, up: lighting.up, metresPerUnit: mpu, light: .zero))
     }
 
     // MARK: distant shells
@@ -203,6 +260,7 @@ final class RenderLoop {
     // MARK: the finder's blur (image space)
     private var dofPackPSO: MTLComputePipelineState!, dofTilesPSO: MTLComputePipelineState!, dofBlurPSO: MTLComputePipelineState!
     private var dofReachPSO: MTLComputePipelineState!, dofBlocksPSO: MTLComputePipelineState!
+    private var snowLightPSO: MTLComputePipelineState!
     private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?, dofReach: MTLBuffer?, dofBlocks: MTLBuffer?
     /// 1 / depth with mipmaps: a big blur reads depth from the same level as colour.
     private var dofInv: MTLTexture?
@@ -396,6 +454,13 @@ final class RenderLoop {
     private var patterns: MTLTexture?
     // The scan's own colours (relighting reads them; Spirula's are overwritten).
     private let means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
+    /// Per splat, for snow and frost: its surface's facing (the thinnest axis) and its size.
+    private let surf: MTLBuffer
+    /// Per splat, how open it is to the sky (0-255), from a view straight down from the snow's ceiling.
+    private var skyVis: MTLBuffer?
+    private var skyKey: [Float] = []
+    private var skyFrame: (buf: MTLBuffer, off: Int, index: Int32)?
+    private var skyVisPSO: MTLComputePipelineState!
     private let colours: (buf: MTLBuffer, off: Int)
     private let count: Int, higherCoeffs: Int
     private var lastRelight: [SIMD4<Float>] = []
@@ -490,6 +555,8 @@ final class RenderLoop {
         dofTilesPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_tiles")!)
         dofReachPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_reach")!)
         dofBlocksPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blocks")!)
+        snowLightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "snow_light")!)
+        skyVisPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "sky_vis")!)
         dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         develop16PSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop16")!)
@@ -507,6 +574,7 @@ final class RenderLoop {
             a.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: max($0.count, 16), options: .storageModeShared)! }
         }
         means = upload(model.means)
+        surf = Self.surfaces(model, device: device)
         dc0 = upload(model.dc)
         sh0 = upload(model.sh.isEmpty ? [0] : model.sh)
         var cb: UnsafeMutableRawPointer?
@@ -738,15 +806,114 @@ final class RenderLoop {
         return vis
     }
 
+    /// Each splat's surface: the thinnest axis of its Gaussian (its facing), as
+    /// signed bytes, and log2 of its largest scale (scan units), packed in a byte.
+    private static func surfaces(_ m: SplatModel, device: MTLDevice) -> MTLBuffer {
+        let n = m.count
+        var out = [UInt8](repeating: 0, count: max(n, 1) * 4)
+        let parts = 16
+        out.withUnsafeMutableBufferPointer { (o: inout UnsafeMutableBufferPointer<UInt8>) in
+            let dst = o
+            m.quats.withUnsafeBufferPointer { (q: UnsafeBufferPointer<Float>) in
+                m.scales.withUnsafeBufferPointer { (sc: UnsafeBufferPointer<Float>) in
+                    DispatchQueue.concurrentPerform(iterations: parts) { (part: Int) in
+                        let lo = n * part / parts, hi = n * (part + 1) / parts
+                        for i in lo..<hi { packSurface(i, q, sc, dst) }
+                    }
+                }
+            }
+        }
+        return out.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)! }
+    }
+
+    private static func packSurface(_ i: Int, _ q: UnsafeBufferPointer<Float>, _ sc: UnsafeBufferPointer<Float>,
+                                    _ o: UnsafeMutableBufferPointer<UInt8>) {
+        let w: Float = q[4 * i], x: Float = q[4 * i + 1], y: Float = q[4 * i + 2], z: Float = q[4 * i + 3]
+        let l: Float = max((w * w + x * x + y * y + z * z).squareRoot(), 1e-9)
+        let qw = w / l, qx = x / l, qy = y / l, qz = z / l
+        let s0: Float = sc[3 * i], s1: Float = sc[3 * i + 1], s2: Float = sc[3 * i + 2]
+        // column of the rotation along the thinnest axis
+        var nx: Float, ny: Float, nz: Float
+        if s0 <= s1 && s0 <= s2 {
+            nx = 1 - 2 * (qy * qy + qz * qz); ny = 2 * (qx * qy + qw * qz); nz = 2 * (qx * qz - qw * qy)
+        } else if s1 <= s2 {
+            nx = 2 * (qx * qy - qw * qz); ny = 1 - 2 * (qx * qx + qz * qz); nz = 2 * (qy * qz + qw * qx)
+        } else {
+            nx = 2 * (qx * qz + qw * qy); ny = 2 * (qy * qz - qw * qx); nz = 1 - 2 * (qx * qx + qy * qy)
+        }
+        func byte(_ v: Float) -> UInt8 { UInt8(max(0, min(255, v))) }
+        o[4 * i] = byte((nx + 1) * 127.5)
+        o[4 * i + 1] = byte((ny + 1) * 127.5)
+        o[4 * i + 2] = byte((nz + 1) * 127.5)
+        let big: Float = max(s0, max(s1, s2)) / Float(M_LN2)      // log2 of the largest scale
+        o[4 * i + 3] = byte((big + 20) / 24 * 255)
+    }
+
+    /// How open each splat is to the sky, for snow settling (nil if it can't be
+    /// made). Seen from the snow's ceiling straight down, only splats within the
+    /// snowfall's reach rendered: a scan's sky dome is never a roof over it all.
+    private func prepareSky(_ snow: SceneSnow, up: SIMD3<Float>, body: CameraBody) -> MTLBuffer? {
+        let mpu = body.metresPerUnit
+        let key: [Float] = [snow.centre.x, snow.centre.y, snow.centre.z, snow.radiusM, snow.ceilingM, snow.ground,
+                            up.x, up.y, up.z, mpu]
+        if key == skyKey, let v = skyVis { return v }
+        if skyVis == nil { skyVis = device.makeBuffer(length: max(count, 16), options: .storageModePrivate) }
+        let res = 1536
+        if skyFrame == nil {
+            var b: UnsafeMutableRawPointer?
+            var o = 0
+            var first: Int32 = 0
+            guard sr_add_shared_frames(Int32(res), Int32(res), 1, &b, &o, &first) == 0 else { return nil }
+            skyFrame = (Unmanaged<MTLBuffer>.fromOpaque(b!).takeUnretainedValue(), o, first)
+        }
+        guard let vis = skyVis, let frame = skyFrame else { return nil }
+        // Settling reaches further than the falling column (snow lies everywhere you look).
+        let R = snow.radiusM * 3 / mpu, H = max(snow.ceilingM, 1) / mpu
+        let hc = snow.centre - up * simd_dot(snow.centre, up)
+        let C = hc + up * (snow.ground + H)
+        let (a, b) = SceneSnow.horizon(up)
+        let r = a, d = -b, f = -up                         // right, down, forward: looking straight down
+        let V: [Float] = [r.x, r.y, r.z, -simd_dot(r, C), d.x, d.y, d.z, -simd_dot(d, C),
+                          f.x, f.y, f.z, -simd_dot(f, C), 0, 0, 0, 1]
+        let half = min(atan(R / H), 80 * .pi / 180)
+        let fx = Float(res) / 2 / tan(half)
+        setLens(nil)
+        setCameraModel(false)
+        let mid = hc + up * (snow.ground + H * 0.5)
+        sr_set_region(mid.x, mid.y, mid.z, sqrt(R * R + H * H * 0.25) * 1.02)
+        let ok = render(frame.index, view: V, fx: fx, cx: Float(res) / 2, cy: Float(res) / 2)
+        sr_set_region(0, 0, 0, 0)
+        guard ok, let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return nil }
+        var S: [SIMD4<Float>] = [SIMD4(V[0], V[1], V[2], V[3]), SIMD4(V[4], V[5], V[6], V[7]), SIMD4(V[8], V[9], V[10], V[11]),
+                                 SIMD4(fx, Float(res), R, Float(count)), SIMD4(hc, 0), SIMD4(up, 0)]
+        ce.setComputePipelineState(skyVisPSO)
+        ce.setBuffer(means, offset: 0, index: 0)
+        ce.setBuffer(frame.buf, offset: frame.off, index: 1)
+        ce.setBytes(&S, length: S.count * 16, index: 2)
+        ce.setBuffer(vis, offset: 0, index: 3)
+        ce.dispatchThreads(MTLSize(width: count, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        ce.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        skyKey = key
+        lastRelight = []                                   // colours must be made again
+        return vis
+    }
+
     /// Writes the relit colours for this lighting, seen from `eye`, into
     /// Spirula's colour buffer (skipped when nothing changed).
     private func relight(_ plot: LightingPlot, eye: SIMD3<Float>, body: CameraBody, quality: ShadowQuality) {
         let vis = plot.lights.isEmpty || !shadowsOn ? nil : prepareShadows(plot, body: body, quality: quality)
+        let snow = plot.snow.flatMap { $0.settled > 0 || $0.frost > 0 ? $0 : nil }
+        let sky = snow.flatMap { prepareSky($0, up: plot.up, body: body) }
         var g: [SIMD4<Float>] = [
             SIMD4(eye, plot.ambient),
             SIMD4(Float(min(plot.lights.count, Self.maxLights)), Float(count), Float(higherCoeffs), 0.25),
             SIMD4(plot.ambientTint, vis == nil ? 0 : 1),
             SIMD4(Float(quality.rawValue), Float(shadowVersion), daylightScan ? 1 : 0, 0),
+            // Snow settled and hoarfrost (relight G[4], G[5]).
+            SIMD4(snow?.settled ?? 0, snow?.frost ?? 0, sky != nil ? 1 : 0, Float(skyKey.count)),
+            SIMD4(plot.up, body.metresPerUnit),
         ]
         let packs = plot.lights.prefix(Self.maxLights).map { $0.packed(metresPerUnit: body.metresPerUnit, sceneEV: body.sceneEV, up: plot.up) }
         var lt: [SIMD4<Float>] = packs.flatMap(\.head)
@@ -775,6 +942,8 @@ final class RenderLoop {
         ce.setBytes(&lt, length: lt.count * 16, index: 5)
         ce.setBuffer(tableBuf, offset: 0, index: 6)
         ce.setBuffer(vis ?? tableBuf, offset: 0, index: 7)
+        ce.setBuffer(surf, offset: 0, index: 8)
+        ce.setBuffer(sky ?? surf, offset: 0, index: 9)
         ce.setTexture(patterns, index: 0)
         ce.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -812,7 +981,12 @@ final class RenderLoop {
             $0.rows(eye: job.position, up: job.lighting.up, metresPerUnit: job.body.metresPerUnit, light: job.lighting.fogLight)
         }
         fogSeed = 0
-        if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof || fogRows != nil,
+        // Falling snow, as the finder sees it now (sharp in the smooth blur: it blurs after).
+        let snowNow = job.fromLight == nil ? snowPass(job.lighting, body: job.body, eye: job.position, view: job.view, fx: job.fx,
+                                                      cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
+                                                      w: finderSize.w, h: finderSize.h, t: CACurrentMediaTime(),
+                                                      blur: dof || job.lens == nil ? 0 : 1) : nil
+        if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof || fogRows != nil || snowNow != nil,
            let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:
             // a smaller copy, by the blur circle's size in the sky's texels.
@@ -821,7 +995,7 @@ final class RenderLoop {
             encodeBackground(enc, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, w: finderSize.w, h: finderSize.h,
                       view: job.view, fx: job.fx, cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
                       fisheye: job.fisheye, up: job.lighting.up, level: dof ? 0 : log2(max(1, texels)), shells: shells,
-                      fog: fogRows)
+                      fog: fogRows, snow: snowNow)
             enc.endEncoding()
             if dof, let lens = job.lens {
                 encodeDOF(cb, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, lens: lens, fx: job.fx,
@@ -979,9 +1153,15 @@ final class RenderLoop {
                     e.failed?("the renderer failed on sub-pupil \(e.next + 1) of \(e.cells.count)")
                     return
                 }
+                // The snow at this sub-pupil's moment in the shutter's opening: a slow
+                // shutter draws each flake's fall as a streak, as film does.
+                let tcx = axis.x + fx * d.x * invFocus - Float(x0) + jit.x, tcy = axis.y + fx * d.y * invFocus - Float(y0) + jit.y
+                let snowNow = snowPass(e.lighting, body: b, eye: cam.position, view: cam.viewMatrix, fx: fx, cx: tcx, cy: tcy,
+                                       w: tw, h: th, t: e.snowClock + Double(e.shutterTime(e.next)) * Double(b.shutter.seconds),
+                                       lensOffset: d, blur: share)
                 encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
-                          cx: axis.x + fx * d.x * invFocus - Float(x0) + jit.x, cy: axis.y + fx * d.y * invFocus - Float(y0) + jit.y,
-                          fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows, photo: true)
+                          cx: tcx, cy: tcy,
+                          fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows, photo: true, snow: snowNow)
                 let first = e.next == 0 ? Float(1) : 0
                 var l = [SIMD4<Float>(c.x, c.y, 1, first), mask,
                          SIMD4<Float>(Float(x0), Float(y0), Float(tw), Float(th)),

@@ -247,6 +247,8 @@ struct LightingPlot: Codable {
     var up = SIMD3<Float>(0, -1, 0)     // the world's up, for the heads' yokes
     /// The scene's fog, lit by the house lights (a .vcscene's).
     var fog: SceneFog? = nil
+    /// The scene's snow: falling, settled, hoarfrost.
+    var snow: SceneSnow? = nil
     /// The fog's light: the house lights on a white surface, as the frame shows it.
     var fogLight: SIMD3<Float> { ambientTint * ambient * 0.75 }
 
