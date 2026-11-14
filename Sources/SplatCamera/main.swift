@@ -385,9 +385,25 @@ func configureSession() {
     viewer.restoreFog()
     viewer.restoreSnow()
     // --snow FLAKES,SETTLED,FROST: snow for checks (flakes falling, settled 0-1, frost 0-1).
-    if let v = snowChoice?.split(separator: ",").compactMap({ Float($0) }), v.count == 3 {
+    //   then any of wind=M/S, dir=DEG, gust=0-1, flake=M, fall=M/S, ceiling=M, reach=M
+    let snowParts = snowChoice?.split(separator: ",").map(String.init) ?? []
+    if let v = Optional(snowParts.prefix(3).compactMap({ Float($0) })), v.count == 3 {
         var s = viewer.newSnow()
         s.density = v[0]; s.settled = v[1]; s.frost = v[2]
+        for kv in snowParts.dropFirst(3) {
+            let p = kv.split(separator: "=")
+            guard p.count == 2, let x = Float(p[1]) else { continue }
+            switch p[0] {
+            case "wind": s.windMS = x
+            case "dir": s.windDeg = x
+            case "gust": s.gust = x
+            case "flake": s.flakeM = x
+            case "fall": s.fallMS = x
+            case "ceiling": s.ceilingM = x
+            case "reach": s.radiusM = x
+            default: break
+            }
+        }
         viewer.lighting.snow = s
         print("Snow: \(s)")
     }
