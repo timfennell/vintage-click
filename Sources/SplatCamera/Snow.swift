@@ -17,7 +17,8 @@ struct SceneSnow: Codable, Equatable {
     var windMS: Float = 0
     var windDeg: Float = 0
     var gust: Float = 0.3
-    /// Snow lying on what faces up and is open to the sky (0...1), and hoarfrost (0...1).
+    /// Snow lying on what faces up and is open to the sky (0...2: past 1 heavy, filling
+    /// the bare spots and clinging to steeper faces), and hoarfrost (0...1).
     var settled: Float = 0
     var frost: Float = 0
     /// The column of falling snow: its radius round the camera, and its ceiling above the ground.

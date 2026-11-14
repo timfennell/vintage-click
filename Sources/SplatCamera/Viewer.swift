@@ -1952,8 +1952,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         let dirs: [Float] = [0, 45, 90, 135, 180, 225, 270, 315]
         let dirNames = ["ahead of the start", "ahead-right", "right", "behind-right", "behind", "behind-left", "left", "ahead-left"]
         let gusts: [Float] = [0, 0.3, 0.7]
-        let settled: [Float] = [0, 0.25, 0.5, 0.75, 1]
-        let settledNames = ["none", "a dusting", "a light cover", "covered", "deep"]
+        let settled: [Float] = [0, 0.25, 0.5, 0.75, 1, 1.35, 1.7, 2]
+        let settledNames = ["none", "a dusting", "a light cover", "covered", "deep", "heavy", "very heavy", "buried"]
         let frost: [Float] = [0, 0.3, 0.6, 0.9]
         let frostNames = ["none", "a touch", "hoarfrost", "thick hoarfrost"]
         let radii = fogSteps([0.15, 0.3, 0.6, 1.2, 2.5])

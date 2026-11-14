@@ -2384,11 +2384,18 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         // SKY: open to the sky x how much gathers there (hollows, corners, the lee), 0-2
         float accum = G[4].z > 0.5 ? float(SKY[i]) / 255 * 2 : 1.0;
         float open = min(accum, 1.0);
+        // Heavy snow (settled past 1) fills what lighter snow left bare and evens
+        // out the drifts: the bare spots come up to a full cover, then above it.
+        float heavy = saturate(G[4].x - 1.0);
+        // (only where the sky reaches at all: a wall's face under its own top stays bare)
+        float reached = smoothstep(0.03, 0.15, accum);
+        accum = mix(accum, (max(accum, 1.0) + 0.3 * heavy) * reached, heavy);
         // Flat holds the most: a flat roof full, a 30-degree roof about 60%, 45 degrees a
         // fifth; deep snow, and snow packed into corners, clings to steeper faces too.
         float flat = pow(saturate((upn - 0.55) / 0.45), 1.5);
         float cling = 0.5 * saturate(G[4].x * accum - 0.6) + 0.5 * saturate(accum - 1.1);
-        float hold = mix(flat, smoothstep(0.15, 0.6, upn), cling);
+        // buried: it clings to nearly anything not vertical
+        float hold = mix(mix(flat, smoothstep(0.15, 0.6, upn), cling), smoothstep(0.3, 0.6, upn), heavy * 0.8);   // never walls
         float sn = saturate(G[4].x * 1.2 * hold * accum);
         // Hoarfrost grows wherever the cold, damp air reaches, sky or no sky (a
         // little more where open to it), thickest on fine detail.
