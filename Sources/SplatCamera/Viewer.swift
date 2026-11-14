@@ -276,13 +276,14 @@ final class Viewer: NSObject, MTKViewDelegate {
         c.up = keepUp
         if inside {
             // Standing in the middle of the place at eye height, looking level.
-            camera.position = center + keepUp * (1.6 / body.metresPerUnit)
+            camera.position = center + keepUp * min(1.6 / body.metresPerUnit, radius * 0.13)
             if let spot = standingSpot, keepUp == FlyCamera().up {
                 camera.position = spot.position
                 camera.yaw = spot.yaw
             }
             home = camera
-            body.focusM = max(body.lens.minFocusM, 5)
+            // a few metres off in a real place; a scaled-down one, across part of the model
+            body.focusM = max(body.lens.minFocusM, min(5, radius * body.metresPerUnit * 0.5))
             return
         }
         let eye = center - c.forward * dist + keepUp * radius * 0.35
@@ -296,7 +297,9 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// few metres ahead (scans have no record of where the photographer stood).
     private static func findOpenSpot(_ m: SplatModel, centre: SIMD3<Float>, radius: Float,
                                      metresPerUnit: Float, up: SIMD3<Float>) -> (position: SIMD3<Float>, yaw: Float)? {
-        let unit = 1 / metresPerUnit
+        // A metre, in scene units; in a place scaled down to a model (a church at 3%)
+        // a person shrinks with it, so a metre is never more than a twelfth of the scene.
+        let unit = min(1 / metresPerUnit, radius / 12)
         let stride = max(1, m.count / 400_000)
         var pts: [SIMD3<Float>] = []
         for i in Swift.stride(from: 0, to: m.count, by: stride) {
@@ -1779,7 +1782,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         // it), so a scene at any scale (a miniature too) gets it right; failing
         // that, eye height in a place, the subject's bottom for an object.
         if let g = loop.groundBelow(camera.position, up: up, radius: max(radius * 0.08, 1e-4)) { return g }
-        return simd_dot(camera.position, up) - (sceneIsPlace ? 1.6 / body.metresPerUnit : radius * 0.5)
+        return simd_dot(camera.position, up) - (sceneIsPlace ? min(1.6 / body.metresPerUnit, radius * 0.13) : radius * 0.5)
     }
 
     private func newGround() -> SceneFog.Ground {
