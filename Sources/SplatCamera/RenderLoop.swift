@@ -64,9 +64,16 @@ final class ExposureJob {
     /// The moment through the shutter's opening sub-pupil `k` stands for:
     /// spread evenly over it, in an order unrelated to the lens rings.
     func shutterTime(_ k: Int) -> Float {
-        let v = Float(k) * 0.618034 + 0.5 / Float(cells.count)
+        // With axial colour each sub-pupil carries one channel (k % 3): the three of a
+        // set share their moment, so what moves (the camera, falling snow) blurs
+        // white, not into dotted red, green and blue.
+        let split = body.splitsColour(cells: cells.count)
+        let kk = split ? k / 3 : k, n = split ? max(1, cells.count / 3) : cells.count
+        let v = Float(kk) * 0.618034 + 0.5 / Float(n)
         return v - v.rounded(.down)
     }
+    /// The share of the shutter's opening one sub-pupil (or one colour set) stands for.
+    var shutterSlice: Float { 1 / Float(max(1, body.splitsColour(cells: cells.count) ? cells.count / 3 : cells.count)) }
     func camera(forCell k: Int) -> FlyCamera { cameraAt?(shutterTime(k)) ?? camera }
 
     init(camera: FlyCamera, body: CameraBody, lighting: LightingPlot, frameNumber: Int,
@@ -204,17 +211,20 @@ final class RenderLoop {
     /// lens offset (scene units, a photo's sub-pupil) and how much of the blur to
     /// spread the flakes by.
     private func snowPass(_ lighting: LightingPlot, body b: CameraBody, eye: SIMD3<Float>, view V: [Float],
-                          fx: Float, cx: Float, cy: Float, w: Int, h: Int, t: Double,
+                          fx: Float, cx: Float, cy: Float, w: Int, h: Int, t: Double, slice: Double = 0,
                           lensOffset: SIMD2<Float> = .zero, blur: Float) -> SnowPass? {
         guard let snow = lighting.snow, snow.density > 0 else { return nil }
         let mpu = b.metresPerUnit
         let world = snow.flakes(at: t, eye: eye, up: lighting.up, metresPerUnit: mpu)
         guard !world.isEmpty else { return nil }
+        // Where each flake has got to by the end of this sub-pupil's slice of the
+        // shutter: drawn as a streak from here to there, the slices join up.
+        let later = slice > 0 ? snow.flakes(at: t + slice, eye: eye, up: lighting.up, metresPerUnit: mpu) : nil
         // The sub-pupil's view is moved by its lens point: so are the flakes (as the splats).
         let eyeSub = eye + SIMD3(V[0], V[1], V[2]) * lensOffset.x + SIMD3(V[4], V[5], V[6]) * lensOffset.y
         let invFocus = mpu / max(b.focusM, 0.01)
         let aperture = b.lens.focalMM / 1000 / b.takingAperture / 2 / mpu
-        let binned = SceneSnow.bin(world, view: V, eye: eyeSub, fx: fx, cx: cx, cy: cy, width: w, height: h,
+        let binned = SceneSnow.bin(world, later: later, view: V, eye: eyeSub, fx: fx, cx: cx, cy: cy, width: w, height: h,
                                    invFocus: invFocus, apertureUnits: aperture, blur: blur)
         return SnowPass(world: world, binned: binned, house: lighting.fogLight * 1.33,
                         clearAir: SceneFog().rows(eye: eye, up: lighting.up, metresPerUnit: mpu, light: .zero))
@@ -1158,7 +1168,7 @@ final class RenderLoop {
                 let tcx = axis.x + fx * d.x * invFocus - Float(x0) + jit.x, tcy = axis.y + fx * d.y * invFocus - Float(y0) + jit.y
                 let snowNow = snowPass(e.lighting, body: b, eye: cam.position, view: cam.viewMatrix, fx: fx, cx: tcx, cy: tcy,
                                        w: tw, h: th, t: e.snowClock + Double(e.shutterTime(e.next)) * Double(b.shutter.seconds),
-                                       lensOffset: d, blur: share)
+                                       slice: Double(e.shutterSlice) * Double(b.shutter.seconds), lensOffset: d, blur: share)
                 encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
                           cx: tcx, cy: tcy,
                           fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows, photo: true, snow: snowNow)

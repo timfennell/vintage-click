@@ -92,7 +92,7 @@ struct SceneSnow: Codable, Equatable {
         static let size = 32
     }
 
-    static func bin(_ flakes: [SIMD4<Float>], view V: [Float], eye: SIMD3<Float>, fx: Float, cx: Float, cy: Float,
+    static func bin(_ flakes: [SIMD4<Float>], later: [SIMD4<Float>]? = nil, view V: [Float], eye: SIMD3<Float>, fx: Float, cx: Float, cy: Float,
                     width W: Int, height H: Int, invFocus: Float, apertureUnits: Float, blur: Float) -> Binned {
         var out = Binned()
         let bs = Binned.size
@@ -108,21 +108,37 @@ struct SceneSnow: Codable, Equatable {
             let zc = V[8] * rel.x + V[9] * rel.y + V[10] * rel.z
             guard zc > f.w * 4 else { continue }        // behind, or against the lens
             let px = cx + xc / zc * fx, py = cy + yc / zc * fx
+            // where it is at the slice's end (a streak), unless it wrapped round the column
+            var sx: Float = 0, sy: Float = 0
+            if let later, k < later.count {
+                let r2 = SIMD3(later[k].x, later[k].y, later[k].z) - eye
+                let x2 = V[0] * r2.x + V[1] * r2.y + V[2] * r2.z, y2 = V[4] * r2.x + V[5] * r2.y + V[6] * r2.z
+                let z2 = V[8] * r2.x + V[9] * r2.y + V[10] * r2.z
+                if z2 > f.w * 4 && simd_distance(SIMD3(later[k].x, later[k].y, later[k].z), SIMD3(f.x, f.y, f.z)) < f.w * 400 {
+                    sx = cx + x2 / z2 * fx - px; sy = cy + y2 / z2 * fx - py
+                }
+            }
             // its own size, and the lens's blur at its distance
             let r0 = max(0.5, f.w * 0.5 / zc * fx)
             let coc = fx * apertureUnits * abs(invFocus - 1 / zc) * blur
             let r = sqrt(r0 * r0 + coc * coc * 0.25)
             // a sub-pixel flake keeps its light: fainter, not bigger
-            let alpha = min(1, 0.85 * (max(f.w * 0.5 / zc * fx, 0.05) / r) * (max(f.w * 0.5 / zc * fx, 0.05) / r))
+            var alpha = min(1, 0.85 * (max(f.w * 0.5 / zc * fx, 0.05) / r) * (max(f.w * 0.5 / zc * fx, 0.05) / r))
+            // a streak spreads the same light along its length
+            let len = (sx * sx + sy * sy).squareRoot()
+            alpha *= r / (r + len * 0.5)
             guard alpha > 0.004 else { continue }
-            let reach = r * 3
-            guard px + reach >= 0, py + reach >= 0, px - reach < Float(W), py - reach < Float(H) else { continue }
+            let reach = r * 3 + len
+            guard len.isFinite, px.isFinite, py.isFinite else { continue }
             let id = UInt32(drawn.count / 2)
             drawn.append(SIMD4(px, py, r, alpha))
-            drawn.append(SIMD4(simd_length(rel), Float(k), 0, 0))
-            let x0 = max(0, Int((px - reach) / Float(bs))), x1 = min(out.binsW - 1, Int((px + reach) / Float(bs)))
-            let y0 = max(0, Int((py - reach) / Float(bs))), y1 = min(out.binsH - 1, Int((py + reach) / Float(bs)))
-            if (x1 - x0 + 1) * (y1 - y0 + 1) > 400 { continue }   // a blur filling the frame: too faint to matter
+            drawn.append(SIMD4(simd_length(rel), Float(k), sx, sy))
+            let mx = px + sx * 0.5, my = py + sy * 0.5, rr = r * 3 + len * 0.5
+            // (kept to the frame before turning into bin numbers: a long streak can run far off it)
+            func binOf(_ v: Float, _ n: Int) -> Int { Int(max(-1, min(Float(n), (v / Float(bs)).rounded(.down)))) }
+            let x0 = max(0, binOf(mx - rr, out.binsW)), x1 = min(out.binsW - 1, binOf(mx + rr, out.binsW))
+            let y0 = max(0, binOf(my - rr, out.binsH)), y1 = min(out.binsH - 1, binOf(my + rr, out.binsH))
+            guard x0 <= x1, y0 <= y1, (x1 - x0 + 1) * (y1 - y0 + 1) <= 400 else { continue }   // off the frame, or too faint to matter
             for by in y0...y1 { for bx in x0...x1 { lists[by * out.binsW + bx].append(id) } }
         }
         out.flakes = drawn.isEmpty ? [SIMD4<Float>](repeating: .zero, count: 2) : drawn

@@ -467,7 +467,9 @@ func configureSession() {
         viewer.scripted = true
         viewer.loop.developOnlyWhenStill = false
         let kind = movieFinal.flatMap { MovieDeveloper.Kind(rawValue: $0) } ?? .preview
-        let given = movieTake.flatMap { MotionTake.load(URL(fileURLWithPath: $0)) }
+        var given = movieTake.flatMap { MotionTake.load(URL(fileURLWithPath: $0)) }
+        // --snow on a given take: the take as it was, with the snow added (for checks).
+        if snowChoice != nil, given != nil { given!.lighting.snow = viewer.lighting.snow }
         let seconds = movieSeconds ?? 2
         DispatchQueue.main.asyncAfter(deadline: .now() + meterWait) {
             if let a = movieAngle { viewer.body.shutterAngle = a }

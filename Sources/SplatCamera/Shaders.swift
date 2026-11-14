@@ -1561,7 +1561,10 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
         for (uint k = 0; k < cnt; k++) {
             uint id = FI[start + k];
             float4 A = FK[2 * id], B = FK[2 * id + 1];
-            float2 dd = pc - A.xy;
+            // its streak through this sub-pupil's slice of the shutter (B.zw), as a capsule
+            float2 sv = B.zw;
+            float h = dot(sv, sv) > 1e-6 ? saturate(dot(pc - A.xy, sv) / dot(sv, sv)) : 0;
+            float2 dd = pc - (A.xy + sv * h);
             float g = A.w * exp(-0.5 * dot(dd, dd) / (A.z * A.z));
             if (g < 1e-3) continue;
             // behind the scan's surface here: hidden as much as the surface covers
