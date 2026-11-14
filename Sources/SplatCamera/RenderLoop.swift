@@ -23,6 +23,7 @@ struct FinderJob {
     var refresh = false             // the same view again (a periodic refresh): always in full
     var refined = false             // set on the full frame that replaces a shells frame
     var smoothBlur = true           // render sharp and blur in image space (else the renderer's own blur)
+    var tick = false                // the same view drawn again because something in it moves (falling snow)
 }
 
 /// One exposure on its way through the camera: the scene as it was when the
@@ -732,8 +733,14 @@ final class RenderLoop {
                     stopped.signal()
                     return false
                 }
-                let finder = finderRequest
+                var finder = finderRequest
                 finderRequest = nil
+                // A tick (falling snow) gives way to a photo waiting while the view is still:
+                // otherwise ticks would come back to back and the photo never develop.
+                if let f = finder, f.tick, !exposures.isEmpty,
+                   !developOnlyWhenStill || CACurrentMediaTime() - lastFinderAt >= Self.settle {
+                    finder = nil
+                }
                 // Photos develop while the view holds still: a moving finder has the
                 // GPU to itself, and the next step waits until it settles.
                 // The distant shells are baked the same way, before any photo.
@@ -754,7 +761,7 @@ final class RenderLoop {
                 cond.unlock()
                 if let finder {
                     renderFinder(finder, full: finder.refresh && !Self.noRefine)
-                    if !finder.refresh { lastFinderAt = CACurrentMediaTime() }
+                    if !finder.refresh && !finder.tick { lastFinderAt = CACurrentMediaTime() }
                 }
                 if let refineFor { var j = refineFor; j.refined = true; renderFinder(j, full: true) }
                 if let bakeFor { bake(bakeFor) }

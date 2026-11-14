@@ -429,13 +429,16 @@ final class Viewer: NSObject, MTKViewDelegate {
         loop.shellRadius = Self.shellMetres.map { $0 / body.metresPerUnit } ?? 4 / body.metresPerUnit
         // Render only a view that changed (or once a second, in case something
         // outside this key did): a still camera leaves the GPU to the darkroom.
-        // (While snow falls the finder draws every frame: the flakes move.)
-        let snowing = (lighting.snow?.density ?? 0) > 0 ? "\(CACurrentMediaTime())" : ""
-        let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)|\(snowing)|\(deepSnowSerial)"
+        let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)|\(deepSnowSerial)"
         // A take in the darkroom: the finder rests (the last frame stays up)
         // and the render thread exposes its frames back to back.
-        if movie == nil && (key != lastFinderKey || now - lastFinderAsk > 1) {
-            job.refresh = key == lastFinderKey
+        // While snow falls the finder draws again at the film's pace (the flakes
+        // move), as a tick: not a change of view, and a photo waiting goes first.
+        // (frozen while a photo develops: it has the GPU to itself, then the snow falls on)
+        let snowing = (lighting.snow?.density ?? 0) > 0 && loop.pendingExposures == 0
+        if movie == nil && (key != lastFinderKey || now - lastFinderAsk > 1 || (snowing && now - lastFinderAsk > 1 / 24)) {
+            job.refresh = key == lastFinderKey && now - lastFinderAsk > 1
+            job.tick = key == lastFinderKey && !job.refresh
             loop.requestFinder(job)
             lastFinderKey = key
             lastFinderAsk = now
