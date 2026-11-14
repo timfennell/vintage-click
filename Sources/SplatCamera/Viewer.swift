@@ -1789,6 +1789,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         return simd_dot(camera.position, up) - (sceneIsPlace ? min(1.6 / body.metresPerUnit, radius * 0.13) : radius * 0.5)
     }
 
+    var groundLevelHere: Float { groundHere }
+    func groundFogAt(visibility v: Float) -> SceneFog.Ground { var g = newGround(); g.visibilityM = v; return g }
+
     private func newGround() -> SceneFog.Ground {
         let st = fogSteps([0.5])[0]
         return SceneFog.Ground(visibilityM: st, level: groundHere, depthM: fogSteps([0.04])[0],

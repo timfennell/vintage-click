@@ -386,6 +386,34 @@ func configureSession() {
     // (saving it again from Blender starts from its own), a scan's per file.
     viewer.fogKey = sceneBundle.map { "bundle:" + $0.folder.lastPathComponent } ?? viewer.scenePath
     viewer.restoreFog()
+    // --fog haze=M,settle=M,ground=M,gdepth=M,gfade=M,patch=0-1: fog for checks (metres)
+    if let spec = option("--fog") {
+        var f = viewer.lighting.fog ?? SceneFog()
+        var g: SceneFog.Ground?
+        for kv in spec.split(separator: ",") {
+            let p = kv.split(separator: "=")
+            guard p.count == 2, let x = Float(p[1]) else { continue }
+            switch p[0] {
+            case "haze": f.visibilityM = x
+            case "settle": f.heightFalloffM = x
+            case "ground": g = viewer.groundFogAt(visibility: x)
+            default: break
+            }
+        }
+        for kv in spec.split(separator: ",") {
+            let p = kv.split(separator: "=")
+            guard p.count == 2, let x = Float(p[1]), g != nil else { continue }
+            switch p[0] {
+            case "gdepth": g!.depthM = x
+            case "gfade": g!.fadeM = x
+            case "patch": g!.patchiness = x
+            default: break
+            }
+        }
+        if let g { f.ground = g }
+        if f.heightFalloffM > 0 { f.base = viewer.camera.up * viewer.groundLevelHere }
+        viewer.lighting.fog = f
+    }
     viewer.restoreSnow()
     // --snow FLAKES,SETTLED,FROST: snow for checks (flakes falling, settled 0-1, frost 0-1).
     //   then any of wind=M/S, dir=DEG, gust=0-1, flake=M, fall=M/S, ceiling=M, reach=M
