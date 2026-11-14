@@ -107,6 +107,31 @@ enum SnowVolume {
                 gap[k] = Float(openTop - zz) * dz
             }
         }
+        // Cling to the model: the surface is the highest splat actually in that bin,
+        // not the bin's top (a bin can be a hand's breadth tall: snow would hover).
+        var topBin = [Int16](repeating: -1, count: N * N), lowBin = [Int16](repeating: -1, count: N * N)
+        for k in 0..<(N * N) {
+            if top[k] > -1e29 { topBin[k] = Int16(max(0, min(Z - 1, Int((top[k] - zlo) / dz) - 1))) }
+            if low[k] > -1e29 { lowBin[k] = Int16(max(0, min(Z - 1, Int((low[k] - zlo) / dz) - 1))) }
+        }
+        var topZ = [Float](repeating: -1e30, count: N * N), lowZ = [Float](repeating: -1e30, count: N * N)
+        for i in 0..<m.count {
+            let op = 1 / (1 + exp(-m.opacities[i]))
+            guard op > 0.25 else { continue }
+            let p = SIMD3(m.means[3 * i], m.means[3 * i + 1], m.means[3 * i + 2])
+            let z = simd_dot(p, up) * mpu
+            guard z > zlo, z < zhi else { continue }
+            let u = (simd_dot(p, ax) * mpu - hcA + Rm) / cell, v = (simd_dot(p, bx) * mpu - hcB + Rm) / cell
+            guard u >= 0, v >= 0, u < Float(N), v < Float(N) else { continue }
+            let zi = Int16(min(Z - 1, Int((z - zlo) / dz)))
+            let k = Int(v) * N + Int(u)
+            if zi == topBin[k] || zi == topBin[k] + 1 { topZ[k] = max(topZ[k], z) }
+            if zi == lowBin[k] || zi == lowBin[k] + 1 { lowZ[k] = max(lowZ[k], z) }
+        }
+        for k in 0..<(N * N) {
+            if top[k] > -1e29 && topZ[k] > -1e29 { top[k] = topZ[k] }
+            if low[k] > -1e29 && lowZ[k] > -1e29 { low[k] = lowZ[k] }
+        }
         let wa = snow.windDeg * .pi / 180
         let windDir = SIMD2<Float>(cos(wa), sin(wa)), wind01 = min(1, snow.windMS / 6)
         let world: (Int, Float) -> SIMD3<Float> = { k, hM in
@@ -238,7 +263,13 @@ enum SnowVolume {
             let ex = Float(min(min(x, N - 1 - x), min(y, N - 1 - y))) / Float(N) * 40
             let taper = min(1, ex)
             let want = depth(k) * hold * taper * taper * (3 - 2 * taper)
-            snow[k] = dist[k] < 2 ? 0 : min(want, pileK * dist[k] * f + (0.3 + 0.8 * stk) * f)
+            // The profile in from the support's rim: a bun (wet snow rounds over its
+            // shoulder, an ellipse) or a sand-pile cone (powder), reaching full depth a
+            // shoulder's width in; a narrow support never gets that far: a low dome.
+            let shoulder = max(want / pileK, f * 2)
+            let s01 = min(1, max(0, (dist[k] - 0.5) * f / shoulder))
+            let bun = (s01 * (2 - s01)).squareRoot()
+            snow[k] = want * (s01 * (1 - stk) + bun * stk)
         } }
         var top = [Float](repeating: -1e30, count: N * N)
         for k in 0..<(N * N) where snow[k] > 0 { top[k] = h[k] + snow[k] }
@@ -338,11 +369,12 @@ enum SnowVolume {
                 let kk = (y + dy) * N + (x + dx)
                 let below = top[kk] > -1e29 ? top[kk] : (valid(kk) ? h[kk] : h[k] - snow[k] * 2)
                 let drop = top[k] - below
-                guard drop > 1.5 * f else { continue }
-                let side = min(drop, snow[k] * (1.0 + 0.3 * stk) + f)
+                guard drop > 1.5 * f, stk > 0.3 else { continue }
+                // only a lip curling over the rim (wet snow); the bun's own top is its side
+                let side = min(drop, snow[k] * 0.45 * stk + f * 0.5)
                 let outward = simd_normalize(rgt * Float(dx) + dn * Float(dy))
                 let hang = snow[k] * hangK / mpu
-                let rows = max(1, min(24, Int(side / max(f * 0.8, 1e-6))))
+                let rows = 1                                       // a short, wide lip, not icicles
                 for rr in 0..<rows {
                     let s01 = (Float(rr) + 0.5) / Float(rows)
                     let bulge = hang * sin(Float.pi * min(1, s01 * 1.4))
@@ -350,7 +382,7 @@ enum SnowVolume {
                     // the underside of a cap turns in and darkens where it rests on its support
                     // (in its own colour: dark beneath even with no lamp to relight it)
                     let under = max(0, s01 - 0.35) / 0.65
-                    add(q, outward + up * (0.1 - 0.9 * under), along: fu * 0.55, across: side / mpu / Float(rows) * 0.6,
+                    add(q, outward + up * (0.1 - 0.9 * under), along: fu * 0.8, across: min(side / mpu * 0.5, fu * 0.6),
                         thin: fu * 0.08, shade: 0.88 - 0.5 * under * under, cool: 0.5 + 0.5 * under)
                 }
             }
