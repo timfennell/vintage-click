@@ -2371,6 +2371,7 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
     if (i >= N) return;
     float3 mean = float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
     float3 base = 0.5 + C0 * float3(dc0[3 * i], dc0[3 * i + 1], dc0[3 * i + 2]);
+    const float3 base0 = base;
     device const float* sh = sh0 + i * K * 3;
     // Snow and hoarfrost: G[4] = (settled, frost, sky known, -), G[5] = (up, metres per unit).
     // Snow lies on what faces up and is open to the sky; frost on everything the cold
@@ -2405,6 +2406,8 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         base = mix(base, float3(0.93, 0.95, 0.98), sn);
         base = mix(base, float3(0.85, 0.9, 0.96), fr * 0.9);
         damp = 1 - saturate(sn + 0.6 * fr);
+        // snow itself (already white: the laid snow) keeps its glints
+        damp = mix(damp, 1.0, smoothstep(0.8, 0.9, min(min(base0.r, base0.g), base0.b)));
     }
     float ambient = G[0].w;
     float3 v = normalize(mean - G[0].xyz);           // camera -> splat, as 3DGS reads SH

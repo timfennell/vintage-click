@@ -16,9 +16,12 @@ import simd
 enum SnowVolume {
     struct Splats {
         var means: [Float] = [], quats: [Float] = [], scales: [Float] = [], opacities: [Float] = [], dc: [Float] = []
+        /// Higher SH, K x 3 per splat (coefficient-major): random, so each grain's
+        /// brightness changes with the angle it is seen from, like crystal faces.
+        var sh: [Float] = []
         var count: Int { opacities.count }
         mutating func append(_ o: Splats) {
-            means += o.means; quats += o.quats; scales += o.scales; opacities += o.opacities; dc += o.dc
+            means += o.means; quats += o.quats; scales += o.scales; opacities += o.opacities; dc += o.dc; sh += o.sh
         }
     }
 
@@ -112,8 +115,9 @@ enum SnowVolume {
         }
         var out = Splats()
         let topScore = score(top, N: N, cell: cell, windDir: windDir, wind: wind01)
+        let K = max(0, (m.shDegree + 1) * (m.shDegree + 1) - 1)
         out.append(lay(top, depth: { k in depthM * (0.4 + 0.6 * topScore[k]) }, N: N, cell: cell, world: world,
-                       up: up, along: ax, across: bx, mpu: mpu, sticky: snow.sticky ?? 0.5, depthM: depthM))
+                       up: up, along: ax, across: bx, mpu: mpu, sticky: snow.sticky ?? 0.5, depthM: depthM, K: K))
         // beneath: what falls through the gaps in the cover round it, and what the wind
         // drifts in (the more the higher the open space over it), blending into the open
         var covered = [Float](repeating: 0, count: N * N)
@@ -126,7 +130,7 @@ enum SnowVolume {
             let shelter = (1 - drift) * covered[k] * 0.9 * exp(-gap[k] / shelterL)
             return depthM * (1 - shelter) * min(1, gap[k] / max(depthM * 3, cell * 3))
         }, N: N, cell: cell,
-                       world: world, up: up, along: ax, across: bx, mpu: mpu, sticky: snow.sticky ?? 0.5, depthM: depthM))
+                       world: world, up: up, along: ax, across: bx, mpu: mpu, sticky: snow.sticky ?? 0.5, depthM: depthM, K: K))
         return out
     }
 
@@ -187,7 +191,12 @@ enum SnowVolume {
     /// its support's width allows, rounded within each support, its sides hanging over.
     static func lay(_ h: [Float], depth: (Int) -> Float, N: Int, cell f: Float, world: (Int, Float) -> SIMD3<Float>,
                     up: SIMD3<Float>, along rgt: SIMD3<Float>, across dn: SIMD3<Float>, mpu: Float,
-                    sticky: Float, depthM: Float) -> Splats {
+                    sticky: Float, depthM: Float, K: Int = 0) -> Splats {
+        var rng = UInt64(0x9E3779B97F4A7C15)
+        func rnd() -> Float {                                    // -1...1
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17
+            return Float(rng & 0xFFFFFF) / Float(0x7FFFFF) - 1
+        }
         func valid(_ k: Int) -> Bool { h[k] > -1e29 }
         let stk = max(0, min(1, sticky))
         let pileK = 0.55 + 1.6 * stk * stk
@@ -257,10 +266,30 @@ enum SnowVolume {
         let r = max(1, min(10, Int(depthM * 0.5 / f)))
         top = smoothed(top, r: r, passes: 2)
         for k in 0..<(N * N) where top[k] > -1e29 { top[k] = max(top[k], h[k] + 0.2 * snow[k]) }
+        // Snow's own texture: a fine grain and a slight crust on the top (a few
+        // per cent of its depth, centimetre-scale), so it isn't a smooth cloud.
+        func vnoise(_ x: Float, _ y: Float) -> Float {
+            let xi = floor(x), yi = floor(y), fx = x - xi, fy = y - yi
+            func hsh(_ a: Float, _ b: Float) -> Float { let v = sin(a * 127.1 + b * 311.7) * 43758.5453; return v - floor(v) }
+            let u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy)
+            return (hsh(xi, yi) * (1 - u) + hsh(xi + 1, yi) * u) * (1 - v) + (hsh(xi, yi + 1) * (1 - u) + hsh(xi + 1, yi + 1) * u) * v
+        }
+        var grain = [Float](repeating: 0, count: N * N)
+        let gScale = max(f, 0.01)                              // ~1 cm and up
+        for y in 0..<N { for x in 0..<N {
+            let k = y * N + x
+            guard top[k] > -1e29 else { continue }
+            let px = Float(x) * f, py = Float(y) * f
+            let g = 0.55 * vnoise(px / (gScale * 6), py / (gScale * 6)) + 0.3 * vnoise(px / (gScale * 2.5), py / (gScale * 2.5))
+                + 0.15 * vnoise(px / gScale, py / gScale)
+            grain[k] = (g - 0.5) * min(snow[k] * 0.12, depthM * 0.05)
+            top[k] += grain[k]
+        } }
         let shadeTop = smoothed(top, r: 3, passes: 4)
+        let broad = smoothed(top, r: 8, passes: 2)
         var out = Splats()
         let C0: Float = 0.28209479177387814, white: Float = 0.92
-        func add(_ p: SIMD3<Float>, _ nrm: SIMD3<Float>, along: Float, across: Float, thin: Float, shade: Float) {
+        func add(_ p: SIMD3<Float>, _ nrm: SIMD3<Float>, along: Float, across: Float, thin: Float, shade: Float, cool: Float = 0) {
             let nn = simd_normalize(nrm)
             let seed: SIMD3<Float> = abs(nn.x) < 0.9 ? [1, 0, 0] : [0, 1, 0]
             let t1 = simd_normalize(simd_cross(nn, seed)), t2 = simd_cross(nn, t1)
@@ -268,10 +297,20 @@ enum SnowVolume {
             out.means += [p.x, p.y, p.z]
             out.quats += [q.real, q.imag.x, q.imag.y, q.imag.z]
             out.scales += [log(max(along, 1e-7)), log(max(across, 1e-7)), log(max(thin, 1e-7))]
-            out.opacities.append(log(0.97 / 0.03))
+            out.opacities.append(log(0.995 / 0.005))
             let sky = max(0, simd_dot(nn, up))
-            let c = (white * shade * (0.62 + 0.38 * sky) - 0.5) / C0
-            out.dc += [c, c, c * 1.02]
+            let lum = white * shade * (0.58 + 0.42 * sky)
+            // shade in snow goes cool (it is lit by the sky, not the sun)
+            let r = (lum * (1 - 0.05 * cool) - 0.5) / C0, g = (lum * (1 - 0.02 * cool) - 0.5) / C0, b = (lum * (1 + 0.04 * cool) - 0.5) / C0
+            out.dc += [r, g, b]
+            // view-dependent glints: random SH, most faint, one in eight strong
+            if K > 0 {
+                let strong: Float = (rng >> 20) % 8 == 0 ? 0.3 : 0.08
+                for c in 0..<K {
+                    let a = rnd() * strong * (c < 3 ? 0.7 : 1.0)     // white: the same in each channel
+                    out.sh += [a, a, a]
+                }
+            }
         }
         let fu = f / mpu
         for y in 2..<(N - 2) { for x in 2..<(N - 2) {
@@ -280,10 +319,21 @@ enum SnowVolume {
             func sh(_ kk: Int) -> Float { shadeTop[kk] > -1e29 ? shadeTop[kk] : shadeTop[k] }
             let gx = (sh(k + 2) + sh(k + 1) - sh(k - 1) - sh(k - 2)) / (6 * f)
             let gy = (sh(k + 2 * N) + sh(k + N) - sh(k - N) - sh(k - 2 * N)) / (6 * f)
-            let nrm = up - rgt * gx - dn * gy
+            // micro facets: the grain's own slope on top of the drift's
+            let ggx = (grain[k + 1] - grain[k - 1]) / (2 * f), ggy = (grain[k + N] - grain[k - N]) / (2 * f)
+            let nrm = up - rgt * (gx + ggx * 2.5) - dn * (gy + ggy * 2.5)
             let jx = Float((x * 73 + y * 151) % 97) / 97 - 0.5, jy = Float((x * 37 + y * 89) % 89) / 89 - 0.5
-            let p = world(k, top[k]) + (rgt * jx + dn * jy) * fu * 0.6
-            add(p, nrm, along: fu * 0.8, across: fu * 0.8, thin: fu * 0.18, shade: 0.97 + 0.03 * Float((x * 7 + y * 13) % 5) / 4)
+            let p = world(k, top[k]) + (rgt * jx + dn * jy) * fu * 0.4
+            // hollows a touch darker, and nearer the support's edge the snow is firmer, crisper
+            let hollow = max(0, min(1, (broad[k] - top[k]) / max(depthM * 0.15, f)))
+            let nearEdge = dist[k] < 4
+            let sz: Float = nearEdge ? 0.5 : 0.62
+            add(p, nrm, along: fu * sz, across: fu * sz, thin: fu * 0.08,
+                shade: (0.96 + 0.04 * Float((x * 7 + y * 13) % 5) / 4) * (1 - 0.12 * hollow), cool: hollow)
+            // now and then a grain catching the light (a crystal face)
+            if (x * 2654435761 &+ y * 40503) % 23 == 0 {
+                add(p + up * (fu * 0.05), up + (rgt * jy - dn * jx) * 0.6, along: fu * 0.14, across: fu * 0.14, thin: fu * 0.05, shade: 1.12)
+            }
             for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                 let kk = (y + dy) * N + (x + dx)
                 let below = top[kk] > -1e29 ? top[kk] : (valid(kk) ? h[kk] : h[k] - snow[k] * 2)
@@ -297,7 +347,11 @@ enum SnowVolume {
                     let s01 = (Float(rr) + 0.5) / Float(rows)
                     let bulge = hang * sin(Float.pi * min(1, s01 * 1.4))
                     let q = world(k, top[k]) + outward * (fu * 0.5 + bulge) - up * (s01 * side / mpu)
-                    add(q, outward + up * 0.15, along: fu * 0.7, across: side / mpu / Float(rows) * 0.75, thin: fu * 0.12, shade: 0.9)
+                    // the underside of a cap turns in and darkens where it rests on its support
+                    // (in its own colour: dark beneath even with no lamp to relight it)
+                    let under = max(0, s01 - 0.35) / 0.65
+                    add(q, outward + up * (0.1 - 0.9 * under), along: fu * 0.55, across: side / mpu / Float(rows) * 0.6,
+                        thin: fu * 0.08, shade: 0.88 - 0.5 * under * under, cool: 0.5 + 0.5 * under)
                 }
             }
         } }

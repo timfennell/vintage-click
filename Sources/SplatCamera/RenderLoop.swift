@@ -935,7 +935,7 @@ final class RenderLoop {
                 model.means += v.means; model.quats += v.quats; model.scales += v.scales
                 model.opacities += v.opacities; model.dc += v.dc
                 let K = (model.shDegree + 1) * (model.shDegree + 1) - 1
-                if K > 0 { model.sh += [Float](repeating: 0, count: v.count * K * 3) }
+                if K > 0 { model.sh += v.sh.count == v.count * K * 3 ? v.sh : [Float](repeating: 0, count: v.count * K * 3) }
                 model.count += v.count
             }
             self.replaceSplats(model)
