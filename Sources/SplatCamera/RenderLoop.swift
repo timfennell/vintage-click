@@ -480,9 +480,9 @@ final class RenderLoop {
     /// Gobo and cookie patterns (PatternArt).
     private var patterns: MTLTexture?
     // The scan's own colours (relighting reads them; Spirula's are overwritten).
-    private let means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
+    private var means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
     /// Per splat, for snow and frost: its surface's facing (the thinnest axis) and its size.
-    private let surf: MTLBuffer
+    private var surf: MTLBuffer
     /// Per splat, how open it is to the sky (0-255), from a view straight down from the snow's ceiling.
     private var skyVis: MTLBuffer?
     private var skyKey: [Float] = []
@@ -492,8 +492,15 @@ final class RenderLoop {
     private var snowHeight: MTLBuffer?, snowField: MTLBuffer?
     /// The sky view's rows (sky_vis's S), for the falling snow's light too.
     private var skyRows: [SIMD4<Float>] = []
-    private let colours: (buf: MTLBuffer, off: Int)
-    private let count: Int, higherCoeffs: Int
+    private var colours: (buf: MTLBuffer, off: Int)
+    private var count: Int, higherCoeffs: Int
+    /// The scan on disk (snow with depth reloads it with the snow's splats added).
+    var sourcePLY: URL?
+    /// Work for the render thread, run before its next pass.
+    private var tasks: [() -> Void] = []
+    /// The snow with depth now in the scene (its key), and how many splats it added.
+    private(set) var laidSnowKey: [Float] = []
+    private(set) var laidSnowSplats = 0
     private var lastRelight: [SIMD4<Float>] = []
 
     // Shadow maps: per light, Spirula's render from the head (transmittance and
@@ -709,7 +716,14 @@ final class RenderLoop {
         while true {
             let goOn = autoreleasepool { () -> Bool in
                 cond.lock()
-                while finderRequest == nil && exposures.isEmpty && !bakeWanted && !refineWanted && !stopping { cond.wait() }
+                while finderRequest == nil && exposures.isEmpty && !bakeWanted && !refineWanted && !stopping && tasks.isEmpty { cond.wait() }
+                if !tasks.isEmpty {
+                    let todo = tasks
+                    tasks = []
+                    cond.unlock()
+                    for t in todo { t() }
+                    return true
+                }
                 if stopping {
                     cond.unlock()
                     stopped.signal()
@@ -883,10 +897,81 @@ final class RenderLoop {
         o[4 * i + 3] = byte((big + 20) / 24 * 255)
     }
 
+    /// Runs `f` on the render thread, before its next pass.
+    func onRenderThread(_ f: @escaping () -> Void) {
+        cond.lock()
+        tasks.append(f)
+        cond.signal()
+        cond.unlock()
+    }
+
+    /// Lays snow with depth for `snow` (nil, or no depth: takes it away). Slow (the
+    /// scan is reloaded with the snow's splats): `done` gets how many were laid, on
+    /// the main thread.
+    func layDeepSnow(_ snow: SceneSnow?, up: SIMD3<Float>, body: CameraBody, done: @escaping (Int) -> Void) {
+        onRenderThread { [weak self] in
+            guard let self, let url = self.sourcePLY else { return }
+            let depth = snow?.depthM ?? 0
+            let key: [Float] = snow.map { [depth, $0.sticky ?? 0.5, $0.centre.x, $0.centre.y, $0.centre.z, $0.radiusM, $0.ceilingM, $0.ground,
+                                           $0.windMS, $0.windDeg, up.x, up.y, up.z, body.metresPerUnit] } ?? []
+            if depth <= 0 && self.laidSnowKey.isEmpty { DispatchQueue.main.async { done(0) }; return }
+            if depth > 0 && key == self.laidSnowKey { DispatchQueue.main.async { done(self.laidSnowSplats) }; return }
+            guard var model = try? loadPLY(url) else { return }
+            var added = 0
+            if depth > 0, let snow {
+                // read straight from the splats (a level grid, a layer cake of heights)
+                let v = SnowVolume.build(model: model, snow: snow, up: up, metresPerUnit: body.metresPerUnit)
+                added = v.count
+                model.means += v.means; model.quats += v.quats; model.scales += v.scales
+                model.opacities += v.opacities; model.dc += v.dc
+                let K = (model.shDegree + 1) * (model.shDegree + 1) - 1
+                if K > 0 { model.sh += [Float](repeating: 0, count: v.count * K * 3) }
+                model.count += v.count
+            }
+            self.replaceSplats(model)
+            self.laidSnowKey = depth > 0 ? key : []
+            self.laidSnowSplats = added
+            DispatchQueue.main.async { done(added) }
+        }
+    }
+
+    /// A new set of splats for the renderer (render thread): every buffer and cache made from them, afresh.
+    private func replaceSplats(_ model: SplatModel) {
+        let ok = model.means.withUnsafeBufferPointer { m in
+            model.quats.withUnsafeBufferPointer { q in
+                model.scales.withUnsafeBufferPointer { s in
+                    model.opacities.withUnsafeBufferPointer { o in
+                        model.dc.withUnsafeBufferPointer { dc in
+                            model.sh.withUnsafeBufferPointer { sh in
+                                sr_set_splats(Int64(model.count), Int32(model.shDegree), m.baseAddress,
+                                              q.baseAddress, s.baseAddress, o.baseAddress,
+                                              dc.baseAddress, model.shDegree > 0 ? sh.baseAddress : nil)
+                            }}}}}}
+        if ok != 0 { print(SpirulaError("loading splats")); return }
+        func upload(_ a: [Float]) -> MTLBuffer {
+            a.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: max($0.count, 16), options: .storageModeShared)! }
+        }
+        count = model.count
+        higherCoeffs = (model.shDegree + 1) * (model.shDegree + 1) - 1
+        means = upload(model.means)
+        surf = Self.surfaces(model, device: device)
+        dc0 = upload(model.dc)
+        sh0 = upload(model.sh.isEmpty ? [0] : model.sh)
+        var cb: UnsafeMutableRawPointer?
+        var co = 0
+        if sr_color_buffer(&cb, &co) == 0 { colours = (Unmanaged<MTLBuffer>.fromOpaque(cb!).takeUnretainedValue(), co) }
+        sr_set_render_degree(0)
+        visibility = [:]; shadowKeys = [:]; shadowViews = [:]
+        skyVis = nil; skyKey = []
+        lastRelight = []
+        window = nil; shellCentre = nil
+    }
+
     /// The ground under `eye`: the height (along up, scene units) where the splats
     /// in a narrow column below it lie thickest (nil if there are too few).
     func groundBelow(_ eye: SIMD3<Float>, up: SIMD3<Float>, radius r: Float) -> Float? {
-        let p = means.contents().bindMemory(to: Float.self, capacity: count * 3)
+        let buf = means, count = min(self.count, buf.length / 12)
+        let p = buf.contents().bindMemory(to: Float.self, capacity: count * 3)
         let eh = simd_dot(eye, up)
         var hs: [Float] = []
         hs.reserveCapacity(4096)
@@ -949,7 +1034,7 @@ final class RenderLoop {
         let F = res / 3
         if snowField == nil {
             snowHeight = device.makeBuffer(length: F * F * 4, options: .storageModePrivate)
-            snowField = device.makeBuffer(length: F * F * 4, options: .storageModePrivate)
+            snowField = device.makeBuffer(length: F * F * 4, options: .storageModeShared)
         }
         var S: [SIMD4<Float>] = [SIMD4(V[0], V[1], V[2], V[3]), SIMD4(V[4], V[5], V[6], V[7]), SIMD4(V[8], V[9], V[10], V[11]),
                                  SIMD4(fx, Float(res), R, Float(count)), SIMD4(hc, 0), SIMD4(up, 0)]

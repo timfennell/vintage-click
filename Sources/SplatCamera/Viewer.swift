@@ -53,7 +53,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     private var meterLum: Float = 0.18
     private var lastFinderKey = ""
     /// Which page of the game menu is showing.
-    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder, motion, fog, snow }
+    private enum MenuPage { case main, bag, lights, scene, photos, settings, finder, motion, fog, snow, weather }
     private var menuPage = MenuPage.main
     /// A refined frame eases in over the shells frame it replaces: that frame, held, and when the fade began.
     private var fadeFrom: (buf: MTLBuffer, off: Int, slot: Int)?
@@ -431,7 +431,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         // outside this key did): a still camera leaves the GPU to the darkroom.
         // (While snow falls the finder draws every frame: the flakes move.)
         let snowing = (lighting.snow?.density ?? 0) > 0 ? "\(CACurrentMediaTime())" : ""
-        let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)|\(snowing)"
+        let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)|\(snowing)|\(deepSnowSerial)"
         // A take in the darkroom: the finder rests (the last frame stays up)
         // and the render thread exposes its frames back to back.
         if movie == nil && (key != lastFinderKey || now - lastFinderAsk > 1) {
@@ -1303,7 +1303,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// scene, photos, settings, finder).
     func openMenu(page name: String) {
         let pages: [String: MenuPage] = ["main": .main, "bag": .bag, "lights": .lights, "scene": .scene,
-                                         "photos": .photos, "settings": .settings, "finder": .finder, "fog": .fog, "snow": .snow]
+                                         "photos": .photos, "settings": .settings, "finder": .finder, "fog": .fog, "snow": .snow, "weather": .weather]
         go(pages[name] ?? .main)
     }
 
@@ -1337,6 +1337,8 @@ final class Viewer: NSObject, MTKViewDelegate {
                     self?.go(.bag) },
                 .init(title: "Lights…", detail: k.map { "light \($0 + 1): gel, modifier, lens flare" } ?? "add a light first (lighting mode)") {
                     [weak self] in self?.go(.lights) },
+                .init(title: "Weather…", detail: "fog and snow: haze, ground fog, snow falling and lying, hoarfrost") { [weak self] in
+                    self?.go(.weather) },
                 .init(title: "Scene…", detail: "its light, sky and size; reset the view; open another scan") { [weak self] in
                     self?.go(.scene) },
                 .init(title: "Photos…", detail: "proofs or prints, size, quality, negatives, where rolls are kept") { [weak self] in
@@ -1428,7 +1430,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                     self.reopenMenu() },
             ]
         case .lights:
-            var items: [Item] = [back(to: .main), fogLink, snowLink]
+            var items: [Item] = [back(to: .main)]
             let newFlare = Item(title: "Lens flare on new lights: \(newLightsFlare ? "on" : "off")",
                                 detail: "whether a light you add flares when it shines into the lens (each light can still be switched)") { [weak self] in
                 guard let self else { return }
@@ -1465,6 +1467,8 @@ final class Viewer: NSObject, MTKViewDelegate {
                 })
             }
             return items
+        case .weather:
+            return [back(to: .main), fogLink, snowLink]
         case .fog:
             return fogItems()
         case .snow:
@@ -1805,7 +1809,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let patchName = ["even", "a little uneven", "patchy", "drifts", "wisps"]
         let tint = Self.fogTints.firstIndex { simd_distance($0.1, f.tint) < 0.01 } ?? 0
         var items: [Item] = [
-            Item(title: "Back to lights", detail: "") { [weak self] in self?.go(.lights) },
+            Item(title: "Back to weather", detail: "") { [weak self] in self?.go(.weather) },
             .init(title: "Haze: " + (f.visibilityM > 0 ? "you see about " + Self.metres(f.visibilityM) : "off"),
                   detail: "fog over everything: how far you can see through it", action: { [weak self] in
                 guard let self else { return }
@@ -1928,6 +1932,27 @@ final class Viewer: NSObject, MTKViewDelegate {
         lighting.snow = s.isEmpty ? nil : s
         rememberSnow()
         reopenMenu()
+        syncDeepSnow()
+    }
+
+    /// The snow with depth in the scene matches the snow as set (laid again when its
+    /// depth, type, place or the wind changed; a few seconds).
+    private var deepSnowWanted: [Float] = []
+    var deepSnowSerial = 0
+    func syncDeepSnow() {
+        let s = lighting.snow
+        let d = s?.depthM ?? 0
+        let want: [Float] = d > 0 ? [d, s!.sticky ?? 0.5, s!.centre.x, s!.centre.y, s!.centre.z, s!.radiusM, s!.ceilingM,
+                                     s!.ground, s!.windMS, s!.windDeg, camera.up.x, camera.up.y, camera.up.z, body.metresPerUnit] : []
+        guard want != deepSnowWanted else { return }
+        deepSnowWanted = want
+        if d > 0 { hud?.flash("LAYING SNOW…") }
+        loop.layDeepSnow(s, up: camera.up, body: body) { [weak self] n in
+            guard let self else { return }
+            self.deepSnowSerial += 1
+            if n > 0 { self.hud?.flash("SNOW LAID") }
+            Viewer.movieLog("snow with depth: \(n) splats")
+        }
     }
 
     private func snowItems() -> [MenuOverlay.Item] {
@@ -1955,12 +1980,15 @@ final class Viewer: NSObject, MTKViewDelegate {
         let settled: [Float] = [0, 0.25, 0.5, 0.75, 1, 1.35, 1.7, 2]
         let settledNames = ["none", "a dusting", "a light cover", "covered", "deep", "heavy", "very heavy", "buried"]
         let frost: [Float] = [0, 0.3, 0.6, 0.9]
+        let depths: [Float] = [0] + fogSteps([0.004, 0.008, 0.015, 0.03, 0.06, 0.1])
+        let stick: [Float] = [0, 0.35, 0.65, 1]
+        let stickNames = ["dry powder", "powdery", "damp", "wet and sticky"]
         let frostNames = ["none", "a touch", "hoarfrost", "thick hoarfrost"]
         let radii = fogSteps([0.15, 0.3, 0.6, 1.2, 2.5])
         let ceilings = fogSteps([0.05, 0.1, 0.2, 0.4, 0.8])
         let falls = fogSteps([0.005, 0.01, 0.03, 0.06, 0.12]).map { min($0, 3) }
         var items: [Item] = [
-            Item(title: "Back to lights", detail: "") { [weak self] in self?.go(.lights) },
+            Item(title: "Back to weather", detail: "") { [weak self] in self?.go(.weather) },
             stepper("Snow falling: " + named(s.density, fall, fallNames), "how hard it snows", { $0.density }, fall) { $0.density = $1 },
             stepper("Flakes: about " + Self.metres(s.flakeM) + " across", "fine powder to big wet clumps", { $0.flakeM }, sizes) { $0.flakeM = $1 },
             stepper("Falling at " + String(format: "%.2g m/s", s.fallMS), "how fast the flakes come down", { $0.fallMS }, falls) { $0.fallMS = $1 },
@@ -1970,6 +1998,12 @@ final class Viewer: NSObject, MTKViewDelegate {
             stepper("Gusts: " + named(s.gust, gusts, ["none", "some", "strong"]), "the wind rising and falling", { $0.gust }, gusts) { $0.gust = $1 },
             stepper("Snow settled: " + named(s.settled, settled, settledNames), "on what faces up and is open to the sky",
                     { $0.settled }, settled) { $0.settled = $1 },
+            stepper("Snow depth: " + ((s.depthM ?? 0) > 0 ? Self.metres(s.depthM!) + " lying" : "none"),
+                    "real snow laid over what it lands on: caps, pillows, the ground buried (a few seconds to lay)",
+                    { $0.depthM ?? 0 }, depths) { $0.depthM = $1 },
+            stepper("Snow type: " + named(s.sticky ?? 0.5, stick, stickNames),
+                    "dry powder slopes down like sand; wet snow sticks, its caps wider than what they sit on",
+                    { $0.sticky ?? 0.5 }, stick) { $0.sticky = $1 },
             stepper("Hoarfrost: " + named(s.frost, frost, frostNames), "frost on all the cold reaches, most on twigs, grass and leaf edges",
                     { $0.frost }, frost) { $0.frost = $1 },
             stepper("Snowfall reaches " + Self.metres(s.radiusM) + " round you", "the column of falling snow (it moves with you); settling reaches three times as far",
@@ -2009,6 +2043,7 @@ final class Viewer: NSObject, MTKViewDelegate {
                 s.ceilingM = max(s.ceilingM, eyeAbove * 2.5)
             }
             lighting.snow = s
+            syncDeepSnow()
         }
     }
 
@@ -2114,7 +2149,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             case .main: closeMenu()
             case .finder: go(.settings)
             case .motion: go(.bag)
-            case .fog, .snow: go(.lights)
+            case .fog, .snow: go(.weather)
             default: go(.main)
             }
         }

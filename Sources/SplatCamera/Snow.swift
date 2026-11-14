@@ -21,6 +21,11 @@ struct SceneSnow: Codable, Equatable {
     /// the bare spots and clinging to steeper faces), and hoarfrost (0...1).
     var settled: Float = 0
     var frost: Float = 0
+    /// Snow lying with depth (metres, as the scene measures; nil or 0: none): real
+    /// snow splats laid over what it lands on (SnowVolume).
+    var depthM: Float? = nil
+    /// 0 dry powder (piles like sand) ... 1 wet and sticky (caps wider than their base); nil: in between.
+    var sticky: Float? = nil
     /// The column of falling snow: its radius round the camera, and its ceiling above the ground.
     var radiusM: Float = 15
     var ceilingM: Float = 8
@@ -29,7 +34,7 @@ struct SceneSnow: Codable, Equatable {
     var ground: Float = 0
     var centre = SIMD3<Float>(0, 0, 0)
 
-    var isEmpty: Bool { density <= 0 && settled <= 0 && frost <= 0 }
+    var isEmpty: Bool { density <= 0 && settled <= 0 && frost <= 0 && (depthM ?? 0) <= 0 }
     static let maxFlakes = 40_000
 
     /// Two horizontal axes for `up` (as FlyCamera's horizon).

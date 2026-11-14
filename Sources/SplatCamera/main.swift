@@ -245,6 +245,7 @@ func startSession(_ plyPath: String) {
             }
         }
         let v = makeViewer(scan)
+        v.loop.sourcePLY = URL(fileURLWithPath: scan)
         DispatchQueue.main.async {
             viewer = v
             configureSession()
@@ -268,6 +269,8 @@ func configureSession() {
     if pinhole { viewer.setBenchLens(false) }
     // A Scene Builder scene: where to stand, its lights, house lights, bounds, sounds.
     if let b = sceneBundle { viewer.apply(b) }
+    // --no-lights: the scene's own lamps off (for checks)
+    if args.contains("--no-lights") { viewer.lighting.lights = [] }
     // --sound-gains: each sound's gain walking from the start to the first sound, for checks.
     if args.contains("--sound-gains"), let sc = viewer.soundscape, let first = sceneBundle?.emitters.first {
         let from = viewer.camera.position
@@ -401,11 +404,14 @@ func configureSession() {
             case "fall": s.fallMS = x
             case "ceiling": s.ceilingM = x
             case "reach": s.radiusM = x
+            case "depth": s.depthM = x
+            case "stick": s.sticky = x
             default: break
             }
         }
         viewer.lighting.snow = s
         Viewer.movieLog("Snow: \(s) eye \(viewer.camera.position)")
+        viewer.syncDeepSnow()
     }
     viewer.sceneName = sceneBundle?.name ?? (["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
         ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem)
