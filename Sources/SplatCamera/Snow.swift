@@ -49,8 +49,17 @@ struct SceneSnow: Codable, Equatable {
     /// develops the same snowfall each time.
     func flakes(at t: Double, eye: SIMD3<Float>, up: SIMD3<Float>, metresPerUnit mpu: Float) -> [SIMD4<Float>] {
         guard density > 0, radiusM > 0, ceilingM > 0 else { return [] }
-        let R = radiusM, H = ceilingM
-        let n = min(Self.maxFlakes, Int(density))
+        // Two layers: the column round you, and a wider one four times as far, so it
+        // snows through the whole scene, not only in front of the lens.
+        let near = layer(at: t, eye: eye, up: up, mpu: mpu, R: radiusM, H: ceilingM,
+                         n: min(Self.maxFlakes / 2, Int(density)), seed: 0)
+        let far = layer(at: t, eye: eye, up: up, mpu: mpu, R: radiusM * 4, H: ceilingM * 1.5,
+                        n: min(Self.maxFlakes / 2, Int(density * 1.5)), seed: 1_000_003)
+        return near + far
+    }
+
+    private func layer(at t: Double, eye: SIMD3<Float>, up: SIMD3<Float>, mpu: Float, R: Float, H: Float,
+                       n: Int, seed: UInt32) -> [SIMD4<Float>] {
         guard n > 0 else { return [] }
         let (a, b) = Self.horizon(up)
         let tt = Float(t.truncatingRemainder(dividingBy: 100_000))
@@ -74,7 +83,8 @@ struct SceneSnow: Codable, Equatable {
             let az = 0.35 * sin(k * (0.7 * x + 0.6 * y) + tt * 0.53 + 0.7)
             return SIMD3(ax, ay, az) * eddy * 0.6
         }
-        for i in 0..<UInt32(n) {
+        for j in 0..<UInt32(n) {
+            let i = j &+ seed
             let u1 = Self.hash(i, 1), u2 = Self.hash(i, 2), u3 = Self.hash(i, 3), u4 = Self.hash(i, 4)
             // sizes spread as real snow does: mostly small, now and then a big clump
             let gsz = (-2 * log(max(Self.hash(i, 7), 1e-6))).squareRoot() * cos(6.283 * Self.hash(i, 8))
@@ -158,7 +168,8 @@ struct SceneSnow: Codable, Equatable {
             // an irregular oval, tumbling as it falls (round again when blurred far out of focus)
             let ang = hash(UInt32(k), 12) * 6.283 + tt * (hash(UInt32(k), 13) - 0.5) * 6
             let sharpness = r0 / r
-            let aspect = 1 + (0.3 + 1.1 * hash(UInt32(k), 14)) * sharpness
+            // nearly round: the streak through the shutter gives the length, along its path
+            let aspect = 1 + 0.25 * hash(UInt32(k), 14) * sharpness
             drawn.append(SIMD4(cos(ang), sin(ang), aspect, 0))
             let mx = px + sx * 0.5, my = py + sy * 0.5, rr = r * 3 + len * 0.5
             // (kept to the frame before turning into bin numbers: a long streak can run far off it)
