@@ -488,6 +488,8 @@ final class RenderLoop {
     private var skyKey: [Float] = []
     private var skyFrame: (buf: MTLBuffer, off: Int, index: Int32)?
     private var skyVisPSO: MTLComputePipelineState!
+    private var snowHeightPSO: MTLComputePipelineState!, snowScorePSO: MTLComputePipelineState!
+    private var snowHeight: MTLBuffer?, snowField: MTLBuffer?
     /// The sky view's rows (sky_vis's S), for the falling snow's light too.
     private var skyRows: [SIMD4<Float>] = []
     private let colours: (buf: MTLBuffer, off: Int)
@@ -587,6 +589,8 @@ final class RenderLoop {
         snowLightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "snow_light")!)
         snowCompositePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "snow_composite")!)
         skyVisPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "sky_vis")!)
+        snowHeightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "snow_height")!)
+        snowScorePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "snow_score")!)
         dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
         develop16PSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop16")!)
@@ -912,7 +916,7 @@ final class RenderLoop {
     private func prepareSky(_ snow: SceneSnow, up: SIMD3<Float>, body: CameraBody) -> MTLBuffer? {
         let mpu = body.metresPerUnit
         let key: [Float] = [snow.centre.x, snow.centre.y, snow.centre.z, snow.radiusM, snow.ceilingM, snow.ground,
-                            up.x, up.y, up.z, mpu]
+                            up.x, up.y, up.z, mpu, snow.windMS, snow.windDeg]
         if key == skyKey, let v = skyVis { return v }
         if skyVis == nil { skyVis = device.makeBuffer(length: max(count, 16), options: .storageModePrivate) }
         let res = 1536
@@ -941,9 +945,37 @@ final class RenderLoop {
         let ok = render(frame.index, view: V, fx: fx, cx: Float(res) / 2, cy: Float(res) / 2)
         sr_set_region(0, 0, 0, 0)
         guard ok, let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return nil }
+        // Where snow builds up: a height map from the view down, scored (snow_score).
+        let F = res / 3
+        if snowField == nil {
+            snowHeight = device.makeBuffer(length: F * F * 4, options: .storageModePrivate)
+            snowField = device.makeBuffer(length: F * F * 4, options: .storageModePrivate)
+        }
         var S: [SIMD4<Float>] = [SIMD4(V[0], V[1], V[2], V[3]), SIMD4(V[4], V[5], V[6], V[7]), SIMD4(V[8], V[9], V[10], V[11]),
                                  SIMD4(fx, Float(res), R, Float(count)), SIMD4(hc, 0), SIMD4(up, 0)]
         skyRows = S
+        let footprint = 2 * H * tan(half) * mpu / Float(F)       // metres per field texel on the ground
+        let wa = snow.windDeg * .pi / 180
+        // the wind's way in field axes: across = a, down = -b
+        var sf = SIMD4<Float>(Float(F), footprint, cos(wa), -sin(wa))
+        var sf2 = SIMD4<Float>(min(1, snow.windMS / 6), mpu, 0, 0)
+        S.append(SIMD4(Float(F), 0, 0, 0))
+        if let hb = snowHeight, let fb = snowField {
+            let g = MTLSize(width: F, height: F, depth: 1), t = MTLSize(width: 16, height: 16, depth: 1)
+            ce.setComputePipelineState(snowHeightPSO)
+            ce.setBuffer(frame.buf, offset: frame.off, index: 1)
+            ce.setBytes(&S, length: S.count * 16, index: 2)
+            ce.setBuffer(hb, offset: 0, index: 4)
+            ce.setBytes(&sf, length: 16, index: 5)
+            ce.dispatchThreads(g, threadsPerThreadgroup: t)
+            ce.setComputePipelineState(snowScorePSO)
+            ce.setBuffer(hb, offset: 0, index: 4)
+            ce.setBytes(&sf, length: 16, index: 5)
+            ce.setBytes(&sf2, length: 16, index: 6)
+            ce.setBuffer(fb, offset: 0, index: 7)
+            ce.dispatchThreads(g, threadsPerThreadgroup: t)
+            ce.setBuffer(fb, offset: 0, index: 7)
+        }
         ce.setComputePipelineState(skyVisPSO)
         ce.setBuffer(means, offset: 0, index: 0)
         ce.setBuffer(frame.buf, offset: frame.off, index: 1)

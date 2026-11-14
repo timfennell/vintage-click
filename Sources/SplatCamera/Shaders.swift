@@ -2250,11 +2250,84 @@ kernel void shadow_vis(device const float* means [[buffer(0)]], device const flo
     vis[i * 8 + slot] = uchar(clamp(lit / float(nf), 0.0, 1.0) * 255 + 0.5);
 }
 
+// ---- where snow builds up ------------------------------------------------------
+// From the view straight down from the snow's ceiling: a height map of what the
+// snow lands on (field texels F x F, each 3 x 3 of the view), then a score per
+// texel for how much snow gathers there (1 plain, 0 bare, 2 deep):
+//   hollows and inside corners gather it (below their surroundings, at a small and
+//   a larger scale); ridges and peaks shed it; in wind, the lee of anything that
+//   stands up upwind gathers a drift, and faces turned to the wind are scoured.
+//   SF = (field size, metres per texel, wind across, wind down) in field axes,
+//   SF2 = (wind 0-1 (m/s / 6), metres per unit, -, -)
+kernel void snow_height(device const float* map [[buffer(1)]], constant float4* S [[buffer(2)]],
+                        device float* hgt [[buffer(4)]], constant float4& SF [[buffer(5)]],
+                        uint2 p [[thread_position_in_grid]]) {
+    uint F = uint(SF.x), res = uint(S[3].y);
+    if (p.x >= F || p.y >= F) return;
+    float best = 1e30, bestT = 1;
+    for (uint dy = 0; dy < 3; dy++) for (uint dx = 0; dx < 3; dx++) {
+        float2 tp = shadow_tap(map, int2(p * 3 + uint2(dx, dy)), res);
+        if (tp.x < 0.6 && tp.y > 0 && tp.y < best) { best = tp.y; bestT = tp.x; }
+    }
+    if (best >= 1e30) { hgt[p.y * F + p.x] = -1e30; return; }
+    // the ray through this texel (view rows: right, down, forward) from the camera
+    float fx = S[3].x;
+    float2 uv = (float2(p * 3) + 1.5 - float(res) * 0.5) / fx;
+    float3 rgt = S[0].xyz, dn = S[1].xyz, fw = S[2].xyz;
+    float3 cam = -(rgt * S[0].w + dn * S[1].w + fw * S[2].w);
+    float3 dir = normalize(fw + rgt * uv.x + dn * uv.y);
+    hgt[p.y * F + p.x] = dot(cam + dir * best, S[5].xyz);
+}
+
+float snow_h_at(device const float* hgt, int F, float2 q) {
+    int2 c = clamp(int2(q), int2(0), int2(F - 1));
+    return hgt[c.y * F + c.x];
+}
+
+kernel void snow_score(device const float* hgt [[buffer(4)]], constant float4& SF [[buffer(5)]],
+                       constant float4& SF2 [[buffer(6)]], device float* score [[buffer(7)]],
+                       uint2 p [[thread_position_in_grid]]) {
+    int F = int(SF.x);
+    if (int(p.x) >= F || int(p.y) >= F) return;
+    float h = hgt[p.y * uint(F) + p.x];
+    if (h < -1e29) { score[p.y * uint(F) + p.x] = 1; return; }
+    float tm = SF.y, mpu = SF2.y;                         // metres per texel, per unit
+    // hollowness at two scales: the mean height round it, less its own (metres)
+    float c[2];
+    float radii[2] = { 0.3, 1.5 };
+    for (int s = 0; s < 2; s++) {
+        float r = max(radii[s] / tm, 1.5), sum = 0, n = 0;
+        for (uint k = 0; k < 12; k++) {
+            float hk = snow_h_at(hgt, F, float2(p) + 0.5 + vogel(k, 12) * r);
+            if (hk > -1e29) { sum += hk; n += 1; }
+        }
+        c[s] = n > 0 ? (sum / n - h) * mpu : 0;
+    }
+    float acc = 1 + 0.9 * clamp(c[0] / 0.15, -1.0, 1.5) + 0.6 * clamp(c[1] / 0.4, -1.0, 1.5);
+    // wind: the lee of what stands upwind, and faces turned into the wind
+    float wind = SF2.x;
+    if (wind > 0.01) {
+        float2 wd = normalize(SF.zw);
+        float lee = 0;
+        for (int k = 1; k <= 12; k++) {
+            float d = float(k) * 0.25;                    // metres upwind
+            float hu = snow_h_at(hgt, F, float2(p) + 0.5 - wd * (d / tm));
+            if (hu > -1e29) lee = max(lee, (hu - h) * mpu - d * 0.2);
+        }
+        float gx = (snow_h_at(hgt, F, float2(p) + float2(1.5, 0.5)) - snow_h_at(hgt, F, float2(p) + float2(-0.5, 0.5))) * 0.5 * mpu / tm;
+        float gy = (snow_h_at(hgt, F, float2(p) + float2(0.5, 1.5)) - snow_h_at(hgt, F, float2(p) + float2(0.5, -0.5))) * 0.5 * mpu / tm;
+        float windward = saturate(dot(float2(gx, gy), wd) * 3);
+        acc += wind * (1.8 * clamp(lee / 0.15, 0.0, 1.5) - 0.5 * windward);
+    }
+    score[p.y * uint(F) + p.x] = clamp(acc, 0.0, 2.0);
+}
+
 // How open each splat is to the sky (for snow settling): seen from the snow's
 // ceiling straight down, is anything above it? Fades out at the snowfall's edge.
 //   S[0..2] view rows, S[3] = (fx, map size, reach (units), splats), S[4] = (column centre on the ground plane), S[5] = (up)
 kernel void sky_vis(device const float* means [[buffer(0)]], device const float* map [[buffer(1)]],
                     constant float4* S [[buffer(2)]], device uchar* vis [[buffer(3)]],
+                    device const float* score [[buffer(7)]],
                     uint i [[thread_position_in_grid]]) {
     if (i >= uint(S[3].w)) return;
     float3 m = float3(means[3 * i], means[3 * i + 1], means[3 * i + 2]);
@@ -2277,7 +2350,11 @@ kernel void sky_vis(device const float* means [[buffer(0)]], device const float*
         bool roof = tp.x < 0.6 && tp.y > 0 && tp.y < dr - bias;
         open += roof ? 0.0 : 1.0;
     }
-    vis[i] = uchar(clamp(open / 5 * edge, 0.0, 1.0) * 255 + 0.5);
+    // how much gathers here (0 bare ... 2 deep), from the field: open x score, as 0-2
+    uint F = uint(S[6].x);
+    int2 fp = clamp(int2(uv / 3), int2(0), int2(F) - 1);
+    float acc = F > 0 ? score[uint(fp.y) * F + uint(fp.x)] : 1.0;
+    vis[i] = uchar(clamp(open / 5 * edge * acc * 0.5, 0.0, 1.0) * 255 + 0.5);
 }
 
 kernel void relight(device const float* means [[buffer(0)]], device const float* dc0 [[buffer(1)]],
@@ -2304,8 +2381,15 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         float upn = abs(dot(nrm / max(length(nrm), 1e-4), G[5].xyz));
         float sizeM = exp2(float(sf.w) / 255 * 24 - 20) * G[5].w;
         float thin = 1 - smoothstep(0.02, 0.25, sizeM);    // twigs and small branches as a scan has them
-        float open = G[4].z > 0.5 ? float(SKY[i]) / 255 : 1.0;
-        float sn = saturate(G[4].x * 1.4 * smoothstep(0.5, 0.9, upn) * open);
+        // SKY: open to the sky x how much gathers there (hollows, corners, the lee), 0-2
+        float accum = G[4].z > 0.5 ? float(SKY[i]) / 255 * 2 : 1.0;
+        float open = min(accum, 1.0);
+        // Flat holds the most: a flat roof full, a 30-degree roof about 60%, 45 degrees a
+        // fifth; deep snow, and snow packed into corners, clings to steeper faces too.
+        float flat = pow(saturate((upn - 0.55) / 0.45), 1.5);
+        float cling = 0.5 * saturate(G[4].x * accum - 0.6) + 0.5 * saturate(accum - 1.1);
+        float hold = mix(flat, smoothstep(0.15, 0.6, upn), cling);
+        float sn = saturate(G[4].x * 1.2 * hold * accum);
         // Hoarfrost grows wherever the cold, damp air reaches, sky or no sky (a
         // little more where open to it), thickest on fine detail.
         float fr = saturate(G[4].y * 1.1 * (0.7 + 0.3 * open) * (0.15 + 0.85 * thin * thin));
