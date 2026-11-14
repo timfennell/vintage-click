@@ -252,6 +252,32 @@ enum SnowVolume {
             if x < N - 1 && y < N - 1 { dist[k] = min(dist[k], dist[k + N + 1] + 1.414) }
             if x > 0 && y < N - 1 { dist[k] = min(dist[k], dist[k + N - 1] + 1.414) }
         } }
+        // The support's width at each spot: the widest point (deepest from its rim)
+        // of the same support within reach. Snow stands no taller than about that
+        // width (wet), half of it (powder): a pew's top edge holds a thin ridge
+        // while the seat and floor beside it fill deep.
+        let reach = max(1, min(48, Int((depthM * 1.5 / f).rounded(.up))))
+        var ridge = dist
+        for pass in 0..<2 {
+            let src = ridge
+            for y in 0..<N { for x in 0..<N {
+                let k = y * N + x
+                guard valid(k), src[k] < 1e8 else { continue }
+                var m = src[k]
+                for sgn in [-1, 1] {                     // out each way, stopping at a gap or a step
+                    var prev = k
+                    for t in 1...reach {
+                        let xx = pass == 0 ? x + sgn * t : x, yy = pass == 0 ? y : y + sgn * t
+                        guard xx >= 0, yy >= 0, xx < N, yy < N else { break }
+                        let kk = yy * N + xx
+                        guard valid(kk), src[kk] < 1e8, abs(h[kk] - h[prev]) < step else { break }
+                        m = max(m, src[kk]); prev = kk
+                    }
+                }
+                ridge[k] = m
+            } }
+        }
+        let widthK = 0.5 + 0.5 * stk
         var snow = [Float](repeating: 0, count: N * N)
         for y in 1..<(N - 1) { for x in 1..<(N - 1) {
             let k = y * N + x
@@ -270,6 +296,8 @@ enum SnowVolume {
             let s01 = min(1, max(0, (dist[k] - 0.5) * f / shoulder))
             let bun = (s01 * (2 - s01)).squareRoot()
             snow[k] = want * (s01 * (1 - stk) + bun * stk)
+            let width = (2 * ridge[k] + 1) * f                      // metres across
+            snow[k] = min(snow[k], max(f * 0.5, width * widthK))
         } }
         var top = [Float](repeating: -1e30, count: N * N)
         for k in 0..<(N * N) where snow[k] > 0 { top[k] = h[k] + snow[k] }
