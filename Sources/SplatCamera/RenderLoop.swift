@@ -184,6 +184,8 @@ final class RenderLoop {
             var srow = skyRows.count == 6 && skyFrame != nil ? skyRows : [SIMD4<Float>](repeating: .zero, count: 6)
             enc.setBytes(&srow, length: srow.count * 16, index: 23)
             enc.setBuffer(skyFrame?.buf ?? dummyBuf, offset: skyFrame?.off ?? 0, index: 24)
+            var st = SIMD4<Float>(Float(snow.time.truncatingRemainder(dividingBy: 10_000)), snow.up.x, snow.up.y, snow.up.z)
+            enc.setBytes(&st, length: 16, index: 25)
             enc.setBuffer(world, offset: 0, index: 15)
             enc.setBytes(&sn, length: 16, index: 16)
             enc.setBuffer(lightBuf, offset: 0, index: 17)
@@ -209,6 +211,8 @@ final class RenderLoop {
         var binned: SceneSnow.Binned
         var house: SIMD3<Float>
         var clearAir: [SIMD4<Float>]
+        var time: Double = 0
+        var up = SIMD3<Float>(0, -1, 0)
     }
 
     /// The snow seen by a view at time `t` (nil: none falling). `lens`: the view's
@@ -231,7 +235,8 @@ final class RenderLoop {
         let binned = SceneSnow.bin(world, later: later, view: V, eye: eyeSub, fx: fx, cx: cx, cy: cy, width: w, height: h,
                                    invFocus: invFocus, apertureUnits: aperture, blur: blur, t: t)
         return SnowPass(world: world, binned: binned, house: lighting.fogLight * 1.33,
-                        clearAir: SceneFog().rows(eye: eye, up: lighting.up, metresPerUnit: mpu, light: .zero))
+                        clearAir: SceneFog().rows(eye: eye, up: lighting.up, metresPerUnit: mpu, light: .zero),
+                        time: t, up: lighting.up)
     }
 
     // MARK: distant shells

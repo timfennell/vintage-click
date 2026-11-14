@@ -1361,9 +1361,26 @@ kernel void snow_light(constant float4* G [[buffer(2)]],
                        device const float4* W [[buffer(15)]], constant float4& SN [[buffer(16)]],
                        device float4* out [[buffer(17)]],
                        constant float4* SK [[buffer(23)]], device const float* skymap [[buffer(24)]],
+                       constant float4& ST [[buffer(25)]],
                        texture2d_array<float> patterns [[texture(3)]],
                        uint i [[thread_position_in_grid]]) {
     if (i >= uint(SN.x)) return;
+    // The flake's crystal faces: three, tumbling about its own axis at its own rate.
+    // A face catching a light toward the eye glints; between, the flake glows softly.
+    // ST = (time, up)
+    float tt = ST.x;
+    float h1 = fract(sin(float(i) * 12.9898) * 43758.5453), h2 = fract(sin(float(i) * 78.233) * 24634.6345);
+    float h3 = fract(sin(float(i) * 39.425) * 15731.743);
+    float3 axis = normalize(float3(h1 - 0.5, h2 - 0.5, h3 - 0.5) + 1e-3);
+    float spin = tt * (1.5 + 5 * h2) + h3 * 6.283;
+    float3 ref = abs(axis.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 e1 = normalize(cross(axis, ref)), e2 = cross(axis, e1);
+    float3 faces[3];
+    for (int f = 0; f < 3; f++) {
+        float a = spin + float(f) * 2.094 + h1 * float(f);
+        float tilt = 0.35 + 0.9 * fract(h2 * float(f + 3));
+        faces[f] = normalize((cos(a) * e1 + sin(a) * e2) * sin(tilt) + axis * cos(tilt));
+    }
     float3 x = W[i].xyz;
     float3 eye = G[2].xyz;
     float3 toEye = eye - x;
@@ -1387,7 +1404,15 @@ kernel void snow_light(constant float4* G [[buffer(2)]],
             }
         }
     }
-    float3 lit = SN.yzw * 0.8 * (0.25 + 0.75 * open);       // the house lights on white
+    float3 lit = SN.yzw * 0.55 * (0.25 + 0.75 * open);      // the house lights on white, softly
+    float3 vdir = toEye / max(de, 1e-9);
+    // The day's light comes most from the sky above: faces turned to it glint.
+    {
+        float3 hv = normalize(ST.yzw + vdir);
+        float g = 0;
+        for (int f = 0; f < 3; f++) g += pow(abs(dot(faces[f], hv)), 40.0);
+        lit += SN.yzw * open * g * 1.6;
+    }
     int nl = int(LP.x);
     for (int l = 0; l < nl; l++) {
         constant float4* L = LT + 6 * l;
@@ -1402,7 +1427,12 @@ kernel void snow_light(constant float4* G [[buffer(2)]],
         float3 tl = normalize(L[0].xyz - x);
         float c = dot(-tl, toEye / max(de, 1e-9));
         float g = 0.5, ph = (1 - g * g) / pow(max(1 + g * g - 2 * g * c, 1e-4), 1.5);
-        lit += e * (0.35 + 0.25 * ph);
+        lit += e * (0.25 + 0.2 * ph);
+        // a face between the lamp and the eye flashes
+        float3 hv = normalize(tl + vdir);
+        float gl = 0;
+        for (int f = 0; f < 3; f++) gl += pow(abs(dot(faces[f], hv)), 60.0);
+        lit += e * gl * 2.5;
     }
     float3 L;
     float tau = (G[0].y > 0 || G[0].x > 0 || G[4 + 5 * int(G[0].x)].x > 0) ? fog_depth(-toEye / max(de, 1e-9), de, G, L) : 0;
