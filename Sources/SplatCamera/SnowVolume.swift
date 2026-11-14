@@ -50,10 +50,10 @@ enum SnowVolume {
         us.sort(); vs.sort()
         let pick = { (a: [Float]) -> Float in a.isEmpty ? snow.radiusM * 3 : a[Int(Float(a.count - 1) * 0.985)] }
         let Rm = max(snow.radiusM, min(max(pick(us), pick(vs)) * 1.05, snow.radiusM * 40))
-        let N = 1024
+        let N = 1536
         let cell = 2 * Rm / Float(N)                          // metres per cell
         let zlo = groundM - max(depthM * 2, (zhi - groundM) * 0.25)
-        let Z = max(8, min(96, Int((zhi - zlo) / cell)))
+        let Z = max(8, min(72, Int((zhi - zlo) / cell)))
         let dz = (zhi - zlo) / Float(Z)
         // the layer cake: how much splat stands in each cell's height bins
         var occ = [UInt8](repeating: 0, count: N * N * Z)
