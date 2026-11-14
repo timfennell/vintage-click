@@ -870,6 +870,33 @@ final class RenderLoop {
         o[4 * i + 3] = byte((big + 20) / 24 * 255)
     }
 
+    /// The ground under `eye`: the height (along up, scene units) where the splats
+    /// in a narrow column below it lie thickest (nil if there are too few).
+    func groundBelow(_ eye: SIMD3<Float>, up: SIMD3<Float>, radius r: Float) -> Float? {
+        let p = means.contents().bindMemory(to: Float.self, capacity: count * 3)
+        let eh = simd_dot(eye, up)
+        var hs: [Float] = []
+        hs.reserveCapacity(4096)
+        let step = max(1, count / 2_000_000)                 // a sample of a big scan is plenty
+        var i = 0
+        while i < count {
+            let m = SIMD3(p[3 * i], p[3 * i + 1], p[3 * i + 2])
+            let h = simd_dot(m, up)
+            if h < eh {
+                let d = m - eye, side = d - up * simd_dot(d, up)
+                if simd_length_squared(side) < r * r { hs.append(h) }
+            }
+            i += step
+        }
+        guard hs.count >= 20, let lo = hs.min() else { return nil }
+        // the thickest layer: a histogram of heights below the camera
+        let span = max(eh - lo, 1e-6), bins = 64
+        var hist = [Int](repeating: 0, count: bins)
+        for h in hs { hist[min(bins - 1, Int((h - lo) / span * Float(bins)))] += 1 }
+        let best = hist.indices.max { hist[$0] < hist[$1] }!
+        return lo + (Float(best) + 0.5) / Float(bins) * span
+    }
+
     /// How open each splat is to the sky, for snow settling (nil if it can't be
     /// made). Seen from the snow's ceiling straight down, only splats within the
     /// snowfall's reach rendered: a scan's sky dome is never a roof over it all.

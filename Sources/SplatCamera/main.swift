@@ -405,7 +405,7 @@ func configureSession() {
             }
         }
         viewer.lighting.snow = s
-        print("Snow: \(s)")
+        Viewer.movieLog("Snow: \(s) eye \(viewer.camera.position)")
     }
     viewer.sceneName = sceneBundle?.name ?? (["scene", "point_cloud", "splat", "model", "output"].contains(stem.lowercased())
         ? (scanPath.deletingLastPathComponent as NSString).lastPathComponent : stem)

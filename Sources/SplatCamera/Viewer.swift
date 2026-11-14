@@ -426,7 +426,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         loop.shellRadius = Self.shellMetres.map { $0 / body.metresPerUnit } ?? 4 / body.metresPerUnit
         // Render only a view that changed (or once a second, in case something
         // outside this key did): a still camera leaves the GPU to the darkroom.
-        let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)"
+        // (While snow falls the finder draws every frame: the flakes move.)
+        let snowing = (lighting.snow?.density ?? 0) > 0 ? "\(CACurrentMediaTime())" : ""
+        let key = "\(job.view)|\(job.fx)|\(job.lens ?? [])|\(job.fromLight ?? -1)|\(job.fisheye)|\(lighting)|\(body.sceneEV)|\(body.metresPerUnit)|\(snowing)"
         // A take in the darkroom: the finder rests (the last frame stays up)
         // and the render thread exposes its frames back to back.
         if movie == nil && (key != lastFinderKey || now - lastFinderAsk > 1) {
@@ -1773,6 +1775,10 @@ final class Viewer: NSObject, MTKViewDelegate {
     /// The ground under the camera: eye height above it in a place, the scan's bottom for an object.
     private var groundHere: Float {
         let up = camera.up
+        // The scan's own ground under the camera (where splats lie thickest below
+        // it), so a scene at any scale (a miniature too) gets it right; failing
+        // that, eye height in a place, the subject's bottom for an object.
+        if let g = loop.groundBelow(camera.position, up: up, radius: max(radius * 0.08, 1e-4)) { return g }
         return simd_dot(camera.position, up) - (sceneIsPlace ? 1.6 / body.metresPerUnit : radius * 0.5)
     }
 
@@ -1905,7 +1911,9 @@ final class Viewer: NSObject, MTKViewDelegate {
         s.centre = camera.position
         s.ground = groundHere
         s.radiusM = fogSteps([0.6])[0]
-        s.ceilingM = fogSteps([0.3])[0]
+        // up past the camera, whatever the scene's size
+        let eyeAbove = max(0, (simd_dot(camera.position, camera.up) - s.ground) * body.metresPerUnit)
+        s.ceilingM = max(fogSteps([0.3])[0], eyeAbove * 2.5)
         s.fallMS = max(0.05, min(1.2, sceneMetres * 0.05))
         s.flakeM = max(0.0005, min(0.008, sceneMetres * 0.0003))
         return s
@@ -1989,7 +1997,16 @@ final class Viewer: NSObject, MTKViewDelegate {
     func restoreSnow() {
         guard let k = fogKey, let d = UserDefaults.standard.data(forKey: "snow:" + k) else { return }
         if String(decoding: d, as: UTF8.self) == "none" { lighting.snow = nil; return }
-        if let s = try? JSONDecoder().decode(SceneSnow.self, from: d) { lighting.snow = s }
+        if var s = try? JSONDecoder().decode(SceneSnow.self, from: d) {
+            // Snow set before the ground was measured from the scan may sit far below it.
+            let g = groundHere
+            if abs(s.ground - g) * body.metresPerUnit > s.ceilingM {
+                s.ground = g
+                let eyeAbove = max(0, (simd_dot(camera.position, camera.up) - g) * body.metresPerUnit)
+                s.ceilingM = max(s.ceilingM, eyeAbove * 2.5)
+            }
+            lighting.snow = s
+        }
     }
 
     /// Where this scene's fog is kept: its .vcscene (as saved) or its scan.
