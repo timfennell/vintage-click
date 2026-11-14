@@ -1439,6 +1439,52 @@ kernel void snow_light(constant float4* G [[buffer(2)]],
     out[i] = float4(lit, exp(-tau));
 }
 
+// Falling snow over a pixel's colour (display rgb): each flake in its bin, hidden
+// by what stands in front of it (in proportion to its cover t), lit and fogged as
+// snow_light found. FS = (bins across, bins down, bin size, -). The scene's depth
+// is left alone: the focusing aids judge the scene, not the flakes.
+float3 snow_over(float3 o3, uint2 p, float zsc, float t, device const float4* FK, device const uint* FB,
+                 device const uint* FI, device const float4* FL, constant float4& FS, float3 fogLight) {
+    uint bwN = uint(FS.x), bs = uint(FS.z);
+    uint b = min(p.y / bs, uint(FS.y) - 1) * bwN + min(p.x / bs, bwN - 1);
+    uint start = FB[2 * b], cnt = FB[2 * b + 1];
+    float3 lin = to_lin(o3);
+    float2 pc = float2(p) + 0.5;
+    for (uint k = 0; k < cnt; k++) {
+        uint id = FI[start + k];
+        float4 A = FK[3 * id], B = FK[3 * id + 1], C = FK[3 * id + 2];
+        // its streak through this sub-pupil's slice of the shutter (B.zw), as a capsule
+        float2 sv = B.zw;
+        float h = dot(sv, sv) > 1e-6 ? saturate(dot(pc - A.xy, sv) / dot(sv, sv)) : 0;
+        float2 dd = pc - (A.xy + sv * h);
+        float2 q = float2(dot(dd, C.xy), dot(dd, float2(-C.y, C.x)));
+        float asp = max(C.z, 1.0);
+        q *= float2(1 / sqrt(asp), sqrt(asp));
+        float g = A.w * exp(-0.5 * dot(q, q) / (A.z * A.z));
+        if (g < 1e-3) continue;
+        if (zsc > 0 && zsc < B.x) g *= t;
+        float4 Lf = FL[uint(B.y)];
+        float3 c = Lf.rgb * Lf.w + fogLight * (1 - Lf.w);
+        lin = mix(lin, c, saturate(g));
+    }
+    return float3(lin_to_srgb(lin.r), lin_to_srgb(lin.g), lin_to_srgb(lin.b));
+}
+
+// The finder's flakes after its smooth blur (each already spread by its own
+// distance), so the blur and the focusing aids see only the scene.
+kernel void snow_composite(device float* f [[buffer(0)]], constant float4& WH [[buffer(1)]],
+                           constant float4* G [[buffer(2)]],
+                           device const float4* FK [[buffer(18)]], device const uint* FB [[buffer(19)]],
+                           device const uint* FI [[buffer(20)]], device const float4* FL [[buffer(21)]],
+                           constant float4& FS [[buffer(22)]], uint2 p [[thread_position_in_grid]]) {
+    uint W = uint(WH.x), H = uint(WH.y);
+    if (p.x >= W || p.y >= H || FS.x <= 0) return;
+    uint n = W * H, i = p.y * W + p.x;
+    float3 o3 = float3(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+    o3 = snow_over(o3, p, f[4 * n + i], max(f[3 * n + i], 0.0), FK, FB, FI, FL, FS, G[1].rgb);
+    f[3 * i] = o3.x; f[3 * i + 1] = o3.y; f[3 * i + 2] = o3.z;
+}
+
 kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[buffer(1)]],
                             constant float4* G [[buffer(2)]],
                             constant float4* LT [[buffer(3)]], device const float4* BT [[buffer(4)]],
@@ -1597,41 +1643,8 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
     } else {
         o3 = c + t * back;
     }
-    // Falling snow over all of it: each flake in this pixel's bin, hidden by what
-    // stands in front of it (in proportion to its cover), lit and fogged as
-    // snow_light found. FS = (bins across, bins down, bin size, -).
-    if (snowy) {
-        uint bwN = uint(FS.x), bs = uint(FS.z);
-        uint b = min(p.y / bs, uint(FS.y) - 1) * bwN + min(p.x / bs, bwN - 1);
-        uint start = FB[2 * b], cnt = FB[2 * b + 1];
-        float zsc = f[4 * n + i];
-        float3 lin = to_lin(o3);
-        float2 pc = float2(p) + 0.5;
-        float nearest = 0, cover = 0;
-        for (uint k = 0; k < cnt; k++) {
-            uint id = FI[start + k];
-            float4 A = FK[3 * id], B = FK[3 * id + 1], C = FK[3 * id + 2];
-            // its streak through this sub-pupil's slice of the shutter (B.zw), as a capsule
-            float2 sv = B.zw;
-            float h = dot(sv, sv) > 1e-6 ? saturate(dot(pc - A.xy, sv) / dot(sv, sv)) : 0;
-            float2 dd = pc - (A.xy + sv * h);
-            // an oval at its own angle: long axis (C.xy) C.z times the short
-            float2 q = float2(dot(dd, C.xy), dot(dd, float2(-C.y, C.x)));
-            float asp = max(C.z, 1.0);
-            q *= float2(1 / sqrt(asp), sqrt(asp));
-            float g = A.w * exp(-0.5 * dot(q, q) / (A.z * A.z));
-            if (g < 1e-3) continue;
-            // behind the scan's surface here: hidden as much as the surface covers
-            if (zsc > 0 && zsc < B.x) g *= t;
-            float4 Lf = FL[uint(B.y)];
-            float3 c = Lf.rgb * Lf.w + G[1].rgb * (1 - Lf.w);   // through the fog: veiled in its light
-            lin = mix(lin, c, saturate(g));
-            if (g > cover) { cover = g; nearest = B.x; }
-        }
-        o3 = float3(lin_to_srgb(lin.r), lin_to_srgb(lin.g), lin_to_srgb(lin.b));
-        // A flake that fills the pixel is what the finder's blur sees there.
-        if (cover > 0.5) f[4 * n + i] = nearest;
-    }
+    // Falling snow over all of it (snow_over).
+    if (snowy) o3 = snow_over(o3, p, f[4 * n + i], t, FK, FB, FI, FL, FS, G[1].rgb);
     f[3 * i] = o3.x; f[3 * i + 1] = o3.y; f[3 * i + 2] = o3.z;
     f[3 * n + i] = -t;    // composited: shows nothing more through, but the lamps' faces still see its cover
 }

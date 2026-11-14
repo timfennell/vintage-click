@@ -122,7 +122,7 @@ final class RenderLoop {
     private func encodeBackground(_ enc: MTLComputeCommandEncoder, frame: MTLBuffer, offset: Int, w: Int, h: Int,
                                   view V: [Float], fx: Float, cx: Float, cy: Float, fisheye: Bool, up: SIMD3<Float>,
                                   level mip: Float, shells: ShellView? = nil, fog: [SIMD4<Float>]? = nil, photo: Bool = false,
-                                  snow: SnowPass? = nil) {
+                                  snow: SnowPass? = nil, snowLater: Bool = false) {
         guard skyTex != nil || shells != nil || fog != nil || snow != nil else { return }
         let s = sky
         var k: [SIMD4<Float>] = [
@@ -196,7 +196,13 @@ final class RenderLoop {
             enc.setBuffer(bins, offset: 0, index: 19)
             enc.setBuffer(index, offset: 0, index: 20)
             enc.setBuffer(lightBuf, offset: 0, index: 21)
-            fs = SIMD4(Float(snow.binned.binsW), Float(snow.binned.binsH), Float(SceneSnow.Binned.size), 0)
+            let binsFS = SIMD4<Float>(Float(snow.binned.binsW), Float(snow.binned.binsH), Float(SceneSnow.Binned.size), 0)
+            if snowLater {
+                // drawn after the finder's blur (snow_composite)
+                pendingSnow = (drawn, bins, index, lightBuf, binsFS, g)
+            } else {
+                fs = binsFS
+            }
         } else {
             for i in 18...21 { enc.setBuffer(dummyBuf, offset: 0, index: i) }
         }
@@ -279,7 +285,9 @@ final class RenderLoop {
     // MARK: the finder's blur (image space)
     private var dofPackPSO: MTLComputePipelineState!, dofTilesPSO: MTLComputePipelineState!, dofBlurPSO: MTLComputePipelineState!
     private var dofReachPSO: MTLComputePipelineState!, dofBlocksPSO: MTLComputePipelineState!
-    private var snowLightPSO: MTLComputePipelineState!
+    private var snowLightPSO: MTLComputePipelineState!, snowCompositePSO: MTLComputePipelineState!
+    /// The finder's flakes, lit, waiting to be drawn over its smooth blur.
+    private var pendingSnow: (MTLBuffer, MTLBuffer, MTLBuffer, MTLBuffer, SIMD4<Float>, [SIMD4<Float>])?
     private var dofCol: MTLTexture?, dofDep: MTLTexture?, dofTiles: MTLBuffer?, dofReach: MTLBuffer?, dofBlocks: MTLBuffer?
     /// 1 / depth with mipmaps: a big blur reads depth from the same level as colour.
     private var dofInv: MTLTexture?
@@ -577,6 +585,7 @@ final class RenderLoop {
         dofReachPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_reach")!)
         dofBlocksPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blocks")!)
         snowLightPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "snow_light")!)
+        snowCompositePSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "snow_composite")!)
         skyVisPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "sky_vis")!)
         dofBlurPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "dof_blur")!)
         developPSO = try device.makeComputePipelineState(function: lib.makeFunction(name: "develop")!)
@@ -1036,7 +1045,7 @@ final class RenderLoop {
         let snowNow = job.fromLight == nil ? snowPass(job.lighting, body: job.body, eye: job.position, view: job.view, fx: job.fx,
                                                       cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
                                                       w: finderSize.w, h: finderSize.h, t: CACurrentMediaTime(),
-                                                      blur: dof || job.lens == nil ? 0 : 1) : nil
+                                                      blur: job.lens == nil ? 0 : 1) : nil
         if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof || fogRows != nil || snowNow != nil,
            let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:
@@ -1046,12 +1055,31 @@ final class RenderLoop {
             encodeBackground(enc, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, w: finderSize.w, h: finderSize.h,
                       view: job.view, fx: job.fx, cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
                       fisheye: job.fisheye, up: job.lighting.up, level: dof ? 0 : log2(max(1, texels)), shells: shells,
-                      fog: fogRows, snow: snowNow)
+                      fog: fogRows, snow: snowNow, snowLater: dof)
             enc.endEncoding()
             if dof, let lens = job.lens {
                 encodeDOF(cb, frame: finderSlots[slot].buf, offset: finderSlots[slot].off, lens: lens, fx: job.fx,
                           cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y)
             }
+            // The flakes over the blurred finder, each blurred by its own distance.
+            if let (drawn, bins, index, light, fs, rows) = pendingSnow, let e = cb.makeComputeCommandEncoder() {
+                var wh = SIMD4<Float>(Float(finderSize.w), Float(finderSize.h), 0, 0)
+                var fsv = fs
+                var g = rows
+                e.setComputePipelineState(snowCompositePSO)
+                e.setBuffer(finderSlots[slot].buf, offset: finderSlots[slot].off, index: 0)
+                e.setBytes(&wh, length: 16, index: 1)
+                e.setBytes(&g, length: g.count * 16, index: 2)
+                e.setBuffer(drawn, offset: 0, index: 18)
+                e.setBuffer(bins, offset: 0, index: 19)
+                e.setBuffer(index, offset: 0, index: 20)
+                e.setBuffer(light, offset: 0, index: 21)
+                e.setBytes(&fsv, length: 16, index: 22)
+                e.dispatchThreads(MTLSize(width: finderSize.w, height: finderSize.h, depth: 1),
+                                  threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                e.endEncoding()
+            }
+            pendingSnow = nil
             cb.commit()
             cb.waitUntilCompleted()
         }
