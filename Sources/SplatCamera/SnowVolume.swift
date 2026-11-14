@@ -114,7 +114,8 @@ enum SnowVolume {
             if top[k] > -1e29 { topBin[k] = Int16(max(0, min(Z - 1, Int((top[k] - zlo) / dz) - 1))) }
             if low[k] > -1e29 { lowBin[k] = Int16(max(0, min(Z - 1, Int((low[k] - zlo) / dz) - 1))) }
         }
-        var topZ = [Float](repeating: -1e30, count: N * N), lowZ = [Float](repeating: -1e30, count: N * N)
+        var topZ = [Float](repeating: 0, count: N * N), lowZ = [Float](repeating: 0, count: N * N)
+        var topW = [Float](repeating: 0, count: N * N), lowW = [Float](repeating: 0, count: N * N)
         for i in 0..<m.count {
             let op = 1 / (1 + exp(-m.opacities[i]))
             guard op > 0.25 else { continue }
@@ -125,12 +126,14 @@ enum SnowVolume {
             guard u >= 0, v >= 0, u < Float(N), v < Float(N) else { continue }
             let zi = Int16(min(Z - 1, Int((z - zlo) / dz)))
             let k = Int(v) * N + Int(u)
-            if zi == topBin[k] || zi == topBin[k] + 1 { topZ[k] = max(topZ[k], z) }
-            if zi == lowBin[k] || zi == lowBin[k] + 1 { lowZ[k] = max(lowZ[k], z) }
+            // the visible surface: where the top splats' opacity sits (their weighted middle),
+            // not the single highest one (a stray splat would lift the snow off the object)
+            if zi == topBin[k] || zi == topBin[k] + 1 { topZ[k] += op * z; topW[k] += op }
+            if zi == lowBin[k] || zi == lowBin[k] + 1 { lowZ[k] += op * z; lowW[k] += op }
         }
         for k in 0..<(N * N) {
-            if top[k] > -1e29 && topZ[k] > -1e29 { top[k] = topZ[k] }
-            if low[k] > -1e29 && lowZ[k] > -1e29 { low[k] = lowZ[k] }
+            if top[k] > -1e29 && topW[k] > 0 { top[k] = topZ[k] / topW[k] }
+            if low[k] > -1e29 && lowW[k] > 0 { low[k] = lowZ[k] / lowW[k] }
         }
         let wa = snow.windDeg * .pi / 180
         let windDir = SIMD2<Float>(cos(wa), sin(wa)), wind01 = min(1, snow.windMS / 6)
@@ -225,7 +228,6 @@ enum SnowVolume {
         func valid(_ k: Int) -> Bool { h[k] > -1e29 }
         let stk = max(0, min(1, sticky))
         let pileK = 0.55 + 1.6 * stk * stk
-        let hangK = 0.02 + 0.55 * stk
         let step = max(depthM * 0.25, f * 2)
         var dist = [Float](repeating: 1e9, count: N * N)
         for y in 0..<N { for x in 0..<N {
@@ -293,7 +295,7 @@ enum SnowVolume {
             // shoulder, an ellipse) or a sand-pile cone (powder), reaching full depth a
             // shoulder's width in; a narrow support never gets that far: a low dome.
             let shoulder = max(want / pileK, f * 2)
-            let s01 = min(1, max(0, (dist[k] - 0.5) * f / shoulder))
+            let s01 = min(1, max(0, (dist[k] - 0.5 + 0.35 * stk) * f / shoulder))
             let bun = (s01 * (2 - s01)).squareRoot()
             snow[k] = want * (s01 * (1 - stk) + bun * stk)
             let width = (2 * ridge[k] + 1) * f                      // metres across
@@ -348,10 +350,17 @@ enum SnowVolume {
         let broad = smoothed(top, r: 8, passes: 2)
         var out = Splats()
         let C0: Float = 0.28209479177387814, white: Float = 0.92
-        func add(_ p: SIMD3<Float>, _ nrm: SIMD3<Float>, along: Float, across: Float, thin: Float, shade: Float, cool: Float = 0) {
+        func add(_ p: SIMD3<Float>, _ nrm: SIMD3<Float>, along: Float, across: Float, thin: Float, shade: Float, cool: Float = 0,
+                 dir: SIMD3<Float>? = nil) {
             let nn = simd_normalize(nrm)
-            let seed: SIMD3<Float> = abs(nn.x) < 0.9 ? [1, 0, 0] : [0, 1, 0]
-            let t1 = simd_normalize(simd_cross(nn, seed)), t2 = simd_cross(nn, t1)
+            var t1: SIMD3<Float>
+            if let d = dir, simd_length(d - nn * simd_dot(d, nn)) > 1e-4 {
+                t1 = simd_normalize(d - nn * simd_dot(d, nn))      // `along` runs this way
+            } else {
+                let seed: SIMD3<Float> = abs(nn.x) < 0.9 ? [1, 0, 0] : [0, 1, 0]
+                t1 = simd_normalize(simd_cross(nn, seed))
+            }
+            let t2 = simd_cross(nn, t1)
             let q = simd_quatf(simd_float3x3(columns: (t1, t2, nn)))
             out.means += [p.x, p.y, p.z]
             out.quats += [q.real, q.imag.x, q.imag.y, q.imag.z]
@@ -372,6 +381,7 @@ enum SnowVolume {
             }
         }
         let fu = f / mpu
+        func b0(_ k: Int) -> Float { max(top[k] - h[k], 1e-4) }
         for y in 2..<(N - 2) { for x in 2..<(N - 2) {
             let k = y * N + x
             guard snow[k] > max(0.004 * depthM / 0.3, 0.25 * f), top[k] > -1e29 else { continue }
@@ -387,31 +397,48 @@ enum SnowVolume {
             let hollow = max(0, min(1, (broad[k] - top[k]) / max(depthM * 0.15, f)))
             let nearEdge = dist[k] < 4
             let sz: Float = nearEdge ? 0.5 : 0.62
-            add(p, nrm, along: fu * sz, across: fu * sz, thin: fu * 0.08,
+            // On a steep face a cell's piece of surface is longer than the cell is wide:
+            // stretch the splat down the slope so the face stays closed (no see-through steps).
+            func same(_ kk: Int) -> Bool { top[kk] > -1e29 && valid(kk) && abs(h[kk] - h[k]) < step }
+            let tx = (same(k + 1) && same(k - 1)) ? (top[k + 1] - top[k - 1]) / (2 * f) : gx
+            let ty = (same(k + N) && same(k - N)) ? (top[k + N] - top[k - N]) / (2 * f) : gy
+            let g = min(6, (tx * tx + ty * ty).squareRoot())
+            let downhill = g > 0.05 ? (rgt * tx + dn * ty) / g + up * g : rgt
+            _ = downhill
+            add(p, nrm, along: fu * sz, across: fu * sz, thin: fu * 0.22,
                 shade: (0.96 + 0.04 * Float((x * 7 + y * 13) % 5) / 4) * (1 - 0.12 * hollow), cool: hollow)
             // now and then a grain catching the light (a crystal face)
             if (x * 2654435761 &+ y * 40503) % 23 == 0 {
                 add(p + up * (fu * 0.05), up + (rgt * jy - dn * jx) * 0.6, along: fu * 0.14, across: fu * 0.14, thin: fu * 0.05, shade: 1.12)
             }
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let kk = (y + dy) * N + (x + dx)
-                let below = top[kk] > -1e29 ? top[kk] : (valid(kk) ? h[kk] : h[k] - snow[k] * 2)
-                let drop = top[k] - below
-                guard drop > 1.5 * f, stk > 0.3 else { continue }
-                // only a lip curling over the rim (wet snow); the bun's own top is its side
-                let side = min(drop, snow[k] * 0.45 * stk + f * 0.5)
-                let outward = simd_normalize(rgt * Float(dx) + dn * Float(dy))
-                let hang = snow[k] * hangK / mpu
-                let rows = 1                                       // a short, wide lip, not icicles
-                for rr in 0..<rows {
-                    let s01 = (Float(rr) + 0.5) / Float(rows)
-                    let bulge = hang * sin(Float.pi * min(1, s01 * 1.4))
-                    let q = world(k, top[k]) + outward * (fu * 0.5 + bulge) - up * (s01 * side / mpu)
-                    // the underside of a cap turns in and darkens where it rests on its support
-                    // (in its own colour: dark beneath even with no lamp to relight it)
-                    let under = max(0, s01 - 0.35) / 0.65
-                    add(q, outward + up * (0.1 - 0.9 * under), along: fu * 0.8, across: min(side / mpu * 0.5, fu * 0.6),
-                        thin: fu * 0.08, shade: 0.88 - 0.5 * under * under, cool: 0.5 + 0.5 * under)
+            // Solid snow: where this spot's side is exposed (a neighbour lies lower), fill
+            // its column from the top down to what it rests on with round splats, so a cap
+            // or drift is a mass sitting on its support, with sides that darken toward the
+            // base, not a sheet hovering over it.
+            var foot = top[k]
+            var away = SIMD3<Float>(0, 0, 0)
+            for (kk, d) in [(k + 1, rgt), (k - 1, -rgt), (k + N, dn), (k - N, -dn)] {
+                let nb = top[kk] > -1e29 && abs(h[kk] - h[k]) < step ? top[kk] : (valid(kk) && h[kk] > h[k] ? top[k] : -1e30)
+                let fl = max(nb, h[k])
+                away += d * max(0, top[k] - fl)
+                foot = min(foot, fl)
+            }
+            let depthHere = top[k] - foot
+            if depthHere > 0.6 * f {
+                let pitch = f * 0.6
+                let n = min(80, Int((depthHere / pitch).rounded(.down)))
+                if n >= 1 {
+                    for i in 1...n {
+                        let z = top[k] - Float(i) * depthHere / Float(n) + pitch * 0.35
+                        let t = (top[k] - z) / max(b0(k), f)         // 0 at the top ... 1 at the base
+                        let jz = Float(((x + i) * 61 + y * 29) % 53) / 53 - 0.5
+                        let q = world(k, z) + (rgt * jy - dn * jx) * fu * 0.3 + up * (jz * pitch * 0.3 / mpu)
+                        // facing out of the mass, tipping down toward the base: its side shades as a curve
+                        let out = simd_length(away) > 1e-6 ? simd_normalize(away) : rgt
+                        let ang = Float.pi * 0.5 * min(1.25, 0.35 + t)
+                        add(q, up * cos(ang) + out * sin(ang), along: fu * 0.55, across: fu * 0.55, thin: fu * 0.42,
+                            shade: 0.93 - 0.2 * min(1, t) * min(1, t), cool: 0.3 + 0.7 * min(1, t))
+                    }
                 }
             }
         } }
