@@ -191,23 +191,34 @@ extension SnowVolume {
                 var nrm = gl > 1e-4 ? -g / gl : SIMD3<Float>(0, 0, 1)      // (map x, map y, up)
                 if nrm.z < -0.95 { nrm = SIMD3(0, 0, -1) }
                 let nWorld = simd_normalize(rgt * nrm.x + dn * nrm.y + up * nrm.z)
-                // Four small splats across this voxel's piece of skin, each snapped onto the
-                // smooth surface (the threshold, sampled between voxels): small and exact, so
-                // the snow has a defined edge, not a cloudy one.
-                let seedV: SIMD3<Float> = abs(nrm.z) < 0.9 ? [0, 0, 1] : [1, 0, 0]
-                let ta = simd_normalize(simd_cross(nrm, seedV)), tb = simd_cross(nrm, ta)
+                // Small splats across this voxel's piece of skin, each snapped onto the smooth
+                // surface (the threshold, sampled between voxels): small and exact, so the snow
+                // has a defined edge, not a cloudy one. They're laid on the voxel's face across
+                // its main axis and slid along that axis onto the surface, so neighbours' pieces
+                // tile a slope with no gaps between the voxel steps; a slope gets more of them,
+                // since one voxel's piece of a slope is longer than its face.
+                let an = SIMD3<Float>(abs(nrm.x), abs(nrm.y), abs(nrm.z))
+                let d = an.z >= an.x && an.z >= an.y ? 2 : (an.x >= an.y ? 0 : 1)
+                let ea = (d + 1) % 3, eb = (d + 2) % 3
+                let nd = max(an[d], 0.5)
+                let ma = min(3, Int(ceil(2 * (1 + an[ea] * an[ea] / (nd * nd)).squareRoot() - 0.15)))
+                let mb = min(3, Int(ceil(2 * (1 + an[eb] * an[eb] / (nd * nd)).squareRoot() - 0.15)))
                 let thrF = Float(thr) / 255
-                for (a, b) in [(-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)] as [(Float, Float)] {
-                    var q = SIMD3<Float>(Float(x), Float(y), Float(zi)) + ta * (a + rnd() * 0.08) + tb * (b + rnd() * 0.08)
-                    for _ in 0..<2 {
+                let gd = nrm[d] * max(gl, 0.05)
+                for ia in 0..<ma { for ib in 0..<mb {
+                    var q = SIMD3<Float>(Float(x), Float(y), Float(zi))
+                    q[ea] += (Float(ia) + 0.5 + rnd() * 0.45) / Float(ma) - 0.5
+                    q[eb] += (Float(ib) + 0.5 + rnd() * 0.45) / Float(mb) - 0.5
+                    for _ in 0..<3 {
                         let v = tri(q)
-                        q += nrm * max(-0.6, min(0.6, (v - thrF) / max(gl, 0.05)))
+                        q[d] += max(-0.8, min(0.8, (v - thrF) / gd))
                     }
                     let p = world(k, (q.z + 0.5) * f) + (rgt * (q.x - Float(x)) + dn * (q.y - Float(y))) * fu
-                    // fine sugar: a little shade jitter
-                    add(p, nWorld, size: fu * 0.36, thin: fu * 0.1, shade: 0.97 + 0.03 * rnd())
+                    // fine sugar, not tiles: each grain a little different in size, tilt and shade
+                    let tilt = simd_normalize(nWorld + (rgt * rnd() + dn * rnd() + up * rnd()) * 0.12)
+                    add(p, tilt, size: fu * (0.36 + 0.09 * rnd()), thin: fu * 0.1, shade: 0.965 + 0.035 * rnd())
                     count += 1
-                }
+                } }
                 // now and then a crystal catching the light
                 if (x * 2654435761 &+ y * 40503 &+ zi * 97) % 11 == 0 && simd_dot(nWorld, up) > 0.3 {
                     let p = world(k, (Float(zi) + 0.5) * f)
