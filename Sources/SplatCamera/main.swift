@@ -406,6 +406,7 @@ func configureSession() {
             case "reach": s.radiusM = x
             case "depth": s.depthM = x
             case "stick": s.sticky = x
+            case "roofs": s.throughRoofs = x > 0
             default: break
             }
         }

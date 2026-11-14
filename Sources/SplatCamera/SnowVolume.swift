@@ -27,16 +27,36 @@ enum SnowVolume {
         guard depthM > 0 else { return Splats() }
         let (ax, bx) = SceneSnow.horizon(up)
         let hc = snow.centre - up * simd_dot(snow.centre, up)
-        let Rm = snow.radiusM * 3                              // metres each way laid
-        let N = 768
-        let cell = 2 * Rm / Float(N)                          // metres per cell
         let groundM = snow.ground * mpu
-        let zlo = groundM - max(0.5 * Rm * 0.1, depthM * 2), zhi = groundM + max(snow.ceilingM, depthM * 4)
-        let Z = max(8, min(256, Int((zhi - zlo) / cell)))
+        var zhi = groundM + max(snow.ceilingM, depthM * 4)
+        // falling through roofs: what stands well above the camera is left out
+        if snow.throughRoofs == true { zhi = min(zhi, groundM + max(snow.roofCut(metresPerUnit: mpu, up: up), depthM * 4)) }
+        let hcA = simd_dot(hc, ax) * mpu, hcB = simd_dot(hc, bx) * mpu
+        // Throughout the scene: the grid spans every splat in the band snow lands in
+        // (a sample, trimmed of the farthest stragglers).
+        var us: [Float] = [], vs: [Float] = []
+        let sampleStep = max(1, m.count / 200_000)
+        var zmin0: Float = 1e30
+        for i in stride(from: 0, to: m.count, by: sampleStep) {
+            let p = SIMD3(m.means[3 * i], m.means[3 * i + 1], m.means[3 * i + 2])
+            let z = simd_dot(p, up) * mpu
+            guard z < zhi else { continue }
+            us.append(abs(simd_dot(p, ax) * mpu - hcA)); vs.append(abs(simd_dot(p, bx) * mpu - hcB))
+            zmin0 = min(zmin0, z)
+        }
+        us.sort(); vs.sort()
+        let pick = { (a: [Float]) -> Float in a.isEmpty ? snow.radiusM * 3 : a[Int(Float(a.count - 1) * 0.985)] }
+        let Rm = max(snow.radiusM, min(max(pick(us), pick(vs)) * 1.05, snow.radiusM * 40))
+        let N = 1024
+        let cell = 2 * Rm / Float(N)                          // metres per cell
+        let zlo = groundM - max(depthM * 2, (zhi - groundM) * 0.25)
+        let Z = max(8, min(96, Int((zhi - zlo) / cell)))
         let dz = (zhi - zlo) / Float(Z)
         // the layer cake: how much splat stands in each cell's height bins
-        var occ = [UInt16](repeating: 0, count: N * N * Z)
-        let hcA = simd_dot(hc, ax) * mpu, hcB = simd_dot(hc, bx) * mpu
+        var occ = [UInt8](repeating: 0, count: N * N * Z)
+        // How far overhead cover still shelters: it falls off with the height of the
+        // cover, in proportion to the scene (a miniature behaves like the place).
+        let shelterL = max(depthM * 4, Rm * 0.12)
         for i in 0..<m.count {
             let op = 1 / (1 + exp(-m.opacities[i]))
             guard op > 0.25 else { continue }
@@ -48,17 +68,17 @@ enum SnowVolume {
             let big = exp(max(m.scales[3 * i], max(m.scales[3 * i + 1], m.scales[3 * i + 2]))) * mpu
             let rc = min(2, Int(big * 1.2 / cell))           // a big splat covers a few cells
             let zi = min(Z - 1, Int((z - zlo) / dz))
-            let add = Int(min(400, op * 100))
+            let add = Int(min(200, op * 50))
             let ui = Int(u), vi = Int(v)
             for dv in -rc...rc { for du in -rc...rc {
                 let uu = ui + du, vv = vi + dv
                 guard uu >= 0, vv >= 0, uu < N, vv < N else { continue }
                 let k = (vv * N + uu) * Z + zi
-                occ[k] = UInt16(min(65535, Int(occ[k]) + add))
+                occ[k] = UInt8(min(255, Int(occ[k]) + add))
             } }
         }
         // each column's surfaces, from the top: solid bins with open air above them
-        let solid: UInt16 = 60
+        let solid: UInt8 = 30
         var top = [Float](repeating: -1e30, count: N * N)      // the highest surface (metres)
         var low = [Float](repeating: -1e30, count: N * N)      // the next one down, under cover
         var gap = [Float](repeating: 0, count: N * N)          // open height over the lower surface
@@ -73,7 +93,7 @@ enum SnowVolume {
             while zz >= 0 && occ[base + zz] >= solid { mass += Int(occ[base + zz]); zz -= 1 }
             let openTop = zz
             // thin branches and twigs are no roof: the snow falls past them
-            if mass < 400 {
+            if mass < 200 {
                 var g = zz
                 while g >= 0 && occ[base + g] < solid { g -= 1 }
                 if g >= 0 && openTop - g >= 3 { top[k] = zlo + (Float(g) + 1) * dz; continue }
@@ -102,8 +122,9 @@ enum SnowVolume {
         covered = boxBlur(covered, N: N, r: rc)
         let drift = 0.1 + 0.6 * wind01
         out.append(lay(low, depth: { k in
-            let openAround = 1 - covered[k] * 0.85
-            return depthM * (drift + (1 - drift) * openAround) * min(1, gap[k] / max(depthM * 4, 0.2))
+            // shelter: how much cover is round about, how close overhead, less what the wind drifts in
+            let shelter = (1 - drift) * covered[k] * 0.9 * exp(-gap[k] / shelterL)
+            return depthM * (1 - shelter) * min(1, gap[k] / max(depthM * 3, cell * 3))
         }, N: N, cell: cell,
                        world: world, up: up, along: ax, across: bx, mpu: mpu, sticky: snow.sticky ?? 0.5, depthM: depthM))
         return out
@@ -205,7 +226,7 @@ enum SnowVolume {
             let cosT = 1 / (1 + gx * gx + gy * gy).squareRoot()
             let tt = max(0, min(1, (cosT - 0.6) / 0.4))
             let hold = tt * tt * (3 - 2 * tt)
-            let ex = Float(min(min(x, N - 1 - x), min(y, N - 1 - y))) / Float(N) * 10
+            let ex = Float(min(min(x, N - 1 - x), min(y, N - 1 - y))) / Float(N) * 40
             let taper = min(1, ex)
             let want = depth(k) * hold * taper * taper * (3 - 2 * taper)
             snow[k] = dist[k] < 2 ? 0 : min(want, pileK * dist[k] * f + (0.3 + 0.8 * stk) * f)

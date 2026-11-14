@@ -1942,7 +1942,7 @@ final class Viewer: NSObject, MTKViewDelegate {
     func syncDeepSnow() {
         let s = lighting.snow
         let d = s?.depthM ?? 0
-        let want: [Float] = d > 0 ? [d, s!.sticky ?? 0.5, s!.centre.x, s!.centre.y, s!.centre.z, s!.radiusM, s!.ceilingM,
+        let want: [Float] = d > 0 ? [d, s!.sticky ?? 0.5, s!.throughRoofs == true ? 1 : 0, s!.centre.x, s!.centre.y, s!.centre.z, s!.radiusM, s!.ceilingM,
                                      s!.ground, s!.windMS, s!.windDeg, camera.up.x, camera.up.y, camera.up.z, body.metresPerUnit] : []
         guard want != deepSnowWanted else { return }
         deepSnowWanted = want
@@ -2004,6 +2004,9 @@ final class Viewer: NSObject, MTKViewDelegate {
             stepper("Snow type: " + named(s.sticky ?? 0.5, stick, stickNames),
                     "dry powder slopes down like sand; wet snow sticks, its caps wider than what they sit on",
                     { $0.sticky ?? 0.5 }, stick) { $0.sticky = $1 },
+            Item(title: "Falls through roofs: " + (s.throughRoofs == true ? "yes" : "no"),
+                 detail: "snow indoors, or anywhere it never would: what stands well above you (a vault, a roof, beams) shelters nothing") {
+                [weak self] in self?.changeSnow { $0.throughRoofs = !($0.throughRoofs ?? false) } },
             stepper("Hoarfrost: " + named(s.frost, frost, frostNames), "frost on all the cold reaches, most on twigs, grass and leaf edges",
                     { $0.frost }, frost) { $0.frost = $1 },
             stepper("Snowfall reaches " + Self.metres(s.radiusM) + " round you", "the column of falling snow (it moves with you); settling reaches three times as far",

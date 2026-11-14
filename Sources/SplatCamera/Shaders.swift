@@ -2346,9 +2346,11 @@ kernel void sky_vis(device const float* means [[buffer(0)]], device const float*
     for (uint k = 0; k < 5; k++) {
         float2 o = k == 0 ? float2(0) : vogel(k - 1, 4) * 1.2;
         float2 tp = shadow_tap(map, int2(uv + o), uint(res));
-        // something above it: a surface nearer the sky than this splat
+        // something above it: a surface nearer the sky than this splat, sheltering
+        // the less the higher it stands over it (snow drifts in under a high roof)
         bool roof = tp.x < 0.6 && tp.y > 0 && tp.y < dr - bias;
-        open += roof ? 0.0 : 1.0;
+        float shelter = roof ? exp(-(dr - tp.y) / max(S[5].w, 1e-6)) : 0.0;
+        open += 1.0 - shelter;
     }
     // how much gathers here (0 bare ... 2 deep), from the field: open x score, as 0-2
     uint F = uint(S[6].x);

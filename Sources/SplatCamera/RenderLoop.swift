@@ -481,6 +481,8 @@ final class RenderLoop {
     private var patterns: MTLTexture?
     // The scan's own colours (relighting reads them; Spirula's are overwritten).
     private var means: MTLBuffer, dc0: MTLBuffer, sh0: MTLBuffer
+    /// The scan's size (units, its bounds' radius): the snow reaches all of it.
+    private var sceneRadius: Float = 0
     /// Per splat, for snow and frost: its surface's facing (the thinnest axis) and its size.
     private var surf: MTLBuffer
     /// Per splat, how open it is to the sky (0-255), from a view straight down from the snow's ceiling.
@@ -618,6 +620,7 @@ final class RenderLoop {
         surf = Self.surfaces(model, device: device)
         dc0 = upload(model.dc)
         sh0 = upload(model.sh.isEmpty ? [0] : model.sh)
+        sceneRadius = model.bounds().radius
         var cb: UnsafeMutableRawPointer?
         var co = 0
         if sr_color_buffer(&cb, &co) != 0 { throw SpirulaError("sharing colours with Metal") }
@@ -912,7 +915,7 @@ final class RenderLoop {
         onRenderThread { [weak self] in
             guard let self, let url = self.sourcePLY else { return }
             let depth = snow?.depthM ?? 0
-            let key: [Float] = snow.map { [depth, $0.sticky ?? 0.5, $0.centre.x, $0.centre.y, $0.centre.z, $0.radiusM, $0.ceilingM, $0.ground,
+            let key: [Float] = snow.map { [depth, $0.sticky ?? 0.5, $0.throughRoofs == true ? 1 : 0, $0.centre.x, $0.centre.y, $0.centre.z, $0.radiusM, $0.ceilingM, $0.ground,
                                            $0.windMS, $0.windDeg, up.x, up.y, up.z, body.metresPerUnit] } ?? []
             if depth <= 0 && self.laidSnowKey.isEmpty { DispatchQueue.main.async { done(0) }; return }
             if depth > 0 && key == self.laidSnowKey { DispatchQueue.main.async { done(self.laidSnowSplats) }; return }
@@ -1001,7 +1004,7 @@ final class RenderLoop {
     private func prepareSky(_ snow: SceneSnow, up: SIMD3<Float>, body: CameraBody) -> MTLBuffer? {
         let mpu = body.metresPerUnit
         let key: [Float] = [snow.centre.x, snow.centre.y, snow.centre.z, snow.radiusM, snow.ceilingM, snow.ground,
-                            up.x, up.y, up.z, mpu, snow.windMS, snow.windDeg]
+                            up.x, up.y, up.z, mpu, snow.windMS, snow.windDeg, snow.throughRoofs == true ? 1 : 0]
         if key == skyKey, let v = skyVis { return v }
         if skyVis == nil { skyVis = device.makeBuffer(length: max(count, 16), options: .storageModePrivate) }
         let res = 1536
@@ -1014,7 +1017,11 @@ final class RenderLoop {
         }
         guard let vis = skyVis, let frame = skyFrame else { return nil }
         // Settling reaches further than the falling column (snow lies everywhere you look).
-        let R = snow.radiusM * 3 / mpu, H = max(snow.ceilingM, 1) / mpu
+        // the whole scene, not only round the snowfall
+        let R = max(snow.radiusM * 3 / mpu, sceneRadius * 1.15)
+        var Hm = max(snow.ceilingM, 1)
+        if snow.throughRoofs == true { Hm = min(Hm, max(snow.roofCut(metresPerUnit: mpu, up: up), 0.05)) }
+        let H = Hm / mpu
         let hc = snow.centre - up * simd_dot(snow.centre, up)
         let C = hc + up * (snow.ground + H)
         let (a, b) = SceneSnow.horizon(up)
@@ -1036,8 +1043,10 @@ final class RenderLoop {
             snowHeight = device.makeBuffer(length: F * F * 4, options: .storageModePrivate)
             snowField = device.makeBuffer(length: F * F * 4, options: .storageModeShared)
         }
+        // how far overhead a roof still shelters (units), in proportion to the scene
+        let shelterU = max((snow.depthM ?? 0) * 4 / mpu, R * 0.12)
         var S: [SIMD4<Float>] = [SIMD4(V[0], V[1], V[2], V[3]), SIMD4(V[4], V[5], V[6], V[7]), SIMD4(V[8], V[9], V[10], V[11]),
-                                 SIMD4(fx, Float(res), R, Float(count)), SIMD4(hc, 0), SIMD4(up, 0)]
+                                 SIMD4(fx, Float(res), R, Float(count)), SIMD4(hc, 0), SIMD4(up, shelterU)]
         skyRows = S
         let footprint = 2 * H * tan(half) * mpu / Float(F)       // metres per field texel on the ground
         let wa = snow.windDeg * .pi / 180

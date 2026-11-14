@@ -26,6 +26,14 @@ struct SceneSnow: Codable, Equatable {
     var depthM: Float? = nil
     /// 0 dry powder (piles like sand) ... 1 wet and sticky (caps wider than their base); nil: in between.
     var sticky: Float? = nil
+    /// Snow indoors (or anywhere it never would): what stands well above the camera
+    /// (a vault, a roof, beams) shelters nothing; the snow falls through it.
+    var throughRoofs: Bool? = nil
+    /// The height above the ground over which, falling through roofs, nothing shelters (metres).
+    func roofCut(metresPerUnit mpu: Float, up: SIMD3<Float>) -> Float {
+        let eye = max(0.01, (simd_dot(centre, up) - ground) * mpu)
+        return eye * 1.6
+    }
     /// The column of falling snow: its radius round the camera, and its ceiling above the ground.
     var radiusM: Float = 15
     var ceilingM: Float = 8
