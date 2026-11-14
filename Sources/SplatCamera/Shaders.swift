@@ -1360,6 +1360,7 @@ kernel void snow_light(constant float4* G [[buffer(2)]],
                        constant float4& LP [[buffer(14)]],
                        device const float4* W [[buffer(15)]], constant float4& SN [[buffer(16)]],
                        device float4* out [[buffer(17)]],
+                       constant float4* SK [[buffer(23)]], device const float* skymap [[buffer(24)]],
                        texture2d_array<float> patterns [[texture(3)]],
                        uint i [[thread_position_in_grid]]) {
     if (i >= uint(SN.x)) return;
@@ -1367,7 +1368,26 @@ kernel void snow_light(constant float4* G [[buffer(2)]],
     float3 eye = G[2].xyz;
     float3 toEye = eye - x;
     float de = length(toEye);
-    float3 lit = SN.yzw * 0.8;                               // the house lights on white
+    // Open to the sky above it? Under canopy or a roof a flake gets far less of the
+    // day (the house lights), and brightens again as it drifts into the open.
+    float open = 1;
+    if (SK[3].y > 0) {
+        float3 pc = float3(dot(SK[0].xyz, x) + SK[0].w, dot(SK[1].xyz, x) + SK[1].w, dot(SK[2].xyz, x) + SK[2].w);
+        float res = SK[3].y;
+        if (pc.z > 0) {
+            float2 uv = float2(SK[3].x * pc.x / pc.z, SK[3].x * pc.y / pc.z) + res * 0.5;
+            if (all(uv >= 0) && all(uv < res)) {
+                float dr = length(pc), seen = 0;
+                for (uint k = 0; k < 5; k++) {
+                    float2 o = k == 0 ? float2(0) : vogel(k - 1, 4) * 3.0;
+                    float2 tp = shadow_tap(skymap, int2(uv + o), uint(res));
+                    seen += (tp.x < 0.6 && tp.y > 0 && tp.y < dr - 0.01 * dr) ? (1 - tp.x) : 0;
+                }
+                open = 1 - seen / 5;
+            }
+        }
+    }
+    float3 lit = SN.yzw * 0.8 * (0.25 + 0.75 * open);       // the house lights on white
     int nl = int(LP.x);
     for (int l = 0; l < nl; l++) {
         constant float4* L = LT + 6 * l;
@@ -1560,12 +1580,16 @@ kernel void background_fill(device float* f [[buffer(0)]], constant float4* K [[
         float nearest = 0, cover = 0;
         for (uint k = 0; k < cnt; k++) {
             uint id = FI[start + k];
-            float4 A = FK[2 * id], B = FK[2 * id + 1];
+            float4 A = FK[3 * id], B = FK[3 * id + 1], C = FK[3 * id + 2];
             // its streak through this sub-pupil's slice of the shutter (B.zw), as a capsule
             float2 sv = B.zw;
             float h = dot(sv, sv) > 1e-6 ? saturate(dot(pc - A.xy, sv) / dot(sv, sv)) : 0;
             float2 dd = pc - (A.xy + sv * h);
-            float g = A.w * exp(-0.5 * dot(dd, dd) / (A.z * A.z));
+            // an oval at its own angle: long axis (C.xy) C.z times the short
+            float2 q = float2(dot(dd, C.xy), dot(dd, float2(-C.y, C.x)));
+            float asp = max(C.z, 1.0);
+            q *= float2(1 / sqrt(asp), sqrt(asp));
+            float g = A.w * exp(-0.5 * dot(q, q) / (A.z * A.z));
             if (g < 1e-3) continue;
             // behind the scan's surface here: hidden as much as the surface covers
             if (zsc > 0 && zsc < B.x) g *= t;

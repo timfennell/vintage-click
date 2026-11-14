@@ -180,6 +180,10 @@ final class RenderLoop {
            let index = (snow.binned.index + [0, 0, 0, 0]).withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }) {
             var sn = SIMD4<Float>(Float(snow.world.count), snow.house.x, snow.house.y, snow.house.z)
             enc.setComputePipelineState(snowLightPSO)
+            // The sky view: a flake under the canopy gets less of the day than one in the open.
+            var srow = skyRows.count == 6 && skyFrame != nil ? skyRows : [SIMD4<Float>](repeating: .zero, count: 6)
+            enc.setBytes(&srow, length: srow.count * 16, index: 23)
+            enc.setBuffer(skyFrame?.buf ?? dummyBuf, offset: skyFrame?.off ?? 0, index: 24)
             enc.setBuffer(world, offset: 0, index: 15)
             enc.setBytes(&sn, length: 16, index: 16)
             enc.setBuffer(lightBuf, offset: 0, index: 17)
@@ -225,7 +229,7 @@ final class RenderLoop {
         let invFocus = mpu / max(b.focusM, 0.01)
         let aperture = b.lens.focalMM / 1000 / b.takingAperture / 2 / mpu
         let binned = SceneSnow.bin(world, later: later, view: V, eye: eyeSub, fx: fx, cx: cx, cy: cy, width: w, height: h,
-                                   invFocus: invFocus, apertureUnits: aperture, blur: blur)
+                                   invFocus: invFocus, apertureUnits: aperture, blur: blur, t: t)
         return SnowPass(world: world, binned: binned, house: lighting.fogLight * 1.33,
                         clearAir: SceneFog().rows(eye: eye, up: lighting.up, metresPerUnit: mpu, light: .zero))
     }
@@ -471,6 +475,8 @@ final class RenderLoop {
     private var skyKey: [Float] = []
     private var skyFrame: (buf: MTLBuffer, off: Int, index: Int32)?
     private var skyVisPSO: MTLComputePipelineState!
+    /// The sky view's rows (sky_vis's S), for the falling snow's light too.
+    private var skyRows: [SIMD4<Float>] = []
     private let colours: (buf: MTLBuffer, off: Int)
     private let count: Int, higherCoeffs: Int
     private var lastRelight: [SIMD4<Float>] = []
@@ -896,6 +902,7 @@ final class RenderLoop {
         guard ok, let cb = queue.makeCommandBuffer(), let ce = cb.makeComputeCommandEncoder() else { return nil }
         var S: [SIMD4<Float>] = [SIMD4(V[0], V[1], V[2], V[3]), SIMD4(V[4], V[5], V[6], V[7]), SIMD4(V[8], V[9], V[10], V[11]),
                                  SIMD4(fx, Float(res), R, Float(count)), SIMD4(hc, 0), SIMD4(up, 0)]
+        skyRows = S
         ce.setComputePipelineState(skyVisPSO)
         ce.setBuffer(means, offset: 0, index: 0)
         ce.setBuffer(frame.buf, offset: frame.off, index: 1)
@@ -914,8 +921,10 @@ final class RenderLoop {
     /// Spirula's colour buffer (skipped when nothing changed).
     private func relight(_ plot: LightingPlot, eye: SIMD3<Float>, body: CameraBody, quality: ShadowQuality) {
         let vis = plot.lights.isEmpty || !shadowsOn ? nil : prepareShadows(plot, body: body, quality: quality)
-        let snow = plot.snow.flatMap { $0.settled > 0 || $0.frost > 0 ? $0 : nil }
-        let sky = snow.flatMap { prepareSky($0, up: plot.up, body: body) }
+        let snowAny = plot.snow.flatMap { $0.isEmpty ? nil : $0 }
+        let skyAny = snowAny.flatMap { prepareSky($0, up: plot.up, body: body) }
+        let snow = snowAny.flatMap { $0.settled > 0 || $0.frost > 0 ? $0 : nil }
+        let sky = snow == nil ? nil : skyAny
         var g: [SIMD4<Float>] = [
             SIMD4(eye, plot.ambient),
             SIMD4(Float(min(plot.lights.count, Self.maxLights)), Float(count), Float(higherCoeffs), 0.25),

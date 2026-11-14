@@ -63,19 +63,37 @@ struct SceneSnow: Codable, Equatable {
         let groundM = ground * mpu
         var out: [SIMD4<Float>] = []
         out.reserveCapacity(n)
+        // The air moves in slow eddies: a few waves of drift, the same for flakes
+        // close together, so they swirl as one; scaled to how fast the snow falls.
+        let L = max(0.2, 3 * fallMS)                       // an eddy's size (m)
+        let eddy = 0.35 * fallMS * (1 + 0.6 * gust) + 0.15 * windMS
+        func air(_ x: Float, _ y: Float, _ h: Float) -> SIMD3<Float> {
+            let k = 2 * Float.pi / L
+            let ax = sin(k * (0.8 * y + 0.3 * h) + tt * 0.41) + 0.6 * sin(k * (1.7 * y - 0.9 * x) + tt * 0.83 + 2.1)
+            let ay = sin(k * (0.9 * x - 0.2 * h) + tt * 0.37 + 1.3) + 0.6 * sin(k * (1.5 * x + 1.1 * y) + tt * 0.71 + 4.0)
+            let az = 0.35 * sin(k * (0.7 * x + 0.6 * y) + tt * 0.53 + 0.7)
+            return SIMD3(ax, ay, az) * eddy * 0.6
+        }
         for i in 0..<UInt32(n) {
             let u1 = Self.hash(i, 1), u2 = Self.hash(i, 2), u3 = Self.hash(i, 3), u4 = Self.hash(i, 4)
-            let v = fallMS * (0.7 + 0.6 * u4)
-            let ph = Self.hash(i, 5) * 6.283, fr = 0.4 + 0.8 * Self.hash(i, 6)
-            // drift with the wind (and gusts), sway as it falls
-            let drift = wind * (tt * g) + SIMD2(sin(tt * fr + ph), cos(tt * fr * 0.8 + ph)) * (0.15 + 0.1 * u4)
+            // sizes spread as real snow does: mostly small, now and then a big clump
+            let gsz = (-2 * log(max(Self.hash(i, 7), 1e-6))).squareRoot() * cos(6.283 * Self.hash(i, 8))
+            let sizeK = min(4, exp(0.55 * gsz))
+            // big flakes flutter more; each falls at its own pace, which rises and falls
+            let v = fallMS * (0.65 + 0.5 * u4) * (1 + 0.18 * sin(tt * (0.7 + u2) + u1 * 6.283))
+            let ph = Self.hash(i, 5) * 6.283, fr = (0.5 + 1.2 * Self.hash(i, 6)) * 2
+            let swing = fallMS * (0.04 + 0.1 * Self.hash(i, 9)) * (0.6 + 0.4 * sizeK)
+            // drift with the wind (and gusts), flutter in a loose spiral as it falls
+            let flutter = SIMD2(sin(tt * fr + ph), cos(tt * fr * 0.83 + ph * 1.3)) * swing
+            let drift = wind * (tt * g) + flutter
             var x = u1 * 2 * R + drift.x, y = u2 * 2 * R + drift.y
             // wrap round the camera: the column moves with you
             x = (x - eyeA + R).truncatingRemainder(dividingBy: 2 * R); if x < 0 { x += 2 * R }; x += eyeA - R
             y = (y - eyeB + R).truncatingRemainder(dividingBy: 2 * R); if y < 0 { y += 2 * R }; y += eyeB - R
             var h = (u3 * H - v * tt).truncatingRemainder(dividingBy: H); if h < 0 { h += H }
-            let pm = a * x + b * y + up * (groundM + h)
-            let size = flakeM * (0.5 + Self.hash(i, 7))
+            let w = air(x, y, h)
+            let pm = a * (x + w.x) + b * (y + w.y) + up * (groundM + h + w.z)
+            let size = flakeM * sizeK
             out.append(SIMD4(pm / mpu, size / mpu))
         }
         return out
@@ -85,7 +103,8 @@ struct SceneSnow: Codable, Equatable {
     /// shader (background_fill). `blur`: how much of the lens's blur circle to
     /// spread each flake by (0 in the finder's smooth mode, which blurs after).
     struct Binned {
-        var flakes: [SIMD4<Float>] = []     // per drawn flake: (px, py, radius px, alpha), (ray depth, light index, -, -)
+        var flakes: [SIMD4<Float>] = []     // per drawn flake: (px, py, radius px, alpha), (ray depth, light index, streak px),
+                                            // (its long axis cos, sin, how much longer than wide, -)
         var bins: [UInt32] = []             // per bin: start, count
         var index: [UInt32] = []            // flake numbers, bin by bin
         var binsW = 0, binsH = 0
@@ -93,7 +112,8 @@ struct SceneSnow: Codable, Equatable {
     }
 
     static func bin(_ flakes: [SIMD4<Float>], later: [SIMD4<Float>]? = nil, view V: [Float], eye: SIMD3<Float>, fx: Float, cx: Float, cy: Float,
-                    width W: Int, height H: Int, invFocus: Float, apertureUnits: Float, blur: Float) -> Binned {
+                    width W: Int, height H: Int, invFocus: Float, apertureUnits: Float, blur: Float, t: Double = 0) -> Binned {
+        let tt = Float(t.truncatingRemainder(dividingBy: 100_000))
         var out = Binned()
         let bs = Binned.size
         out.binsW = (W + bs - 1) / bs
@@ -123,16 +143,23 @@ struct SceneSnow: Codable, Equatable {
             let coc = fx * apertureUnits * abs(invFocus - 1 / zc) * blur
             let r = sqrt(r0 * r0 + coc * coc * 0.25)
             // a sub-pixel flake keeps its light: fainter, not bigger
-            var alpha = min(1, 0.85 * (max(f.w * 0.5 / zc * fx, 0.05) / r) * (max(f.w * 0.5 / zc * fx, 0.05) / r))
+            // flakes are lacy: some nearly solid, some faint
+            let lace = 0.45 + 0.5 * hash(UInt32(k), 11)
+            var alpha = min(1, lace * (max(f.w * 0.5 / zc * fx, 0.05) / r) * (max(f.w * 0.5 / zc * fx, 0.05) / r))
             // a streak spreads the same light along its length
             let len = (sx * sx + sy * sy).squareRoot()
             alpha *= r / (r + len * 0.5)
             guard alpha > 0.004 else { continue }
             let reach = r * 3 + len
             guard len.isFinite, px.isFinite, py.isFinite else { continue }
-            let id = UInt32(drawn.count / 2)
+            let id = UInt32(drawn.count / 3)
             drawn.append(SIMD4(px, py, r, alpha))
             drawn.append(SIMD4(simd_length(rel), Float(k), sx, sy))
+            // an irregular oval, tumbling as it falls (round again when blurred far out of focus)
+            let ang = hash(UInt32(k), 12) * 6.283 + tt * (hash(UInt32(k), 13) - 0.5) * 6
+            let sharpness = r0 / r
+            let aspect = 1 + (0.3 + 1.1 * hash(UInt32(k), 14)) * sharpness
+            drawn.append(SIMD4(cos(ang), sin(ang), aspect, 0))
             let mx = px + sx * 0.5, my = py + sy * 0.5, rr = r * 3 + len * 0.5
             // (kept to the frame before turning into bin numbers: a long streak can run far off it)
             func binOf(_ v: Float, _ n: Int) -> Int { Int(max(-1, min(Float(n), (v / Float(bs)).rounded(.down)))) }
@@ -141,7 +168,7 @@ struct SceneSnow: Codable, Equatable {
             guard x0 <= x1, y0 <= y1, (x1 - x0 + 1) * (y1 - y0 + 1) <= 400 else { continue }   // off the frame, or too faint to matter
             for by in y0...y1 { for bx in x0...x1 { lists[by * out.binsW + bx].append(id) } }
         }
-        out.flakes = drawn.isEmpty ? [SIMD4<Float>](repeating: .zero, count: 2) : drawn
+        out.flakes = drawn.isEmpty ? [SIMD4<Float>](repeating: .zero, count: 3) : drawn
         out.bins.reserveCapacity(lists.count * 2)
         for l in lists {
             out.bins.append(UInt32(out.index.count))
