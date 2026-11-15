@@ -2697,7 +2697,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         m.onFrame = { [weak self] image, f in
             DispatchQueue.main.async {
                 guard let self, self.movie === m else { return }
-                self.monitor.show(image, caption: "LAST DEVELOPED: FRAME \(f + 1) OF \(m.total)")
+                self.monitor.show(image, caption: "Last developed: frame \(f + 1) of \(m.total)", stock: b.stock.name,
+                                  take: t.takeNumber, frame: f + 1, blackAndWhite: b.stock.blackAndWhite)
                 self.placeMonitor()
             }
         }
