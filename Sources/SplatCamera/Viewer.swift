@@ -2029,7 +2029,8 @@ final class Viewer: NSObject, MTKViewDelegate {
                 guard let self else { return }
                 self.lighting.snow = nil
                 self.rememberSnow()
-                self.reopenMenu() })
+                self.reopenMenu()
+                self.syncDeepSnow() })
         }
         return items
     }

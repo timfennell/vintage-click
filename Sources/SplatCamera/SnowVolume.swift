@@ -37,14 +37,14 @@ enum SnowVolume {
         let hcA = simd_dot(hc, ax) * mpu, hcB = simd_dot(hc, bx) * mpu
         // Throughout the scene: the grid spans every splat in the band snow lands in
         // (a sample, trimmed of the farthest stragglers).
-        var us: [Float] = [], vs: [Float] = []
+        var us: [Float] = [], vs: [Float] = [], zs: [Float] = []
         let sampleStep = max(1, m.count / 200_000)
         var zmin0: Float = 1e30
         for i in stride(from: 0, to: m.count, by: sampleStep) {
             let p = SIMD3(m.means[3 * i], m.means[3 * i + 1], m.means[3 * i + 2])
             let z = simd_dot(p, up) * mpu
             guard z < zhi else { continue }
-            us.append(abs(simd_dot(p, ax) * mpu - hcA)); vs.append(abs(simd_dot(p, bx) * mpu - hcB))
+            us.append(abs(simd_dot(p, ax) * mpu - hcA)); vs.append(abs(simd_dot(p, bx) * mpu - hcB)); zs.append(z)
             zmin0 = min(zmin0, z)
         }
         us.sort(); vs.sort()
@@ -52,7 +52,11 @@ enum SnowVolume {
         let Rm = max(snow.radiusM, min(max(pick(us), pick(vs)) * 1.05, snow.radiusM * 40))
         let N = 1536
         let cell = 2 * Rm / Float(N)                          // metres per cell
-        let zlo = groundM - max(depthM * 2, (zhi - groundM) * 0.25)
+        // Down to the scan's floor, whatever the ground was taken as (a ground measured
+        // on a pew, or on snow laid before, must not leave the floor out of the map).
+        zs.sort()
+        let floorM = zs.isEmpty ? groundM : zs[Int(Float(zs.count - 1) * 0.005)]
+        let zlo = min(groundM - max(depthM * 2, (zhi - groundM) * 0.25), floorM - depthM * 2)
         let Z = max(8, min(72, Int((zhi - zlo) / cell)))
         let dz = (zhi - zlo) / Float(Z)
         // the layer cake: how much splat stands in each cell's height bins

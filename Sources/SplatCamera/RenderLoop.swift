@@ -980,8 +980,9 @@ final class RenderLoop {
     /// The ground under `eye`: the height (along up, scene units) where the splats
     /// in a narrow column below it lie thickest (nil if there are too few).
     func groundBelow(_ eye: SIMD3<Float>, up: SIMD3<Float>, radius r: Float) -> Float? {
-        let buf = means, count = min(self.count, buf.length / 12)
-        let p = buf.contents().bindMemory(to: Float.self, capacity: count * 3)
+        // the scan's own splats only: snow already laid (at the end) is no ground
+        let buf = means, count = max(0, min(self.count, buf.length / 12) - laidSnowSplats)
+        let p = buf.contents().bindMemory(to: Float.self, capacity: max(1, count) * 3)
         let eh = simd_dot(eye, up)
         var hs: [Float] = []
         hs.reserveCapacity(4096)
