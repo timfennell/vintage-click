@@ -1418,10 +1418,11 @@ final class Viewer: NSObject, MTKViewDelegate {
                     guard let self else { return }
                     self.finalKind = self.finalKind == .prores ? .hevc : .prores
                     self.reopenMenu() },
-                .init(title: "Final size: \(finalSize.w) × \(finalSize.h)", detail: "8-perf's 1.5:1 (select to change)") { [weak self] in
+                .init(title: "Final size: \(finalSize.w) × \(finalSize.h)" + (finalSize.w == 1920 ? " HD" : ""),
+                      detail: (finalSize.w == 1920 ? "16:9, the frame's full width: about a third the time of 3072 × 2048" : "8-perf's 1.5:1") + " (select to change)") { [weak self] in
                     guard let self else { return }
                     let i = Self.finalSizes.firstIndex { $0 == self.finalSize } ?? 0
-                    UserDefaults.standard.set((i + 1) % Self.finalSizes.count, forKey: "movieSize")
+                    UserDefaults.standard.set(Self.finalSizes[(i + 1) % Self.finalSizes.count].w, forKey: "movieWidth")
                     self.reopenMenu() },
                 .init(title: "Clear all keys", detail: "start the take again") { [weak self] in
                     guard let self else { return }
@@ -2655,7 +2656,8 @@ final class Viewer: NSObject, MTKViewDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "newLightsFlare") }
     }
 
-    static let finalSizes: [(w: Int, h: Int)] = [(3072, 2048), (4096, 2730)]
+    /// HD (16:9: the 1.5:1 frame's full width, a little off the top and bottom), then 8-perf's 1.5:1.
+    static let finalSizes: [(w: Int, h: Int)] = [(1920, 1080), (3072, 2048), (4096, 2730)]
 
     /// The darkroom's notes on takes: ~/Library/Logs/Vintage Click.log.
     static func movieLog(_ line: String) {
@@ -2671,7 +2673,10 @@ final class Viewer: NSObject, MTKViewDelegate {
         }
     }
     var finalSize: (w: Int, h: Int) {
-        Self.finalSizes[min(Self.finalSizes.count - 1, max(0, UserDefaults.standard.integer(forKey: "movieSize")))]
+        let d = UserDefaults.standard
+        if let s = Self.finalSizes.first(where: { $0.w == d.integer(forKey: "movieWidth") }) { return s }
+        // before HD came: an index into the 1.5:1 sizes
+        return Self.finalSizes[min(Self.finalSizes.count - 1, 1 + max(0, d.integer(forKey: "movieSize")))]
     }
 
     private func startMovie(_ t: MotionTake, folder: URL, kind: MovieDeveloper.Kind, size: (w: Int, h: Int)) {
