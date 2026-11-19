@@ -2411,6 +2411,9 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
     }
     float ambient = G[0].w;
     float3 v = normalize(mean - G[0].xyz);           // camera -> splat, as 3DGS reads SH
+    bool glint = float(i) >= G[3].w;                 // a crystal of the laid snow
+    float3 fnrm = float3(SURF[i].xyz) / 127.5 - 1;
+    fnrm /= max(length(fnrm), 1e-4);
     float3 tint = G[2].rgb;
     float3 lin = srgb_to_lin3(base) * ambient * tint;
     float3 shine = 0;
@@ -2461,6 +2464,18 @@ kernel void relight(device const float* means [[buffer(0)]], device const float*
         bool camera_lit = G[3].z < 0.5;
         float3 diff = max(base + (K >= 3 && camera_lit ? sh_sum(-ldir, sh, K, 0, 3) * damp : 0.0), 0.0);
         lin += srgb_to_lin3(diff) * e * col;
+        // A crystal of the laid snow: a tiny flat facet, a mirror. It flashes only
+        // where the lamp's reflection in it meets the camera (a narrow lobe, a few
+        // degrees); facets lie every which way, so a move of the camera or the
+        // light lights some and puts others out.
+        if (glint) {
+            float3 hv = normalize(ldir - v);
+            float cn = dot(fnrm, ldir), cv = -dot(fnrm, v);
+            if (cn * cv > 0) {
+                float c = abs(dot(fnrm, hv));
+                lin += e * col * 5.0 * pow(c, 900.0);
+            }
+        }
         if (has_sh && camera_lit) {
             float3 h = normalize(v - ldir);
             float3 S = sh_sum(h, sh, K, 3, K);

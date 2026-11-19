@@ -52,6 +52,93 @@ struct SceneSnow: Codable, Equatable {
         return (a, simd_cross(up, a))
     }
 
+    /// A flake's own constants (the same in the plain fall and riding a wind field).
+    struct FlakeSpec { var u1, u2, u3, u4, sizeK, v, ph, fr, swing: Float }
+    static func flakeSpec(_ i: UInt32, fallMS: Float) -> FlakeSpec {
+        let u1 = hash(i, 1), u2 = hash(i, 2), u3 = hash(i, 3), u4 = hash(i, 4)
+        // sizes spread as real snow does: mostly small, now and then a big clump
+        let gsz = (-2 * log(max(hash(i, 7), 1e-6))).squareRoot() * cos(6.283 * hash(i, 8))
+        let sizeK = min(4, exp(0.55 * gsz))
+        let ph = hash(i, 5) * 6.283, fr = (0.5 + 1.2 * hash(i, 6)) * 2
+        let swing = fallMS * (0.04 + 0.1 * hash(i, 9)) * (0.6 + 0.4 * sizeK)
+        return FlakeSpec(u1: u1, u2: u2, u3: u3, u4: u4, sizeK: sizeK, v: fallMS * (0.65 + 0.5 * u4), ph: ph, fr: fr, swing: swing)
+    }
+
+    /// Gusts: how far the wind has risen at `tt` (1 the mean), and the bursts that blow
+    /// even when there is no steady wind (0...1). The same for all flakes.
+    private func gustRise(_ tt: Double) -> Double {
+        1 + Double(gust) * (0.6 * sin(tt * 0.37) + 0.4 * sin(tt * 1.13 + 1.7))
+    }
+    private func gustBurst(_ tt: Double) -> Double {
+        0.3 * (1 - cos(tt * 0.37)) + 0.2 * (1 - cos(tt * 1.13 + 1.7))
+    }
+    /// How hard the bursts blow at their peak (m/s, at full gustiness).
+    private static let burstMS = 2.5
+
+    /// The wind at `t` (m/s along the horizon's axes): the steady wind rising and
+    /// falling with the gusts, the bursts, and the gusts swinging it a little.
+    func windAt(_ t: Double) -> SIMD2<Float> {
+        let tt = t.truncatingRemainder(dividingBy: 100_000)
+        let speed = Double(windMS) * gustRise(tt) + Double(gust) * Self.burstMS * gustBurst(tt)
+        let ang = Double(windDeg) * .pi / 180 + Double(gust) * 0.2 * sin(tt * 0.23)
+        return SIMD2(Float(cos(ang) * speed), Float(sin(ang) * speed))
+    }
+
+    /// How far the wind has carried the air by `t` (metres, along the wind's way): the
+    /// wind and its gusts summed over time (not wind x time x the gust now, which
+    /// threw the flakes back and forth harder the longer a take ran).
+    private func windTravel(_ t: Double) -> Double {
+        let tt = t.truncatingRemainder(dividingBy: 100_000), g = Double(gust)
+        let rise = tt + g * (0.6 * (1 - cos(tt * 0.37)) / 0.37 + 0.4 * (cos(1.7) - cos(tt * 1.13 + 1.7)) / 1.13)
+        let burst = 0.3 * (tt - sin(tt * 0.37) / 0.37) + 0.2 * (tt - (sin(tt * 1.13 + 1.7) - sin(1.7)) / 1.13)
+        return Double(windMS) * rise + g * Self.burstMS * burst
+    }
+
+    /// The air's slow eddies: a few waves of drift, the same for flakes close together,
+    /// so they swirl as one; scaled to how fast the snow falls (metres, x y h).
+    func eddy(_ x: Float, _ y: Float, _ h: Float, _ tt: Float) -> SIMD3<Float> {
+        let L = max(0.2, 3 * fallMS)                       // an eddy's size (m)
+        let amount = 0.35 * fallMS * (1 + 0.6 * gust) + 0.15 * windMS
+        let k = 2 * Float.pi / L
+        let ax = sin(k * (0.8 * y + 0.3 * h) + tt * 0.41) + 0.6 * sin(k * (1.7 * y - 0.9 * x) + tt * 0.83 + 2.1)
+        let ay = sin(k * (0.9 * x - 0.2 * h) + tt * 0.37 + 1.3) + 0.6 * sin(k * (1.5 * x + 1.1 * y) + tt * 0.71 + 4.0)
+        let az = 0.35 * sin(k * (0.7 * x + 0.6 * y) + tt * 0.53 + 0.7)
+        return SIMD3(ax, ay, az) * amount * 0.6
+    }
+
+    /// The swirls a gust brings (m/s, x y h): spinning cells of air a metre or three
+    /// across, carried along with the wind, rolling a little up and down; they
+    /// build as a gust rises and die away with it. Spun from a stream function, so
+    /// the air goes round rather than piling up.
+    func gustSwirl(_ x: Float, _ y: Float, _ h: Float, _ t: Double) -> SIMD3<Float> {
+        guard gust > 0 else { return .zero }
+        let tt = t.truncatingRemainder(dividingBy: 100_000)
+        let strength = Float(Double(gust) * (Self.burstMS * gustBurst(tt) + Double(windMS) * 0.35 * gustRise(tt)) * 0.7)
+        guard strength > 1e-3 else { return .zero }
+        // where the air that is here now was carried from (the swirls ride the wind)
+        let wa = Double(windDeg) * .pi / 180, travel = windTravel(t)
+        let X = Double(x) - cos(wa) * travel, Y = Double(y) - sin(wa) * travel
+        func cells(_ L: Double, _ rot: Double, _ p1: Double, _ p2: Double) -> SIMD2<Float> {
+            let k = 2 * .pi / L, c = cos(rot), s = sin(rot)
+            let u = X * c + Y * s, v = -X * s + Y * c
+            let a = k * u + p1, b = k * v + p2
+            // psi = sin(a) sin(b): velocity (d psi/dv, -d psi/du) in the rotated frame, per k
+            let du = sin(a) * cos(b), dv = -cos(a) * sin(b)
+            return SIMD2(Float(du * c - dv * s), Float(du * s + dv * c))
+        }
+        let big = cells(2.6, 0.3, 0.31 * tt, 0.27 * tt + 1.1)
+        let small = cells(1.3, 0.95, -0.47 * tt + 2.0, 0.41 * tt + 0.4)
+        let hz = big + small * 0.5
+        // rolls: the air lifting and dipping as the swirls pass
+        let roll = Float(sin(2 * .pi / 2.2 * (X * cos(wa) + Y * sin(wa)) + 0.4 * tt)) * cos(Float(2 * .pi / 3.0) * h)
+        // less near the ground (it drags the air)
+        let drag: Float = min(1, max(0.25, h / 0.6))
+        let k: Float = strength * drag
+        return SIMD3<Float>(hz.x, hz.y, 0.45 * roll) * k
+    }
+
+    static func unit(_ i: UInt32, _ k: UInt32) -> Float { hash(i, k) }
+
     private static func hash(_ i: UInt32, _ k: UInt32) -> Float {
         var x = i &* 0x9E3779B1 ^ (k &* 0x85EBCA77)
         x ^= x >> 15; x = x &* 0x2C1B3C6D; x ^= x >> 12; x = x &* 0x297A2D39; x ^= x >> 15
@@ -67,9 +154,18 @@ struct SceneSnow: Codable, Equatable {
         // snows through the whole scene, not only in front of the lens.
         let near = layer(at: t, eye: eye, up: up, mpu: mpu, R: radiusM, H: ceilingM,
                          n: min(Self.maxFlakes / 2, Int(density)), seed: 0)
+        return near + farFlakes(at: t, eye: eye, up: up, metresPerUnit: mpu)
+    }
+
+    /// Whether there is any wind for flakes to ride (a field round the furniture).
+    var windy: Bool { density > 0 && (windMS > 0 || gust > 0) }
+
+    /// The wide, sparse layer of flakes beyond the column round the camera.
+    func farFlakes(at t: Double, eye: SIMD3<Float>, up: SIMD3<Float>, metresPerUnit mpu: Float) -> [SIMD4<Float>] {
+        guard density > 0, radiusM > 0, ceilingM > 0 else { return [] }
         let far = layer(at: t, eye: eye, up: up, mpu: mpu, R: radiusM * 4, H: ceilingM * 1.5,
                         n: min(Self.maxFlakes / 2, Int(density * 1.5)), seed: 1_000_003)
-        return near + far
+        return far
     }
 
     private func layer(at t: Double, eye: SIMD3<Float>, up: SIMD3<Float>, mpu: Float, R: Float, H: Float,
@@ -77,48 +173,34 @@ struct SceneSnow: Codable, Equatable {
         guard n > 0 else { return [] }
         let (a, b) = Self.horizon(up)
         let tt = Float(t.truncatingRemainder(dividingBy: 100_000))
-        let wa = windDeg * .pi / 180
-        let wind = SIMD2<Float>(cos(wa), sin(wa)) * windMS
-        // Gusts: the wind rises and falls, slowly, the same for all.
-        let g = 1 + gust * (0.6 * sin(tt * 0.37) + 0.4 * sin(tt * 1.13 + 1.7))
+        let wa = Double(windDeg) * .pi / 180
+        // how far the wind has carried the air (wrapped: the column repeats every 2R)
+        let travel = windTravel(t)
+        let period = Double(2 * R)
+        let carried = SIMD2(Float((cos(wa) * travel).truncatingRemainder(dividingBy: period)),
+                            Float((sin(wa) * travel).truncatingRemainder(dividingBy: period)))
         // The camera in metres, on the ground plane and up.
         let eyeA = simd_dot(eye, a) * mpu, eyeB = simd_dot(eye, b) * mpu
         let groundM = ground * mpu
         var out: [SIMD4<Float>] = []
         out.reserveCapacity(n)
-        // The air moves in slow eddies: a few waves of drift, the same for flakes
-        // close together, so they swirl as one; scaled to how fast the snow falls.
-        let L = max(0.2, 3 * fallMS)                       // an eddy's size (m)
-        let eddy = 0.35 * fallMS * (1 + 0.6 * gust) + 0.15 * windMS
-        func air(_ x: Float, _ y: Float, _ h: Float) -> SIMD3<Float> {
-            let k = 2 * Float.pi / L
-            let ax = sin(k * (0.8 * y + 0.3 * h) + tt * 0.41) + 0.6 * sin(k * (1.7 * y - 0.9 * x) + tt * 0.83 + 2.1)
-            let ay = sin(k * (0.9 * x - 0.2 * h) + tt * 0.37 + 1.3) + 0.6 * sin(k * (1.5 * x + 1.1 * y) + tt * 0.71 + 4.0)
-            let az = 0.35 * sin(k * (0.7 * x + 0.6 * y) + tt * 0.53 + 0.7)
-            return SIMD3(ax, ay, az) * eddy * 0.6
-        }
         for j in 0..<UInt32(n) {
             let i = j &+ seed
-            let u1 = Self.hash(i, 1), u2 = Self.hash(i, 2), u3 = Self.hash(i, 3), u4 = Self.hash(i, 4)
-            // sizes spread as real snow does: mostly small, now and then a big clump
-            let gsz = (-2 * log(max(Self.hash(i, 7), 1e-6))).squareRoot() * cos(6.283 * Self.hash(i, 8))
-            let sizeK = min(4, exp(0.55 * gsz))
-            // big flakes flutter more; each falls at its own pace, which rises and falls
-            let v = fallMS * (0.65 + 0.5 * u4) * (1 + 0.18 * sin(tt * (0.7 + u2) + u1 * 6.283))
-            let ph = Self.hash(i, 5) * 6.283, fr = (0.5 + 1.2 * Self.hash(i, 6)) * 2
-            let swing = fallMS * (0.04 + 0.1 * Self.hash(i, 9)) * (0.6 + 0.4 * sizeK)
+            let s = Self.flakeSpec(i, fallMS: fallMS)
+            // each falls at its own pace, which rises and falls
+            let v = s.v * (1 + 0.18 * sin(tt * (0.7 + s.u2) + s.u1 * 6.283))
             // drift with the wind (and gusts), flutter in a loose spiral as it falls
-            let flutter = SIMD2(sin(tt * fr + ph), cos(tt * fr * 0.83 + ph * 1.3)) * swing
-            let drift = wind * (tt * g) + flutter
-            var x = u1 * 2 * R + drift.x, y = u2 * 2 * R + drift.y
+            let flutter = SIMD2(sin(tt * s.fr + s.ph), cos(tt * s.fr * 0.83 + s.ph * 1.3)) * s.swing
+            let drift = carried + flutter
+            var x = s.u1 * 2 * R + drift.x, y = s.u2 * 2 * R + drift.y
             // wrap round the camera: the column moves with you
             x = (x - eyeA + R).truncatingRemainder(dividingBy: 2 * R); if x < 0 { x += 2 * R }; x += eyeA - R
             y = (y - eyeB + R).truncatingRemainder(dividingBy: 2 * R); if y < 0 { y += 2 * R }; y += eyeB - R
-            var h = (u3 * H - v * tt).truncatingRemainder(dividingBy: H); if h < 0 { h += H }
-            let w = air(x, y, h)
+            var h = (s.u3 * H - v * tt).truncatingRemainder(dividingBy: H); if h < 0 { h += H }
+            // the gusts' swirls (here a sway of the flake about its path)
+            let w = eddy(x, y, h, tt) + gustSwirl(x, y, h, t) * 0.6
             let pm = a * (x + w.x) + b * (y + w.y) + up * (groundM + h + w.z)
-            let size = flakeM * sizeK
-            out.append(SIMD4(pm / mpu, size / mpu))
+            out.append(SIMD4(pm / mpu, flakeM * s.sizeK / mpu))
         }
         return out
     }
@@ -150,7 +232,7 @@ struct SceneSnow: Codable, Equatable {
             let xc = V[0] * rel.x + V[1] * rel.y + V[2] * rel.z
             let yc = V[4] * rel.x + V[5] * rel.y + V[6] * rel.z
             let zc = V[8] * rel.x + V[9] * rel.y + V[10] * rel.z
-            guard zc > f.w * 4 else { continue }        // behind, or against the lens
+            guard f.w > 0, zc > f.w * 4 else { continue }        // landed; behind, or against the lens
             let px = cx + xc / zc * fx, py = cy + yc / zc * fx
             // where it is at the slice's end (a streak), unless it wrapped round the column
             var sx: Float = 0, sy: Float = 0

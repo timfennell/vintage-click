@@ -222,19 +222,51 @@ final class RenderLoop {
         var up = SIMD3<Float>(0, -1, 0)
     }
 
+    // MARK: wind
+
+    private var wind: WindField?
+    private var windKey: [Float] = []
+    /// The falling snow riding the wind: one for the finder, one for what develops
+    /// (each keeps its own clock's flakes, so neither makes the other start over).
+    private let finderDrift = SnowDrift(), developDrift = SnowDrift()
+
+    /// The air round the scan's furniture for `snow` (nil: no wind). Solved on first
+    /// need (a second or two), again when the snowfall's space changes.
+    private func windField(_ snow: SceneSnow, up: SIMD3<Float>, metresPerUnit mpu: Float) -> WindField? {
+        guard snow.windy else { return nil }
+        let scan = max(0, min(count, means.length / 12) - laidSnowSplats)
+        let key: [Float] = [Float(scan), mpu, up.x, up.y, up.z, snow.centre.x, snow.centre.y, snow.centre.z,
+                            snow.radiusM, snow.ceilingM, snow.ground]
+        if key != windKey {
+            windKey = key
+            wind = nil
+            wind = WindField.build(means: means.contents().assumingMemoryBound(to: Float.self),
+                                   surf: surf.contents().assumingMemoryBound(to: UInt8.self), count: scan,
+                                   snow: snow, up: up, metresPerUnit: mpu)
+        }
+        return wind
+    }
+
     /// The snow seen by a view at time `t` (nil: none falling). `lens`: the view's
     /// lens offset (scene units, a photo's sub-pupil) and how much of the blur to
     /// spread the flakes by.
     private func snowPass(_ lighting: LightingPlot, body b: CameraBody, eye: SIMD3<Float>, view V: [Float],
                           fx: Float, cx: Float, cy: Float, w: Int, h: Int, t: Double, slice: Double = 0,
-                          lensOffset: SIMD2<Float> = .zero, blur: Float) -> SnowPass? {
+                          lensOffset: SIMD2<Float> = .zero, blur: Float, drift: SnowDrift? = nil) -> SnowPass? {
         guard let snow = lighting.snow, snow.density > 0 else { return nil }
         let mpu = b.metresPerUnit
-        let world = snow.flakes(at: t, eye: eye, up: lighting.up, metresPerUnit: mpu)
+        // In wind, the column round the camera rides the air round the furniture.
+        let field = drift == nil ? nil : windField(snow, up: lighting.up, metresPerUnit: mpu)
+        func flakes(_ t: Double) -> [SIMD4<Float>] {
+            guard let field, let drift else { return snow.flakes(at: t, eye: eye, up: lighting.up, metresPerUnit: mpu) }
+            return drift.flakes(at: t, snow: snow, field: field, eye: eye, up: lighting.up, metresPerUnit: mpu)
+                + snow.farFlakes(at: t, eye: eye, up: lighting.up, metresPerUnit: mpu)
+        }
+        let world = flakes(t)
         guard !world.isEmpty else { return nil }
         // Where each flake has got to by the end of this sub-pupil's slice of the
         // shutter: drawn as a streak from here to there, the slices join up.
-        let later = slice > 0 ? snow.flakes(at: t + slice, eye: eye, up: lighting.up, metresPerUnit: mpu) : nil
+        let later = slice > 0 ? flakes(t + slice) : nil
         // The sub-pupil's view is moved by its lens point: so are the flakes (as the splats).
         let eyeSub = eye + SIMD3(V[0], V[1], V[2]) * lensOffset.x + SIMD3(V[4], V[5], V[6]) * lensOffset.y
         let invFocus = mpu / max(b.focusM, 0.01)
@@ -504,6 +536,8 @@ final class RenderLoop {
     /// The snow with depth now in the scene (its key), and how many splats it added.
     private(set) var laidSnowKey: [Float] = []
     private(set) var laidSnowSplats = 0
+    /// Of those, how many (the last) are crystals that glint in a lamp (relight).
+    private var laidGlints = 0
     private var lastRelight: [SIMD4<Float>] = []
 
     // Shadow maps: per light, Spirula's render from the head (transmittance and
@@ -927,11 +961,12 @@ final class RenderLoop {
             if depth <= 0 && self.laidSnowKey.isEmpty { DispatchQueue.main.async { done(0) }; return }
             if depth > 0 && key == self.laidSnowKey { DispatchQueue.main.async { done(self.laidSnowSplats) }; return }
             guard var model = try? loadPLY(url) else { return }
-            var added = 0
+            var added = 0, glints = 0
             if depth > 0, let snow {
                 // read straight from the splats (a level grid, a layer cake of heights)
                 let v = SnowVolume.build(model: model, snow: snow, up: up, metresPerUnit: body.metresPerUnit)
                 added = v.count
+                glints = v.glints
                 model.means += v.means; model.quats += v.quats; model.scales += v.scales
                 model.opacities += v.opacities; model.dc += v.dc
                 let K = (model.shDegree + 1) * (model.shDegree + 1) - 1
@@ -941,6 +976,7 @@ final class RenderLoop {
             self.replaceSplats(model)
             self.laidSnowKey = depth > 0 ? key : []
             self.laidSnowSplats = added
+            self.laidGlints = glints
             DispatchQueue.main.async { done(added) }
         }
     }
@@ -1104,7 +1140,8 @@ final class RenderLoop {
             SIMD4(eye, plot.ambient),
             SIMD4(Float(min(plot.lights.count, Self.maxLights)), Float(count), Float(higherCoeffs), 0.25),
             SIMD4(plot.ambientTint, vis == nil ? 0 : 1),
-            SIMD4(Float(quality.rawValue), Float(shadowVersion), daylightScan ? 1 : 0, 0),
+            // .w: the first of the laid snow's crystals (they are the last splats)
+            SIMD4(Float(quality.rawValue), Float(shadowVersion), daylightScan ? 1 : 0, Float(max(0, count - laidGlints))),
             // Snow settled and hoarfrost (relight G[4], G[5]).
             SIMD4(snow?.settled ?? 0, snow?.frost ?? 0, sky != nil ? 1 : 0, Float(skyKey.count)),
             SIMD4(plot.up, body.metresPerUnit),
@@ -1179,7 +1216,7 @@ final class RenderLoop {
         let snowNow = job.fromLight == nil ? snowPass(job.lighting, body: job.body, eye: job.position, view: job.view, fx: job.fx,
                                                       cx: Float(finderSize.w) / 2 + axis.x, cy: Float(finderSize.h) / 2 + axis.y,
                                                       w: finderSize.w, h: finderSize.h, t: CACurrentMediaTime(),
-                                                      blur: job.lens == nil ? 0 : 1) : nil
+                                                      blur: job.lens == nil ? 0 : 1, drift: finderDrift) : nil
         if ok, job.fromLight == nil, skyTex != nil || shells != nil || dof || fogRows != nil || snowNow != nil,
            let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
             // The finder shows the sky at infinity as blurred as the lens would:
@@ -1371,7 +1408,8 @@ final class RenderLoop {
                 let tcx = axis.x + fx * d.x * invFocus - Float(x0) + jit.x, tcy = axis.y + fx * d.y * invFocus - Float(y0) + jit.y
                 let snowNow = snowPass(e.lighting, body: b, eye: cam.position, view: cam.viewMatrix, fx: fx, cx: tcx, cy: tcy,
                                        w: tw, h: th, t: e.snowClock + Double(e.shutterTime(e.next)) * Double(b.shutter.seconds),
-                                       slice: Double(e.shutterSlice) * Double(b.shutter.seconds), lensOffset: d, blur: share)
+                                       slice: Double(e.shutterSlice) * Double(b.shutter.seconds), lensOffset: d, blur: share,
+                                       drift: developDrift)
                 encodeBackground(te, frame: photoSlot.buf, offset: photoSlot.off, w: tw, h: th, view: vm, fx: fx,
                           cx: tcx, cy: tcy,
                           fisheye: b.lens.isFisheye, up: e.lighting.up, level: 0, fog: fogRows, photo: true, snow: snowNow)

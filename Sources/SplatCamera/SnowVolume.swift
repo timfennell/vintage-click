@@ -20,8 +20,19 @@ enum SnowVolume {
         /// brightness changes with the angle it is seen from, like crystal faces.
         var sh: [Float] = []
         var count: Int { opacities.count }
+        /// How many at the end are crystals: tiny facets that glint where a lamp's
+        /// mirror angle meets the camera (relight). Kept last, so they are one range.
+        var glints = 0
         mutating func append(_ o: Splats) {
-            means += o.means; quats += o.quats; scales += o.scales; opacities += o.opacities; dc += o.dc; sh += o.sh
+            // each part's grains, then each part's crystals
+            let a = count - glints, b = o.count - o.glints
+            func merge(_ s: [Float], _ t: [Float], _ per: Int) -> [Float] {
+                Array(s[0..<(a * per)]) + t[0..<(b * per)] + s[(a * per)...] + t[(b * per)...]
+            }
+            let kp = count > 0 ? sh.count / count : (o.count > 0 ? o.sh.count / o.count : 0)
+            means = merge(means, o.means, 3); quats = merge(quats, o.quats, 4); scales = merge(scales, o.scales, 3)
+            opacities = merge(opacities, o.opacities, 1); dc = merge(dc, o.dc, 3); sh = merge(sh, o.sh, kp)
+            glints += o.glints
         }
     }
 

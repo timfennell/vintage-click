@@ -115,7 +115,11 @@ extension SnowVolume {
                 let zc = (Float(b0 + i) + 0.5) * f
                 guard zc >= h[k] else { continue }
                 let sn = Int(snowF[s * B + i]), sp = Int(supF[s * B + i])
-                if sn >= sMin && sn + sp >= thr { isSnow[s * B + i] = true }
+                // Beside the object the snow's own mass is thinned by the blur (none
+                // inside the object): there it needs less, so the snow reaches the
+                // stone and wood it lies against, with no seam of bare floor between.
+                let touching = sp >= 96
+                if (sn >= (touching ? sMin / 3 : sMin)) && sn + sp >= thr { isSnow[s * B + i] = true }
             }
         }
         @inline(__always) func snowAt(_ k: Int, _ zi: Int) -> Bool {
@@ -135,7 +139,7 @@ extension SnowVolume {
         func rnd() -> Float { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return Float(rng & 0xFFFFFF) / Float(0x7FFFFF) - 1 }
         let C0: Float = 0.28209479177387814, white: Float = 0.92
         let fu = f / mpu
-        func add(_ p: SIMD3<Float>, _ nn: SIMD3<Float>, size: Float, thin: Float, shade: Float) {
+        func add(_ p: SIMD3<Float>, _ nn: SIMD3<Float>, size: Float, thin: Float, shade: Float, glossy: Bool = true) {
             let seed: SIMD3<Float> = abs(nn.x) < 0.9 ? [1, 0, 0] : [0, 1, 0]
             let t1 = simd_normalize(simd_cross(nn, seed)), t2 = simd_cross(nn, t1)
             let q = simd_quatf(simd_float3x3(columns: (t1, t2, nn)))
@@ -151,7 +155,7 @@ extension SnowVolume {
             out.dc += [(lum * (1 - 0.09 * cl) - 0.5) / C0, (lum * (1 - 0.035 * cl) - 0.5) / C0, (lum * (1 + 0.05 * cl) - 0.5) / C0]
             if K > 0 {
                 let strong: Float = (rng >> 20) % 8 == 0 ? 0.1 : 0.025
-                for c in 0..<K { let a = rnd() * strong * (c < 3 ? 0.7 : 1.0); out.sh += [a, a, a] }
+                for c in 0..<K { let a = glossy ? rnd() * strong * (c < 3 ? 0.7 : 1.0) : 0; out.sh += [a, a, a] }
             }
         }
         let sumF: (Int, Int) -> Int = { k, zi in
@@ -172,6 +176,8 @@ extension SnowVolume {
             return acc / 255
         }
         var count = 0
+        // crystals, laid after the grains (they are one range at the end: relight's glints)
+        var crystals: [(p: SIMD3<Float>, n: SIMD3<Float>)] = []
         for s in 0..<S {
             let k = Int(cols[s]), x = k % N, y = k / N, b0 = Int(base[s])
             guard x > 0, y > 0, x < N - 1, y < N - 1 else { continue }
@@ -205,6 +211,7 @@ extension SnowVolume {
                 let mb = min(3, Int(ceil(2 * (1 + an[eb] * an[eb] / (nd * nd)).squareRoot() - 0.15)))
                 let thrF = Float(thr) / 255
                 let gd = nrm[d] * max(gl, 0.05)
+                var lastP = world(k, (Float(zi) + 0.5) * f)
                 for ia in 0..<ma { for ib in 0..<mb {
                     var q = SIMD3<Float>(Float(x), Float(y), Float(zi))
                     q[ea] += (Float(ia) + 0.5 + rnd() * 0.45) / Float(ma) - 0.5
@@ -217,15 +224,40 @@ extension SnowVolume {
                     // fine sugar, not tiles: each grain a little different in size, tilt and shade
                     let tilt = simd_normalize(nWorld + (rgt * rnd() + dn * rnd() + up * rnd()) * 0.12)
                     add(p, tilt, size: fu * (0.36 + 0.09 * rnd()), thin: fu * 0.1, shade: 0.965 + 0.035 * rnd())
+                    lastP = p
                     count += 1
+                    // here and there a crystal on the surface, a facet turned its own way
+                    // (at random, not on the voxels' grid): dark until a lamp's reflection
+                    // in it lines up with the camera
+                    if simd_dot(nWorld, up) > 0.2 && rnd() > 0.7 {
+                        let facet = simd_normalize(nWorld + (rgt * rnd() + dn * rnd() + up * rnd()) * 0.55)
+                        crystals.append((p + nWorld * (fu * 0.06), facet))
+                    }
                 } }
-                // now and then a crystal catching the light
-                if (x * 2654435761 &+ y * 40503 &+ zi * 97) % 11 == 0 && simd_dot(nWorld, up) > 0.3 {
-                    let p = world(k, (Float(zi) + 0.5) * f)
-                    add(p + nWorld * (fu * 0.2), simd_normalize(nWorld + (rgt * rnd() + dn * rnd()) * 0.4), size: fu * 0.06, thin: fu * 0.02, shade: 1.18)
+                // Where the snow meets the object beside it (a pillar's foot, a pew's
+                // end): the blanket runs on into it, a little past its surface, so
+                // the two meet with no gap (the voxels are only as fine as a cell).
+                var into = SIMD2<Float>(0, 0)
+                if solidAt(k + 1, zi) { into.x += 1 }
+                if solidAt(k - 1, zi) { into.x -= 1 }
+                if solidAt(k + N, zi) { into.y += 1 }
+                if solidAt(k - N, zi) { into.y -= 1 }
+                if simd_length(into) > 0.5 {
+                    let dir = simd_normalize(rgt * into.x + dn * into.y)
+                    let face = simd_normalize(nWorld + up * 0.6 - dir * 0.3)
+                    for j in 0..<2 {
+                        let reach = fu * (0.35 + 0.35 * Float(j) + 0.1 * rnd())
+                        add(lastP + dir * reach + (rgt * rnd() + dn * rnd()) * (fu * 0.15) - up * (fu * 0.1 * Float(j)),
+                            face, size: fu * (0.42 + 0.08 * rnd()), thin: fu * 0.12, shade: 0.95 + 0.04 * rnd())
+                        count += 1
+                    }
                 }
             }
         }
+        for c in crystals {
+            add(c.p, c.n, size: fu * (0.025 + 0.01 * rnd()), thin: fu * 0.008, shade: 0.98, glossy: false)
+        }
+        out.glints = crystals.count
         if ProcessInfo.processInfo.environment["VC_SNOWDBG"] != nil {
             print("snowvox N=\(N) f=\(f) r=\(r) B=\(B) cols=\(S) splats=\(count) in \(Date().timeIntervalSince(t0))s")
         }
