@@ -54,8 +54,7 @@ final class MenuOverlay: NSView {
     }
     func mountLens() {
         if onFilterShelf { onMountFilter?(lensChoice); return }
-        let before = lensCollections.prefix(lensShelf).reduce(0) { $0 + $1.lenses.count }
-        onMountLens?(before + lensChoice)
+        if let i = bagIndex(shelf: lensShelf, choice: lensChoice) { onMountLens?(i) }
     }
 
     // A simple chooser page (the lights' gels): a title, a line about it, rows.
@@ -366,7 +365,6 @@ final class MenuOverlay: NSView {
         lensRowFirst = 0
         text(shelf.about, NSPoint(x: panel.minX + 2 * u, y: panel.minY + 4.0 * u), size: 0.9 * u, color: NSColor(white: 0.55, alpha: 1))
         lensRects = []
-        let before = lensCollections.prefix(lensShelf).reduce(0) { $0 + $1.lenses.count }
         for (i, l) in shelf.lenses.enumerated() {
             let r = NSRect(x: panel.minX + u, y: panel.minY + 6.2 * u + CGFloat(i) * rowH, width: w - 2 * u, height: rowH - 0.4 * u)
             lensRects.append(r)
@@ -374,7 +372,7 @@ final class MenuOverlay: NSView {
                 amber.withAlphaComponent(0.18).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 0.5 * u, yRadius: 0.5 * u).fill()
             }
-            let mounted = before + i == mountedLens
+            let mounted = bagIndex(shelf: lensShelf, choice: i) == mountedLens
             text((i == lensChoice ? "▶ " : "  ") + l.name + (mounted ? "  ●" : ""), NSPoint(x: r.minX + u, y: r.minY + 0.4 * u),
                  size: 1.2 * u, color: i == lensChoice ? amber : .white)
             var kind = l.projection == .circularFisheye ? "circular fisheye" : l.projection == .fisheye ? "fisheye" : "\(l.blades == 0 ? "round" : "\(l.blades)-blade") iris"

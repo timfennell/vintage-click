@@ -26,8 +26,24 @@ extension BeamTable {
 
 enum Flare {
     static let maxLights = 8
-    /// The lens, the filter, four rows per light, then the lights' distances (four to a row).
-    static var rowCount: Int { 4 + 4 * maxLights + maxLights / 4 }
+    /// The lens, the filter, four rows per light, the lights' distances (four to a row),
+    /// then the light leak (FLARE_LEAK_ROW in the shaders).
+    static var rowCount: Int { 4 + 4 * maxLights + maxLights / 4 + 1 }
+
+    /// The leak row: (strength, gap direction on the frame (x right, y down; zero
+    /// all round), the lens's seed). The gap opens on the side the lens is
+    /// rocked away from: the more it is tilted, the wider and brighter, and the
+    /// more it comes from that one side.
+    static func leakRow(lens l: Lens, tilt: SIMD2<Float>, seed: Float) -> SIMD4<Float> {
+        guard l.leak > 0 else { return .zero }
+        var reach: Float = 0
+        if case .tilt(let m) = l.movement { reach = m }
+        let t = simd_length(tilt), open = reach > 0 ? min(1, t / reach) : 0
+        // tilt.x turns the focus plane across the frame (its far side moves off
+        // the mount), tilt.y up and down; the frame's y runs down.
+        let dir = t > 1e-3 ? SIMD2(tilt.x, -tilt.y) / t * open : .zero
+        return SIMD4(l.leak * (0.35 + 0.65 * open), dir.x, dir.y, seed)
+    }
 
     /// Older and odd optics are single-coated: brighter, more colourful ghosts.
     static func singleCoated(_ l: Lens) -> Bool {
@@ -130,7 +146,7 @@ enum Flare {
             let units = 1 / b.metresPerUnit
             let pa = project(light.position + r * (fw / 2 * units)) ?? px
             let pb = project(light.position + u * (fh / 2 * units)) ?? px
-            let blur = (b.lens.focalMM / 1000 / n) * abs(1 / dm - 1 / max(b.focusM, 0.05)) * fx / diag
+            let blur = b.blurDiameterM(fNumber: n) * abs(1 / dm - b.focusDioptres) * fx / diag
             out.append(Source(uv: uv, radius: fx * max(fw, fh) * 0.5 * units / dist / diag, rgb: e * (.pi / omega),
                               distance: dist, px: px, blur: blur, faceA: pa - px, faceB: pb - px,
                               faceRound: round, face: face, flare: light.flareOn, gel: light.gel))
@@ -141,7 +157,7 @@ enum Flare {
 
     /// The shaders' flare rows: the lens, the filter, then four rows per light (see lens_flare).
     static func uniforms(_ s: [Source], visibility: [Float], lens l: Lens, fNumber n: Float, filter: LensFilter? = nil,
-                         axisUV: SIMD2<Float>, aspect: Float) -> [SIMD4<Float>] {
+                         axisUV: SIMD2<Float>, aspect: Float, tilt: SIMD2<Float> = .zero) -> [SIMD4<Float>] {
         var seed: UInt32 = 2166136261
         for c in l.name.utf8 { seed = (seed ^ UInt32(c)) &* 16777619 }
         var rows: [SIMD4<Float>] = [
@@ -159,7 +175,7 @@ enum Flare {
         ]
         for (i, src) in s.enumerated() {
             rows.append(SIMD4(src.uv.x, src.uv.y, src.radius, i < visibility.count ? visibility[i] : 1))
-            rows.append(SIMD4(src.rgb, src.blur))
+            rows.append(SIMD4(src.rgb * l.flareBoost, src.blur))
             rows.append(SIMD4(src.faceA.x, src.faceA.y, src.faceB.x, src.faceB.y))
             rows.append(SIMD4(src.face, (src.flare ? 1 : 0) + (src.faceRound ? 2 : 0) + 4 * Float(src.gel)))
         }
@@ -170,7 +186,13 @@ enum Flare {
             for k in 0..<4 where r * 4 + k < s.count { d[k] = s[r * 4 + k].distance }
             rows.append(d)
         }
+        rows.append(leakRow(lens: l, tilt: tilt, seed: Float(seed % 1000)))
         return rows
+    }
+
+    /// Rows as the shaders read them: none, or a shot saved before the leak row, filled out with zeros.
+    static func padded(_ rows: [SIMD4<Float>]) -> [SIMD4<Float>] {
+        rows.count >= rowCount ? rows : rows + [SIMD4<Float>](repeating: .zero, count: rowCount - rows.count)
     }
 
     /// For the visibility probe (flare_probe): pixel, distance along the ray, face radius in pixels.

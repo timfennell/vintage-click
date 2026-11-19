@@ -499,7 +499,7 @@ final class Viewer: NSObject, MTKViewDelegate {
         let seenNow: [Float] = mirrorUp ? [Float](repeating: 0, count: sources.count) : flareVis
         var flareRows = Flare.uniforms(sources, visibility: seenNow, lens: fj.body.lens, fNumber: fj.body.viewingAperture,
                                        filter: fj.body.filter,
-                                       axisUV: fAxis / size, aspect: size.x / size.y)
+                                       axisUV: fAxis / size, aspect: size.x / size.y, tilt: fj.body.tilt)
 
         let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(finderPSO)
@@ -891,8 +891,7 @@ final class Viewer: NSObject, MTKViewDelegate {
             }
             // Number keys: that lens of the mounted lens's collection.
             if let d = s.digit, d >= 1, let shelf = lensCollections.firstIndex(where: { $0.name == body.lens.collection }) {
-                let start = lensCollections.prefix(shelf).reduce(0) { $0 + $1.lenses.count }
-                if d <= lensCollections[shelf].lenses.count { mount(start + d - 1) }
+                if let i = bagIndex(shelf: shelf, choice: d - 1) { mount(i) }
             }
         case .lighting:
             lightingInput(s, dt: dt)
@@ -2305,10 +2304,12 @@ final class Viewer: NSObject, MTKViewDelegate {
         let axis = SIMD2(Float(width), Float(height)) / 2 + b.axisOffset(width: width)
         let s = Flare.sources(plot: plot ?? lighting, view: c.viewMatrix, position: c.position, fx: fx, axis: axis,
                               width: width, height: height, fisheye: b.lens.isFisheye, body: b, fNumber: b.takingAperture)
-        guard !s.isEmpty else { return [] }
+        // A leaky lens needs its leak row even with no lights in the scene.
+        guard !s.isEmpty || b.lens.leak > 0 else { return [] }
         return Flare.uniforms(s, visibility: flareVis.count == s.count ? flareVis : [Float](repeating: 1, count: s.count),
                               lens: b.lens, fNumber: b.takingAperture, filter: b.filter,
-                              axisUV: axis / SIMD2(Float(width), Float(height)), aspect: Float(width) / Float(height))
+                              axisUV: axis / SIMD2(Float(width), Float(height)), aspect: Float(width) / Float(height),
+                              tilt: b.tilt)
     }
 
     // MARK: the enlarger

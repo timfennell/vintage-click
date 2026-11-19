@@ -419,6 +419,55 @@ float3 surround(float2 pos, float2 pe, float edge, device const float* f, consta
     return to_srgb(lin + near * halo * O[5].y);
 }
 
+// ---- light leaks -------------------------------------------------------------
+//
+// A lens held loose in front of the body (lens whacking) lets light in round
+// its back. L = the leak row (Flare.leakRow): (strength, gap direction on the
+// frame, x right and y down, its length how far the gap is open; the seed).
+// What comes in is whatever is bright beside the camera on the gap's side,
+// read from the frame's own edge there, warmed by bouncing round the mount,
+// as a broad wash from that edge with a hotter, wavering band close in. Closed
+// up (no tilt), a faint glow creeps in all round. A faint veil over it all.
+#define FLARE_LEAK_ROW 38
+template <typename S>
+float3 light_leak(S src, float2 p, float2 size, float4 L) {
+    if (L.x <= 0) return 0;
+    float2 uv = p / size - 0.5;
+    float open = length(L.yz), seed = L.w;
+    float2 gn = open > 0.05 ? L.yz / open : float2(0), side = float2(-gn.y, gn.x);
+    float3 E = 0;
+    for (int k = 0; k < 12; k++) {
+        float2 e;
+        if (open > 0.05) {
+            float2 edge = gn * 0.47 / max(abs(gn.x), abs(gn.y));
+            e = clamp(edge + side * ((float(k) + 0.5) / 12 - 0.5) * 0.9, -0.47, 0.47);
+        } else {
+            float a = (float(k) + 0.5) / 12 * 2 * M_PI_F;
+            float2 d = float2(cos(a), sin(a));
+            e = d * 0.47 / max(abs(d.x), abs(d.y));
+        }
+        E += src.at((e + 0.5) * size);
+    }
+    E /= 12;
+    float shape;
+    if (open > 0.05) {
+        // 0 at the gap's edge, 2 at the far one.
+        float x = 1 - dot(uv, gn) / (0.5 / max(abs(gn.x), abs(gn.y)));
+        float sd = dot(uv, side);
+        float wash = exp(-x / 0.35);
+        float x0 = 0.07 + 0.05 * sin(sd * 3.1 + seed);
+        float band = exp(-pow((x - x0) / 0.06, 2.0)) * (0.55 + 0.45 * sin(sd * 4.7 + seed * 2.1));
+        shape = 0.9 * wash + 2.0 * open * band;
+    } else {
+        float x = 1 - 2 * max(abs(uv.x), abs(uv.y));
+        shape = 0.3 * exp(-x / 0.12);
+    }
+    float lum = dot(E, float3(0.2126, 0.7152, 0.0722));
+    // Warm at the band (the red end gets round the mount's lip), paler in the wash.
+    float3 warm = lum * float3(1.0, 0.38, 0.1) / 0.49;
+    return mix(E, warm, 0.85) * L.x * (shape + 0.04);
+}
+
 // ---- lens flare -------------------------------------------------------------
 //
 // From each light that shines into the lens (Flare.swift): ghosts (the
@@ -619,6 +668,22 @@ float3 lens_flare(float2 uv, float2 size, constant float4* F) {
         // The flare's parts only for a light with flare on.
         if (fmod(fb.w, 2.0) < 1.0) continue;
         int gel = clamp(int(fb.w / 4.0), 0, SPEC_GELS - 1);      // its gel: the light's spectrum
+        // A loose lens: a lamp near or just past the frame's edge pours in round
+        // the gap, a warm glow from the edge nearest it, strongest on the open side.
+        float4 LK = F[FLARE_LEAK_ROW];
+        if (LK.x > 0) {
+            float2 c = a.xy - 0.5;
+            float m = max(abs(c.x), abs(c.y));                   // 0.5 at the frame's edge
+            float near = smoothstep(0.25, 0.5, m) * (1 - smoothstep(0.9, 1.1, m));
+            if (near > 0) {
+                float2 dl = c / max(length(c), 1e-4);
+                float align = 0.4 + 0.6 * saturate(dot(dl, LK.yz));
+                float2 ce = clamp(a.xy, 0.0, 1.0) * size;
+                float rl = diag * 0.4;
+                float glow = exp(-length(p - ce) / rl);
+                add += I * float3(1.0, 0.55, 0.25) * (0.02 * LK.x * align * near * glow * npx / (2 * M_PI_F * rl * rl));
+            }
+        }
         // Veiling glare: a broad haze, strongest near the light.
         float rg = diag * 0.35;
         float dg = length(p - s);
@@ -946,6 +1011,19 @@ fragment float4 viewfinder(VOut in [[stage_in]], device const float* f [[buffer(
             float3 fl = (lens_flare(pe / O[0].xy, O[0].xy, FL) + faces) * O[5].y * O[9].rgb * inside;
             outc = float3(lin_to_srgb(srgb_to_lin(outc.r) + fl.r), lin_to_srgb(srgb_to_lin(outc.g) + fl.g),
                           lin_to_srgb(srgb_to_lin(outc.b) + fl.b));
+        }
+    }
+    // A loose lens's light leak, on the screen's image too.
+    if (FL[FLARE_LEAK_ROW].x > 0) {
+        float2 pe = (eyepiece(in.pos.xy, O, EYEPIECE_K) - O[7].xy) / O[7].z;
+        float2 halfSize = O[0].xy * 0.5;
+        float2 dq = abs(pe - halfSize) - (halfSize - O[7].w);
+        float edge = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - O[7].w;
+        float inside = 1 - smoothstep(-1.0, 1.0, edge);
+        if (inside > 0) {
+            float3 lk = light_leak(FrameSource{f, O, float3(1)}, pe, O[0].xy, FL[FLARE_LEAK_ROW]) * O[9].rgb * inside;
+            outc = float3(lin_to_srgb(srgb_to_lin(outc.r) + lk.r), lin_to_srgb(srgb_to_lin(outc.g) + lk.g),
+                          lin_to_srgb(srgb_to_lin(outc.b) + lk.b));
         }
     }
     if (M[2].x > 0) {
@@ -1823,6 +1901,7 @@ static float3 develop_px(device const float4* acc, constant float4* O, constant 
     if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) lin = max(lin + fx[idx(p, O)].rgb * vig, 0.0);
     // Lens flare from the lights shining into the lens, through the filter.
     lin += lens_flare((float2(p) + 0.5) / float2(W, H), float2(W, H), FL) * expo * O[9].rgb;
+    lin += light_leak(AccSource{acc, O, D.rgb * expo * O[9].rgb}, pc, float2(W, H), FL[FLARE_LEAK_ROW]);
     // Halation: light past the film base bouncing back, around bright highlights.
     float3 halo = 0;
     if (F[6].x > 0) {
@@ -1883,6 +1962,7 @@ kernel void negative(device const float4* acc [[buffer(0)]], constant float4* O 
     if (O[10].x > 0 || O[11].x > 0 || O[11].y > 0 || O[11].z > 0) lin = max(lin + fx[idx(p, O)].rgb * vig, 0.0);
     // Lens flare from the lights shining into the lens, through the filter.
     lin += lens_flare((float2(p) + 0.5) / float2(W, H), float2(W, H), FL) * expo * O[9].rgb;
+    lin += light_leak(AccSource{acc, O, D.rgb * expo * O[9].rgb}, pc, float2(W, H), FL[FLARE_LEAK_ROW]);
     if (O[6].z > 0) lin = fisheye_rim(lin, acc, pc, c, D.rgb * expo, O);
     uint i = idx(p, O) * 3;
     out[i] = half(min(lin.r, 60000.0)); out[i + 1] = half(min(lin.g, 60000.0)); out[i + 2] = half(min(lin.b, 60000.0));

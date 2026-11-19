@@ -216,6 +216,7 @@ struct CameraBody: Codable {
     /// The movie camera takes every lens in the bag, on adapters.
     func fits(_ l: Lens) -> Bool { model.isMotion || (model.rangefinder ? l.forRangefinder : l.forReflex) }
     mutating func turnFocus(_ rate: Float, dt: Float) {
+        guard !lens.isPinhole else { return }       // nothing to focus
         focusM = max(lens.minFocusM, min(200, focusM * exp(rate * dt * 1.1)))
     }
     mutating func nextLens() { chooseLens((lensIndex + 1) % lensBag.count) }
@@ -226,7 +227,7 @@ struct CameraBody: Codable {
         lensIndex = index % lensBag.count
         let stops = lens.apertureStops
         apertureIndex = stops.enumerated().min(by: { abs($0.1 - n) < abs($1.1 - n) })!.offset
-        focusM = max(focusM, lens.minFocusM)
+        focusM = lens.isPinhole ? 200 : max(focusM, lens.minFocusM)
         tilt = .zero
         shift = .zero
         // An effect filter cannot go on the back of a fisheye or mirror lens.
@@ -327,11 +328,21 @@ struct CameraBody: Codable {
     /// `axis`: the optical axis in this render's pixels, `fieldRadius`: the
     /// frame's half-diagonal in them, `cell`: the sub-pupil's lens point (scene
     /// units), `patch`: the radius of lens it stands for (aperture radii).
+    /// Where the render focuses, dioptres. A pinhole focuses nowhere: its blur
+    /// is the hole's shadow at every distance, d (1 + f / z) on the film, which
+    /// is the thin lens's d f |1/z - 1/s| with s = -f ("focused" behind the film).
+    var focusDioptres: Float { lens.isPinhole ? -1000 / lens.focalMM : 1 / max(focusM, 0.01) }
+    /// The width of the beam the render spreads each point over, metres: the
+    /// aperture, or for a pinhole whatever matches its blur spot (hole and diffraction).
+    func blurDiameterM(fNumber n: Float) -> Float {
+        lens.isPinhole ? lens.pinholeSpotMM / 1000 : lens.focalMM / 1000 / n
+    }
+
     func lensParams(fNumber n: Float, focalPx: Float, cells: Int, table: [SIMD4<Float>]?,
                     axis: SIMD2<Float>, fieldRadius: Float, cell: SIMD2<Float> = .zero,
                     patch: Float = 0) -> [SIMD4<Float>] {
-        let radiusUnits = lens.focalMM / 1000 / n / 2 / metresPerUnit
-        let invFocus = metresPerUnit / focusM
+        let radiusUnits = blurDiameterM(fNumber: n) / 2 / metresPerUnit
+        let invFocus = metresPerUnit * focusDioptres
         // Blur capped where it would only cost speed (a quarter of the frame height).
         let maxSigma = focalPx * 0.25
         var p: [SIMD4<Float>] = [

@@ -269,8 +269,8 @@ final class RenderLoop {
         let later = slice > 0 ? flakes(t + slice) : nil
         // The sub-pupil's view is moved by its lens point: so are the flakes (as the splats).
         let eyeSub = eye + SIMD3(V[0], V[1], V[2]) * lensOffset.x + SIMD3(V[4], V[5], V[6]) * lensOffset.y
-        let invFocus = mpu / max(b.focusM, 0.01)
-        let aperture = b.lens.focalMM / 1000 / b.takingAperture / 2 / mpu
+        let invFocus = mpu * b.focusDioptres
+        let aperture = b.blurDiameterM(fNumber: b.takingAperture) / 2 / mpu
         let binned = SceneSnow.bin(world, later: later, view: V, eye: eyeSub, fx: fx, cx: cx, cy: cy, width: w, height: h,
                                    invFocus: invFocus, apertureUnits: aperture, blur: blur, t: t)
         return SnowPass(world: world, binned: binned, house: lighting.fogLight * 1.33,
@@ -1335,7 +1335,7 @@ final class RenderLoop {
         let (w, h) = e.size
         let n = b.takingAperture
         let fx = b.focalPixels(width: w, height: h)
-        let radiusUnits = b.lens.focalMM / 1000 / n / 2 / b.metresPerUnit
+        let radiusUnits = b.blurDiameterM(fNumber: n) / 2 / b.metresPerUnit
         let cam = e.camera(forCell: e.next)
         relight(e.lighting, eye: cam.position, body: b, quality: .photo)
         // A movie frame can't take its flare's visibility from the finder (it
@@ -1348,7 +1348,7 @@ final class RenderLoop {
         let channel = b.splitsColour(cells: e.cells.count) ? e.next % 3 : -1
         let c = e.cells[e.next]
         var body = b
-        var dioptres = 1 / b.focusM
+        var dioptres = b.focusDioptres
         if channel >= 0 { dioptres += b.lens.axialCA * Float(1 - channel) }
         // Spherical aberration: rays through the rim of the open aperture focus
         // nearer (a soft-focus glow); it fades as the aperture closes.
@@ -1374,7 +1374,7 @@ final class RenderLoop {
             : (channel == 0 ? [1, 0, 0, 1] : (channel == 1 ? [0, 1, 0, 1] : [0, 0, 1, 1]))
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         // The lamps' faces go onto the film with the scan, behind what hides them.
-        var faceRows = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
+        var faceRows = Flare.padded(e.flare)
         let (tw, th) = finderSize
         let fogRows = e.lighting.fog.map {
             // In the exposure's own scale (a take keeps the one it was set up in).
@@ -1487,7 +1487,7 @@ final class RenderLoop {
             ce.setBuffer(out, offset: 0, index: 4)
             ce.setBuffer(streaks, offset: 0, index: 5)
             ce.setBuffer(fxBuf, offset: 0, index: 6)
-            var fl = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
+            var fl = Flare.padded(e.flare)
             ce.setBytes(&fl, length: fl.count * 16, index: 7)
             ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             if e.wantsNegative, let neg = device.makeBuffer(length: w * h * 6, options: .storageModeShared) {
@@ -1499,7 +1499,7 @@ final class RenderLoop {
                 ce.setBuffer(neg, offset: 0, index: 4)
                 ce.setBuffer(streaks, offset: 0, index: 5)
                 ce.setBuffer(fxBuf, offset: 0, index: 6)
-                var fl = e.flare.isEmpty ? [SIMD4<Float>](repeating: .zero, count: Flare.rowCount) : e.flare
+                var fl = Flare.padded(e.flare)
                 ce.setBytes(&fl, length: fl.count * 16, index: 7)
                 ce.dispatchThreads(grid, threadsPerThreadgroup: tg)
             }

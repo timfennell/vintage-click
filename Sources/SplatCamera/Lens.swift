@@ -48,12 +48,29 @@ struct Lens {
     /// A thin vertical wire across the stop: the share of light it diffracts
     /// into a horizontal streak (the anamorphic-look flare).
     var streak: Float = 0
+    /// Flare multiplier: a lens held loose in front of the body (lens whacking)
+    /// has no barrel or mount shading it, so every ghost and the glare run hot.
+    var flareBoost: Float = 1
+    /// Light leaking in round a loose lens (0 = sealed): a warm wash from the
+    /// frame edge where the gap opens (the side the lens is tilted away from),
+    /// lit by what is bright beside the camera, and lamps just off the frame.
+    var leak: Float = 0
+    /// A pinhole's diameter, mm (0 = a lens): no focusing, everything equally
+    /// soft (the hole's shadow plus its diffraction), no colour fringes.
+    var pinholeMM: Float = 0
     var collection = ""
 
     /// What the lens can do besides focus: tilt its focus plane (degrees) or shift its axis (mm).
     enum Movement { case none, tilt(Float), shift(Float) }
 
     var isFisheye: Bool { projection != .rectilinear }
+    var isPinhole: Bool { pinholeMM > 0 }
+    /// The blur spot a pinhole puts on the film, mm: its own shadow and its
+    /// Airy disc (2.44 lambda N, green light) added in quadrature.
+    var pinholeSpotMM: Float {
+        let airy = 2.44 * 0.00055 * focalMM / max(pinholeMM, 1e-3)
+        return (pinholeMM * pinholeMM + airy * airy).squareRoot()
+    }
     /// A rangefinder lens (the Kwanon f/0.95 was one too); the rest fit the reflexes.
     var forRangefinder: Bool { collection == "Rangefinder" || name.hasPrefix("Kwanon 50mm f/0.95") }
     var forReflex: Bool { collection != "Rangefinder" }
@@ -240,6 +257,32 @@ private let toysAndMods: [Lens] = [
          focalMM: 28, maxAperture: 3.5, minAperture: 22, blades: 7, bladeRotation: 0,
          catsEye: 0.12, soapBubble: 0, vignette: 0.22, minFocusM: 0.3, lateralCA: 0.0014, axialCA: 0.006,
          movement: .shift(11)),
+    // Lens whacking: the lens off the body, held against the mount by hand and
+    // rocked, a tilt with nothing to stop the light coming in round its back.
+    Lens(name: "Ohi Kor 28mm f/2.8 · Whacked", inspiredBy: "the compact 28 off the body, rocked by hand: a wide miniature-world tilt, light pouring in round the gap",
+         focalMM: 28, maxAperture: 2.8, minAperture: 22, blades: 7, bladeRotation: 0.2,
+         catsEye: 0.4, soapBubble: 0, vignette: 0.55, minFocusM: 0.2, lateralCA: 0.002, axialCA: 0.012,
+         sphericalAberration: 0.05, curvatureRadial: 0.3, curvatureTangential: 0.5, movement: .tilt(20),
+         flareBoost: 3.5, leak: 0.8),
+    Lens(name: "Itabashi Takuma 55mm f/1.8 · Whacked", inspiredBy: "the screw-mount kit fifty held loose in front of the mount: the classic freelensing sweet spot, hot flares, warm leaks",
+         focalMM: 55, maxAperture: 1.8, minAperture: 16, blades: 6, bladeRotation: 0,
+         catsEye: 0.6, soapBubble: 0.05, vignette: 0.65, minFocusM: 0.35, lateralCA: 0.0015, axialCA: 0.035,
+         sphericalAberration: 0.08, curvatureRadial: 0.4, curvatureTangential: 0.7, movement: .tilt(16),
+         flareBoost: 4, leak: 1),
+    Lens(name: "Itabashi Takuma 85mm f/1.8 · Whacked", inspiredBy: "the screw-mount portrait 85, freelensed: a thin sliver of focus across a face, the rest a glowing wash",
+         focalMM: 85, maxAperture: 1.8, minAperture: 22, blades: 6, bladeRotation: 0,
+         catsEye: 0.55, soapBubble: 0.05, vignette: 0.6, minFocusM: 0.6, lateralCA: 0.0012, axialCA: 0.04,
+         sphericalAberration: 0.06, curvatureRadial: 0.3, curvatureTangential: 0.5, movement: .tilt(12),
+         flareBoost: 4, leak: 0.9),
+    Lens(name: "Itabashi Takuma 135mm f/3.5 · Whacked", inspiredBy: "the cheap screw-mount 135 rocked off the body: a narrow, dreamy plane and long red leaks",
+         focalMM: 135, maxAperture: 3.5, minAperture: 22, blades: 6, bladeRotation: 0,
+         catsEye: 0.35, soapBubble: 0, vignette: 0.5, minFocusM: 1.0, lateralCA: 0.0012, axialCA: 0.025,
+         curvatureRadial: 0.2, curvatureTangential: 0.3, movement: .tilt(9),
+         flareBoost: 3, leak: 0.8),
+    Lens(name: "Burnside Pinhole Cap 32mm f/128", inspiredBy: "a body cap with a 0.25 mm hole in brass shim: no glass, no focus, everything equally soft, dark corners",
+         focalMM: 32, maxAperture: 128, minAperture: 128, blades: 0, bladeRotation: 0,
+         catsEye: 0, soapBubble: 0, vignette: 0.75, minFocusM: 0.05, lateralCA: 0, axialCA: 0,
+         flareBoost: 0.15, pinholeMM: 0.25),
 ]
 
 let lensCollections: [LensCollection] = [
@@ -248,7 +291,7 @@ let lensCollections: [LensCollection] = [
     LensCollection(name: "Bokeh Monsters", about: "fast glass for melting backgrounds", lenses: bokehMonsters),
     LensCollection(name: "Macro", about: "close focusing, flat field, sharp corners", lenses: macroLenses),
     LensCollection(name: "Exotic", about: "rare vintage and odd optics", lenses: exoticLenses),
-    LensCollection(name: "Toys & Mods", about: "plastic, reversed, bent and shifted: lenses for breaking the rules", lenses: toysAndMods),
+    LensCollection(name: "Toys & Mods", about: "plastic, reversed, bent, shifted, whacked and pinholed: lenses for breaking the rules", lenses: toysAndMods),
     // Last, so the lenses before keep their places (saved shots name them by place).
     LensCollection(name: "Rangefinder", about: "the Lahntal R5's own lenses: small, sharp, quiet", lenses: rangefinderLenses),
 ]
@@ -287,7 +330,25 @@ let rangefinderLenses: [Lens] = [
 ]
 
 /// All of them, collection by collection (a lens's index is its place here).
-let lensBag: [Lens] = lensCollections.flatMap { c in c.lenses.map { var l = $0; l.collection = c.name; return l } }
+/// Lenses added to a shelf after the bag's order was fixed. They go at the
+/// end of the bag, so every lens before keeps its number (takes and saved
+/// shots hold the number); the shelves still show them where they belong.
+private let addedLater: [String] = [
+    "Ohi Kor 28mm f/2.8 · Whacked", "Itabashi Takuma 55mm f/1.8 · Whacked",
+    "Itabashi Takuma 85mm f/1.8 · Whacked", "Itabashi Takuma 135mm f/3.5 · Whacked",
+    "Burnside Pinhole Cap 32mm f/128",
+]
+let lensBag: [Lens] = {
+    let all = lensCollections.flatMap { c in c.lenses.map { var l = $0; l.collection = c.name; return l } }
+    return all.filter { !addedLater.contains($0.name) } + addedLater.compactMap { n in all.first { $0.name == n } }
+}()
+
+/// A shelf's lens's number in the bag.
+func bagIndex(shelf: Int, choice: Int) -> Int? {
+    guard lensCollections.indices.contains(shelf), lensCollections[shelf].lenses.indices.contains(choice) else { return nil }
+    let name = lensCollections[shelf].lenses[choice].name
+    return lensBag.firstIndex { $0.name == name }
+}
 
 /// The shutter dial, in seconds (the marks are the nominal ones).
 let shutterSpeeds: [(label: String, seconds: Float)] = [
